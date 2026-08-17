@@ -251,11 +251,32 @@ def check_robot_state_port(host: str, port: int, *, timeout: float = 1.5) -> Che
 
 
 def check_m2t2(url: str, *, timeout: float = 1.5) -> Check:
+    """Reach the grasp server, or say why the address cannot even be used.
+
+    A malformed URL is reported, never raised. `doctor` is the command you run *because*
+    something is wrong, so a probe that throws takes down the one tool that was going to tell
+    you what to fix — and it hides every check after it.
+    """
     from urllib.parse import urlparse
 
-    parsed = urlparse(url)
-    host = parsed.hostname or "localhost"
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        parsed = urlparse(url)
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        host = parsed.hostname
+    except ValueError as exc:
+        return Check(
+            "m2t2 grasp server", FAIL, f"{url} — {exc}",
+            "That is not a usable address. An unresolved ${oc.env:...} here means an import "
+            "left OmegaConf's own syntax behind; set perception.m2t2.url to a plain URL with "
+            "`tandem profile edit`.",
+            group="hardware",
+        )
+    if not host:
+        return Check(
+            "m2t2 grasp server", FAIL, f"{url or '(empty)'} — no host",
+            "Set perception.m2t2.url to something like http://localhost:8123.",
+            group="hardware",
+        )
     return _check_port(
         "m2t2 grasp server", host, port, timeout, group="hardware",
         hint="Start the M2T2 server; perception asks it for grasps every rollout.",

@@ -38,6 +38,53 @@ NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 STATUSES = ("eval", "success", "failure")
 
+# OmegaConf env interpolations: "${oc.env:VAR}" or "${oc.env:VAR,default}".
+#
+# Not anchored, because they are not always the whole value — the upstream M2T2 URL embeds one
+# mid-string ("http://localhost:${oc.env:TIPTOP_M2T2_PORT,8123}").
+_OC_ENV = re.compile(r"\$\{oc\.env:\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:,\s*([^}]*))?\}")
+
+
+def resolve_interpolation(value: Any) -> Any:
+    """Resolve OmegaConf env interpolations so a profile holds concrete values.
+
+    A profile is meant to be read and edited by a person; a ``${...}`` left in one is a string
+    that looks like configuration and behaves like a crash. Resolution follows OmegaConf's own
+    rule — the environment variable when it is set, otherwise the literal default.
+
+    An interpolation with no default and no variable set has nothing to resolve to, and is left
+    intact so validation can point at it by name.
+    """
+    if not isinstance(value, str):
+        return value
+
+    def replace(match: re.Match) -> str:
+        import os
+
+        name, default = match.group(1), match.group(2)
+        env = os.environ.get(name)
+        if env is not None and env.strip():
+            return env.strip()
+        if default is not None:
+            return default.strip()
+        return match.group(0)
+
+    return _OC_ENV.sub(replace, value.strip())
+
+
+def _resolve_all(obj):
+    """Every string in a nested structure, dereferenced.
+
+    Applied when a profile is READ, not only when one is imported: profiles written before
+    the importer learned about embedded interpolations still have them on disk, and a stored
+    `${...}` should not stop the tool from opening the file that contains it.
+    """
+    if isinstance(obj, dict):
+        return {k: _resolve_all(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_resolve_all(v) for v in obj]
+    return resolve_interpolation(obj)
+
 _yaml = YAML()
 _yaml.preserve_quotes = True
 _yaml.width = 100
@@ -169,6 +216,26 @@ class M2T2Spec(BaseModel):
 
     url: str = "http://localhost:8123"
     apply_bounds: bool = True
+
+    @field_validator("url")
+    @classmethod
+    def _parseable(cls, v: str) -> str:
+        """Reject a URL that cannot be parsed, where the field name is still in hand.
+
+        An import used to leave OmegaConf's ``${oc.env:TIPTOP_M2T2_PORT,8123}`` in here, and
+        the first thing to notice was urlparse raising several layers away, inside the
+        diagnostic command you run *because* something is wrong.
+        """
+        from urllib.parse import urlparse
+
+        try:
+            parsed = urlparse(v)
+            parsed.port  # noqa: B018 — raises when the port is not an integer
+        except ValueError as exc:
+            raise ValueError(f"{v!r} is not a usable URL: {exc}") from exc
+        if not parsed.scheme or not parsed.hostname:
+            raise ValueError(f"{v!r} needs a scheme and a host, e.g. http://localhost:8123")
+        return v
 
 
 class PerceptionSpec(BaseModel):
@@ -486,7 +553,7 @@ def load_file(path: Path, *, name: str | None = None) -> Profile:
         raise
     except Exception as exc:
         raise ProfileError(f"{path} is not valid YAML: {exc}") from exc
-    data = _plain(data)
+    data = _resolve_all(_plain(data))
     if name is not None:
         data.setdefault("name", name)
         if data.get("name") != name:

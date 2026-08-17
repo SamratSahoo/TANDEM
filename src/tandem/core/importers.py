@@ -9,28 +9,19 @@ them into a single profile so an existing rig is one command away from working.
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any
 
 from ruamel.yaml import YAML
 
 from tandem.core.errors import TandemError
-from tandem.core.profiles import Profile, validate_tamp
+from tandem.core.profiles import Profile, resolve_interpolation, validate_tamp
+
+# The same dereferencing a profile does when it is read, so an imported value and a stored
+# one can never disagree about what ${oc.env:...} means.
+_deref = resolve_interpolation
 
 _yaml = YAML(typ="safe")
-
-# OmegaConf interpolations like "${oc.env:TIPTOP_HAND_CAMERA_ID,14846828}" — take the default.
-_OC_ENV = re.compile(r"^\$\{oc\.env:[^,}]+,\s*([^}]*)\}$")
-
-
-def _deref(value: Any) -> Any:
-    if isinstance(value, str):
-        match = _OC_ENV.match(value.strip())
-        if match:
-            return match.group(1).strip()
-    return value
-
 
 def _load_yaml(path: Path) -> dict:
     try:
@@ -190,8 +181,8 @@ def _merge_tiptop_config(data: dict, raw: dict) -> None:
         target = data.setdefault("perception", {})
         m2t2 = perc.get("m2t2") or {}
         if m2t2:
-            # The upstream URL embeds ${oc.env:TIPTOP_M2T2_PORT,8123}; _deref keeps the
-            # literal default, which is what a concrete profile wants.
+            # The upstream URL embeds ${oc.env:TIPTOP_M2T2_PORT,8123} mid-string, which is
+            # exactly the case _deref has to handle.
             target["m2t2"] = {
                 "url": str(_deref(m2t2.get("url", "http://localhost:8123"))),
                 "apply_bounds": bool(m2t2.get("apply_bounds", True)),
