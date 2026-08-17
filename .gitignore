@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.so
+.DS_Store
+
+# Vendored trees keep their sources but never their build artifacts / VCS metadata.
+src/tandem/_vendor/**/.git/
+src/tandem/_vendor/**/.pixi/
+src/tandem/_vendor/**/*.egg-info/
+src/tandem/_vendor/curobo/src/curobo/curobolib/*.so
+src/tandem/_vendor/curobo/src/curobo/curobolib/.build_fingerprint
+
+# Local scratch
+scratch/

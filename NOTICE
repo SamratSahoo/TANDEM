@@ -1,0 +1,64 @@
+tandem — third-party notices
+============================
+
+tandem's own code is MIT licensed (see LICENSE). It ships three third-party planner
+components under `src/tandem/_vendor/`, each with its original LICENSE file intact.
+
+Read this before redistributing tandem or using it commercially.
+
+
+cuRobo  —  src/tandem/_vendor/curobo
+------------------------------------
+Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+Licensed under the **NVIDIA License** (see src/tandem/_vendor/curobo/LICENSE).
+Upstream: https://github.com/SamratSahoo/curobo (a fork of https://github.com/NVlabs/curobo)
+
+cuTAMP  —  src/tandem/_vendor/cuTAMP
+------------------------------------
+Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+Licensed under the **NVIDIA License** (see src/tandem/_vendor/cuTAMP/LICENSE).
+Upstream: https://github.com/SamratSahoo/cuTAMP
+
+TiPToP  —  src/tandem/_vendor/tiptop
+------------------------------------
+Copyright (c) 2025 TiPToP Contributors.
+Licensed under the **MIT License** (see src/tandem/_vendor/tiptop/LICENSE).
+Upstream: https://github.com/LJ1356/tiptop
+
+lerobot_v3.py  —  src/tandem/export/lerobot_v3.py
+-------------------------------------------------
+Adapted from the tamp-vla project's LeRobot v3.0 dataset writer.
+
+
+What the NVIDIA License means for you
+-------------------------------------
+Both cuRobo and cuTAMP are under NVIDIA's source-available license, not an open-source
+license. Two clauses matter here:
+
+  §3.1 Redistribution — you may redistribute the Work only under this same license, with
+       a complete copy of it included and all copyright/attribution notices retained.
+
+  §3.3 Use Limitation — "The Work and any derivative works thereof only may be used or
+       intended for use non-commercially", where non-commercial means research or
+       evaluation purposes only.
+
+So: **tandem as distributed is for research and evaluation use only**, because the planner
+it vendors is. Installing it, running it, and publishing results from it are all fine. Using
+it in a commercial product is not, without a separate license from NVIDIA.
+
+If you need a distribution that is not subject to those terms, build tandem with the
+vendored planner excluded and fetch it at install time instead:
+
+    python tools/vendor.py --source <checkout>      # for local development only
+    # then exclude src/tandem/_vendor/{curobo,cuTAMP} from the wheel
+
+The exact pinned commits tandem vendors are recorded in
+`src/tandem/_vendor/VENDOR.toml`, along with the paths trimmed from each tree and the
+patches applied to it (`tools/patches/`).
+
+
+Python dependencies
+-------------------
+tandem's runtime dependencies (typer, rich, pydantic, ruamel.yaml, numpy, platformdirs,
+tomlkit, fastapi, uvicorn) and its optional extras (av, pyarrow, huggingface_hub,
+rerun-sdk) are installed from PyPI under their own licenses and are not redistributed here.

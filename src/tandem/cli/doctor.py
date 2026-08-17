@@ -1,0 +1,195 @@
+"""`tandem doctor` — is everything tandem needs present and working?"""
+
+from __future__ import annotations
+
+import json
+
+import typer
+
+from tandem.cli import theme
+from tandem.core import probe, profiles, render
+from tandem.core import runtime as runtime_mod
+from tandem.core import settings as settings_mod
+from tandem.core.errors import ProfileError
+
+GROUP_TITLES = {
+    "core": "environment",
+    "runtime": "runtime",
+    "gpu": "gpu",
+    "credentials": "credentials",
+    "hardware": "hardware",
+    "profile": "profile",
+}
+
+
+def collect_checks(*, profile_name: str | None = None, probe_hardware: bool = True) -> list[probe.Check]:
+    cfg = settings_mod.load()
+    checks: list[probe.Check] = [probe.check_python(), probe.check_platform()]
+
+    runtime = runtime_mod.Runtime(cfg.resolved_runtime_dir())
+    status = runtime.status()
+    checks.append(probe.check_disk(cfg.resolved_runtime_dir()))
+    checks.append(probe.check_pixi())
+    checks.append(probe.check_ffmpeg())
+
+    if status.ready:
+        detail = f"ready at {runtime.root}"
+        if status.built_at:
+            detail += f"  · built {status.built_at}"
+        checks.append(probe.Check("gpu runtime", probe.OK, detail, group="runtime"))
+    else:
+        checks.append(
+            probe.Check(
+                "gpu runtime",
+                probe.WARN,
+                "; ".join(status.problems or ["not built"]),
+                "Run `tandem init` (or `tandem runtime build`). Not needed to visualize trajectories.",
+                group="runtime",
+            )
+        )
+
+    checks.append(probe.check_nvidia_driver())
+    checks.append(probe.check_cuda_runtime())
+    checks.append(probe.check_nvcc())
+
+    # A missing key blocks collection, but on a machine that cannot collect anyway it is only
+    # worth a note — a visualization-only install should not report a failure it cannot act on.
+    gemini = probe.check_gemini_key()
+    if gemini.state == probe.FAIL and not status.ready:
+        gemini.state = probe.WARN
+        gemini.detail = "not set (only needed to collect)"
+    checks.append(gemini)
+
+    # Profile-specific checks: the settings that decide whether a session can even start.
+    try:
+        profile = profiles.load(profile_name)
+    except ProfileError as exc:
+        checks.append(
+            probe.Check("profile", probe.FAIL, exc.message.split("\n")[0], exc.hint or "", group="profile")
+        )
+        return checks
+
+    checks.append(probe.Check("profile", probe.OK, f"{profile.name} · {profile.robot.type}", group="profile"))
+
+    configured = profile.cameras.configured()
+    missing = profiles.missing_calibration(profile)
+    if not configured:
+        checks.append(
+            probe.Check(
+                "cameras",
+                probe.SKIP,
+                "none configured — this profile can be browsed but not collected into",
+                group="profile",
+            )
+        )
+    elif missing:
+        checks.append(
+            probe.Check(
+                "camera calibration",
+                probe.FAIL,
+                f"no extrinsics for {', '.join(missing)}",
+                f"Extrinsics are keyed by serial. Add them to {profile.calibration_file()}.",
+                group="profile",
+            )
+        )
+    else:
+        checks.append(
+            probe.Check(
+                "camera calibration",
+                probe.OK,
+                f"{len(configured)} camera(s) calibrated",
+                group="profile",
+            )
+        )
+
+    warnings = render.check_assets(profile, runtime_dir=cfg.resolved_runtime_dir())
+    # missing-calibration is already its own row above; do not say it twice.
+    warnings = [w for w in warnings if not w.startswith("no camera extrinsics")]
+    for warning in warnings:
+        checks.append(probe.Check("tamp settings", probe.WARN, warning, group="profile"))
+    if not warnings:
+        n = len(profile.tamp)
+        checks.append(
+            probe.Check(
+                "tamp settings",
+                probe.OK,
+                f"{n} override(s)" if n else "stock settings",
+                group="profile",
+            )
+        )
+
+    if probe_hardware:
+        checks.append(probe.check_zed_sdk())
+        checks.append(probe.check_robot(profile.robot.host, profile.robot.port))
+        checks.append(probe.check_robot_state_port(profile.robot.host, profile.robot.state_port))
+        checks.append(probe.check_m2t2(profile.perception.m2t2.url))
+
+    return checks
+
+
+def doctor(
+    profile_name: str = typer.Option(None, "--profile", "-p", help="Check this profile instead of the active one."),
+    as_json: bool = typer.Option(False, "--json", help="Machine-readable output."),
+    skip_hardware: bool = typer.Option(
+        False, "--no-hardware", help="Skip the robot / camera / grasp-server probes."
+    ),
+) -> None:
+    """Every check says what it found and, when something is wrong, what to do about it."""
+    checks = collect_checks(profile_name=profile_name, probe_hardware=not skip_hardware)
+
+    if as_json:
+        payload = {
+            "checks": [c.to_dict() for c in checks],
+            "summary": _summary(checks),
+        }
+        typer.echo(json.dumps(payload, indent=2))
+        raise typer.Exit(0 if not _summary(checks)["fail"] else 1)
+
+    theme.blank()
+    for group in ("core", "runtime", "gpu", "credentials", "profile", "hardware"):
+        rows = [c for c in checks if c.group == group]
+        if not rows:
+            continue
+        theme.heading(GROUP_TITLES.get(group, group))
+        table = theme.table("", "", "", box_style="none")
+        table.columns[0].width = 3
+        table.columns[1].style = "default"
+        table.columns[1].width = 22
+        table.columns[2].style = "faint"
+        for check in rows:
+            table.add_row(theme.status_glyph(check.state), check.name, check.detail)
+        theme.console().print(table)
+        theme.blank()
+
+    problems = [c for c in checks if c.state in (probe.FAIL, probe.WARN) and c.hint]
+    if problems:
+        theme.rule("what to do")
+        for check in problems:
+            glyph = theme.FAIL if check.state == probe.FAIL else theme.WARN
+            style = "err" if check.state == probe.FAIL else "warn"
+            theme.console().print(f"  [{style}]{glyph}[/{style}] [bold]{check.name}[/bold]")
+            theme.console().print(f"    [faint]{check.hint}[/faint]")
+        theme.blank()
+
+    counts = _summary(checks)
+    runtime_ready = any(c.name == "gpu runtime" and c.state == probe.OK for c in checks)
+
+    if counts["fail"]:
+        theme.fail(f"{counts['fail']} check(s) failed", f"{counts['warn']} warning(s)")
+        raise typer.Exit(1)
+    if counts["warn"]:
+        note = (
+            "collection may still work — see above"
+            if runtime_ready
+            else "visualization is ready; collection needs the items above"
+        )
+        theme.warn(f"{counts['warn']} warning(s)", note)
+    else:
+        theme.ok("Everything checks out")
+
+
+def _summary(checks: list[probe.Check]) -> dict[str, int]:
+    out = {"ok": 0, "warn": 0, "fail": 0, "skip": 0}
+    for check in checks:
+        out[check.state] = out.get(check.state, 0) + 1
+    return out
