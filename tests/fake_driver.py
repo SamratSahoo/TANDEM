@@ -34,6 +34,21 @@ class Preempt(Exception):
     pass
 
 
+def read_command() -> str:
+    """One line from stdin, exiting the process on EOF.
+
+    Every read goes through here. `readline()` returns "" forever once the pipe is closed —
+    which happens the moment whatever launched us dies — so a loop that treats "" as
+    unrecognised input spins at full speed. One did, and it wrote a 63 GB events file before
+    anyone noticed. The real driver reads with input(), which raises EOFError and unwinds; this
+    is the equivalent.
+    """
+    line = sys.stdin.readline()
+    if line == "":
+        raise SystemExit(0)
+    return line.strip()
+
+
 def _on_sigint(_signum, _frame):
     global _preempted
     _preempted = True
@@ -65,10 +80,7 @@ def main() -> int:
 
     counter = 0
     while True:
-        line = sys.stdin.readline()
-        if not line:
-            break
-        command = line.strip()
+        command = read_command()
 
         if command == "q":
             break
@@ -110,7 +122,7 @@ def main() -> int:
                 emit("rollout_saved", dir=str(rollout), n_frames=42)
                 emit("awaiting_label", dir=str(rollout))
 
-                verdict = sys.stdin.readline().strip()
+                verdict = read_command()
                 success = verdict == "y"
                 final = output_dir / ("success" if success else "failure") / stamp
                 final.parent.mkdir(parents=True, exist_ok=True)
@@ -146,7 +158,7 @@ def _run_human_phase(hitl: dict) -> bool:
             phase_index=1,
             n_phases=2,
         )
-        answer = sys.stdin.readline().strip().lower()
+        answer = read_command().lower()
 
         if _teleop_requested:
             # "Switch to teleop" at the prompt: hand the arm over, then treat it as done.
@@ -186,8 +198,7 @@ def _run_human_phase(hitl: dict) -> bool:
 def _wait_for_resume() -> None:
     global _teleop_requested
     while True:
-        line = sys.stdin.readline()
-        if not line or line.strip() == "resume":
+        if read_command() == "resume":
             _teleop_requested = False
             return
 

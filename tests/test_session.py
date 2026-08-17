@@ -199,6 +199,27 @@ def test_manager_refuses_a_second_session_for_a_profile(profile, tmp_path, monke
         first.wait(timeout=5)
 
 
+def test_the_driver_exits_when_its_input_closes(profile, tmp_path, monkeypatch):
+    """A driver whose launcher dies must stop, not spin.
+
+    readline() returns "" forever once the pipe is closed, so a prompt loop that treats that
+    as unrecognised input runs at full speed. One did, and wrote a 63 GB events file before
+    anyone noticed. The real driver reads with input(), which raises EOFError.
+    """
+    monkeypatch.setattr(secrets, "gemini_api_key", lambda: "test-key")
+    session = Session(profile, FakeRuntime(tmp_path / "rt"))
+    session.start()
+    assert wait_for(lambda: session.state is State.AWAITING_TASK)
+
+    session._proc.stdin.close()
+    assert session.wait(timeout=10) is not None, "the driver kept running after stdin closed"
+
+    events = Path(session.summary()["events_file"])
+    settled = events.stat().st_size
+    time.sleep(0.5)
+    assert events.stat().st_size == settled, "the events file is still growing"
+
+
 def test_missing_gemini_key_is_caught_before_spawning(profile, tmp_path, monkeypatch):
     monkeypatch.setattr(secrets, "gemini_api_key", lambda: None)
     session = Session(profile, FakeRuntime(tmp_path / "rt"))
