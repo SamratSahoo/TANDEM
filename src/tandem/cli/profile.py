@@ -156,6 +156,28 @@ def show(
             tamp_table.add_row(f"[key]{key}[/key]", _render(overrides[key]))
         theme.console().print(tamp_table)
 
+    theme.blank()
+    if profile.hitl.enabled:
+        theme.heading("phase planning", "on — the task is split into robot and human steps")
+        theme.kv(
+            [
+                ("proposal model", profile.hitl.proposal_model),
+                ("verification model", profile.hitl.vlm_model),
+                ("retries", f"{profile.hitl.verify_retries} extra attempt(s) at a step that does not verify"),
+                (
+                    "on failure",
+                    "the rollout fails" if profile.hitl.verify_enforced else "recorded, and the run carries on",
+                ),
+                ("vlm audit trail", profile.hitl.save_vlm_io),
+            ]
+        )
+    else:
+        theme.heading("phase planning", "off")
+        theme.info(
+            "the task is one planner goal; hand the arm over yourself when you need to",
+            "set hitl.enabled to let a model split it into steps",
+        )
+
     warnings = render.check_assets(profile, runtime_dir=cfg.resolved_runtime_dir())
     if warnings:
         theme.blank()

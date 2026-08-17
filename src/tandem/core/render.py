@@ -130,6 +130,34 @@ def write_tamp_overrides(profile: Profile, dest: Path, *, runtime_dir: Path | No
     return dest
 
 
+def render_hitl_config(profile: Profile) -> dict:
+    """The `hitl` block handed to ``tiptop-run --hitl-config``.
+
+    Emitted whole rather than sparsely: the reader rejects unknown keys loudly (unlike the
+    cost overrides, which drop them silently), so sending every field is safe and makes the
+    JSON on disk a complete record of what the run was configured with.
+    """
+    data = profile.hitl.model_dump(mode="python")
+    if data.get("cache_path"):
+        # A relative cache path means "beside the profile", the same rule the checkpoint paths
+        # follow — not "wherever the driver happened to be started from".
+        data["cache_path"] = str(_resolve_asset(profile, str(data["cache_path"]), "cache_path", None))
+    return data
+
+
+def write_hitl_config(profile: Profile, dest: Path) -> Path | None:
+    """Write the HITL JSON, or return None when phase planning is off.
+
+    Returning None matters: with no --hitl-config the driver never imports the package at all,
+    so a disabled run is not merely a run that skips the feature.
+    """
+    if not profile.hitl.enabled:
+        return None
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(json.dumps(render_hitl_config(profile), indent=2, sort_keys=True) + "\n")
+    return dest
+
+
 def check_assets(profile: Profile, *, runtime_dir: Path | None = None) -> list[str]:
     """Problems that would only surface minutes into a warmed session. Cheap to check now.
 
@@ -256,6 +284,7 @@ def prepare_session_files(profile: Profile, session_id: str, *, runtime_dir: Pat
 
     config_file = write_tiptop_config(profile, _session_config_path(profile))
     overrides_file = write_tamp_overrides(profile, session_dir / "curobo-overrides.json", runtime_dir=runtime_dir)
+    hitl_file = write_hitl_config(profile, session_dir / "hitl-config.json")
 
     events_file = session_dir / "events.jsonl"
     # Pre-create so the tailer can attach before the child writes its first line.
@@ -272,4 +301,5 @@ def prepare_session_files(profile: Profile, session_id: str, *, runtime_dir: Pat
         "events_file": events_file,
         "config_file": config_file,
         "overrides_file": overrides_file,
+        "hitl_file": hitl_file,
     }

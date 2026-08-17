@@ -38,6 +38,11 @@ CAMERA_LABELS = {
 PLAN_FILE = "tiptop_plan.json"
 STATE_FILE = "robot_state.npz"
 META_FILE = "_meta.json"
+# Written when phase planning is on: the phases, the predicates the VLM invented, per-clause
+# coverage, and every verification verdict. `vlm/` beside it holds each image sent and a
+# rendered PNG of the reply, rejected attempts included.
+HITL_FILE = "hitl.json"
+VLM_DIR = "vlm"
 
 
 @dataclass
@@ -62,6 +67,11 @@ class Trajectory:
     recorded_at: float | None = None
     size_bytes: int = 0
     meta: dict[str, Any] = field(default_factory=dict)
+    # Phase planning, when it was on for this rollout.
+    has_hitl: bool = False
+    n_phases: int = 0
+    n_human_phases: int = 0
+    has_vlm_log: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -84,6 +94,10 @@ class Trajectory:
             "merged": bool(self.segments and len(self.segments) > 1),
             "recorded_at": self.recorded_at,
             "size_bytes": self.size_bytes,
+            "has_hitl": self.has_hitl,
+            "n_phases": self.n_phases,
+            "n_human_phases": self.n_human_phases,
+            "has_vlm_log": self.has_vlm_log,
         }
 
 
@@ -153,6 +167,9 @@ def read(traj_dir: Path, *, profile_name: str = "", status: str = "", with_size:
     # A merged hand-off trajectory carries its legs' boundaries; an ordinary rollout has none.
     segments = meta.get("segments") if meta.get("video_aligned") else None
 
+    hitl = read_hitl(traj_dir)
+    phases = hitl.get("phases") or [] if hitl else []
+
     return Trajectory(
         id=traj_dir.name,
         profile=profile_name,
@@ -173,6 +190,10 @@ def read(traj_dir: Path, *, profile_name: str = "", status: str = "", with_size:
         recorded_at=_as_float(meta.get("record_start")),
         size_bytes=_dir_size(traj_dir) if with_size else 0,
         meta=meta,
+        has_hitl=bool(hitl),
+        n_phases=len(phases),
+        n_human_phases=sum(1 for p in phases if isinstance(p, dict) and p.get("executor") == "human"),
+        has_vlm_log=(traj_dir / VLM_DIR).is_dir(),
     )
 
 
@@ -297,6 +318,24 @@ def media_path(traj: Trajectory, filename: str) -> Path:
     if not candidate.is_file():
         raise TandemError(f"{filename} is not in {traj.path.name}.")
     return candidate
+
+
+def read_hitl(traj_dir: Path) -> dict:
+    """The phase plan recorded with a rollout, or {} when phase planning was off.
+
+    Holds what was asked of the robot and of the person, the predicates the VLM invented to
+    describe the human's part, which clauses of the instruction each phase covered, and every
+    verification verdict — which together are what make a HITL episode auditable after the
+    fact rather than a video someone has to re-watch.
+    """
+    path = traj_dir / HITL_FILE
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+    except (ValueError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def plan(traj: Trajectory) -> dict | None:

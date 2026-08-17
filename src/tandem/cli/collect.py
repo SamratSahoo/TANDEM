@@ -79,6 +79,11 @@ def collect(
     )
     if profile.tamp:
         theme.info(f"{len(profile.tamp)} TAMP override(s) active", "tandem profile show --tamp")
+    if profile.hitl.enabled:
+        theme.info(
+            "phase planning is on",
+            f"{profile.hitl.proposal_model} splits the task into robot and human steps",
+        )
     theme.blank()
     theme.warn(
         "A preempt stops further plan steps, not the arm.",
@@ -148,6 +153,8 @@ def _run_dashboard(session, profile) -> None:
                     note("[accent]Enter repeats the task   n = new task   q = finish[/accent]")
                 elif session.state is State.TELEOP_HANDOFF:
                     note("[violet]The arm is yours. Press r to return control to TAMP.[/violet]")
+                elif session.state is State.AWAITING_HUMAN_PHASE:
+                    note("[violet]The plan needs you for this step — see below.[/violet]")
 
         live.update(_render(session, profile, logs, status_note))
 
@@ -155,6 +162,23 @@ def _run_dashboard(session, profile) -> None:
 def _handle_key(key: str, session, keys: KeyReader, note, live) -> bool:
     """Returns False to leave the loop."""
     state = session.state
+
+    if state is State.AWAITING_HUMAN_PHASE:
+        # A human phase has its own answers; the labeling keys would be ambiguous here.
+        if key == "d":
+            session.complete_human_phase()
+            note("Checking that the step was done…")
+        elif key == "t":
+            session.request_teleop()
+            note("[violet]Taking the arm — the driver hands it over from this prompt[/violet]")
+        elif key == "a":
+            session.abort_human_phase()
+            note("[warn]Phase abandoned[/warn]")
+        elif key == "q":
+            return False
+        elif key == "\x03":
+            return False
+        return True
 
     if key in ("s", "y") and state is State.AWAITING_LABEL:
         session.label(True)
@@ -210,14 +234,30 @@ def _render(session, profile, logs: deque[str], status_note: dict) -> Panel:
     counts.append(f"   elapsed {_hms(elapsed)}", style="faint")
     header.add_row("", counts)
 
+    progress = summary.get("phase_progress")
+    if progress:
+        header.add_row("phase", Text(f"{progress[0]} of {progress[1]}", style="violet"))
     if summary.get("handoff_error"):
         header.add_row("", Text(summary["handoff_error"], style="warn"))
+    for clause in summary.get("unrepresented") or []:
+        header.add_row(
+            "",
+            Text(
+                f"not covered by the plan: {clause.get('clause') or clause}",
+                style="warn",
+            ),
+        )
     if status_note["text"] and time.time() - status_note["at"] < 12:
         header.add_row("", Text.from_markup(status_note["text"]))
 
     log_panel = Group(*(Text.from_markup(line) for line in logs)) if logs else Text("…", style="faint")
 
-    body = Group(header, Text(""), log_panel, Text(""), _footer(state, summary))
+    parts = [header, Text("")]
+    phase_panel = _human_phase_panel(summary.get("human_phase"))
+    if phase_panel is not None:
+        parts += [phase_panel, Text("")]
+    parts += [log_panel, Text(""), _footer(state, summary)]
+    body = Group(*parts)
     return Panel(
         body,
         title=Text.from_markup(f"[accent]tandem[/accent] [faint]· collect ·[/faint] [bold]{profile.name}[/bold]"),
@@ -225,6 +265,50 @@ def _render(session, profile, logs: deque[str], status_note: dict) -> Panel:
         subtitle=Text(str(profile.trajectories_dir()), style="faint"),
         subtitle_align="right",
         border_style="faint",
+        padding=(1, 2),
+    )
+
+
+def _human_phase_panel(phase: dict | None) -> Panel | None:
+    """What the person is being asked to do, and what will be checked afterwards.
+
+    The expectations are shown because they are exactly the list the model is about to be
+    asked about — being checked against a standard you were not told is the fastest way to
+    make an operator distrust the whole thing.
+    """
+    if not phase:
+        return None
+
+    lines = Table.grid(padding=(0, 1))
+    lines.add_column()
+
+    title = phase.get("description") or "Your turn"
+    if phase.get("total"):
+        title = f"{title}   [faint]step {phase['index'] + 1} of {phase['total']}[/faint]"
+    lines.add_row(Text.from_markup(f"[bold violet]{title}[/bold violet]"))
+
+    if phase.get("instructions"):
+        lines.add_row(Text(phase["instructions"]))
+
+    if phase.get("expected"):
+        lines.add_row(Text(""))
+        lines.add_row(Text("When you are done, this should be true:", style="faint"))
+        for item in phase["expected"]:
+            lines.add_row(Text(f"  · {item}", style="muted"))
+
+    if phase.get("missing"):
+        lines.add_row(Text(""))
+        lines.add_row(Text("That did not look done. Still expected:", style="warn"))
+        for item in phase["missing"]:
+            lines.add_row(Text(f"  · {item}", style="warn"))
+    if phase.get("attempt", 1) > 1:
+        lines.add_row(Text(f"attempt {phase['attempt']}", style="faint"))
+
+    return Panel(
+        lines,
+        title=Text(" your turn ", style="violet"),
+        title_align="left",
+        border_style="violet",
         padding=(1, 2),
     )
 
@@ -251,6 +335,8 @@ def _pipeline(state: State) -> Text:
         out = Text("◐ ", style="violet") + Text("handing the arm over…", style="bold violet")
     elif state is State.TELEOP_HANDOFF:
         out = Text("● ", style="violet") + Text("human has the arm", style="bold violet")
+    elif state is State.AWAITING_HUMAN_PHASE:
+        out = Text("◐ ", style="violet") + Text("waiting on you", style="bold violet")
     elif state is State.QUITTING:
         out = Text("◐ ", style="warn") + Text("finishing — parking the arm", style="warn")
     elif state is State.FAILED:
@@ -260,6 +346,12 @@ def _pipeline(state: State) -> Text:
 
 def _footer(state: State, summary: dict) -> Text:
     keys: list[tuple[str, str]] = []
+    if state is State.AWAITING_HUMAN_PHASE:
+        keys = [("d", "I did it")]
+        if summary.get("teleop_available"):
+            keys.append(("t", "take the arm"))
+        keys += [("a", "give up on this task"), ("q", "finish")]
+        return _keys_text(keys)
     if state is State.AWAITING_LABEL:
         keys += [("s", "success"), ("f", "failure")]
     elif state is State.AWAITING_TASK:
@@ -271,7 +363,10 @@ def _footer(state: State, summary: dict) -> Text:
     elif summary.get("teleop_available") and summary.get("can_preempt"):
         keys.append(("t", "hand to human"))
     keys.append(("q", "finish"))
+    return _keys_text(keys)
 
+
+def _keys_text(keys: list[tuple[str, str]]) -> Text:
     out = Text()
     for i, (key, label) in enumerate(keys):
         if i:

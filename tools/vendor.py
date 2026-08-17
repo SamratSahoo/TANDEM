@@ -71,6 +71,20 @@ EXTRA_FILES = [
 # submodule whose working tree may not be checked out, so it is read from its git dir.
 SUBMODULES = {"tiptop": ".git/modules/tiptop", "cuTAMP": ".git/modules/cuTAMP", "curobo": ".git/modules/curobo"}
 
+# Which ref each component is vendored from. Named here rather than taken from whatever the
+# checkout's HEAD happens to be: which branch the planner comes from decides what tandem can
+# do, so it belongs in the source, under review, next to the trim list.
+#
+# tiptop tracks feat/hitl-phase-planning because that is where the phase-planning HITL lives —
+# a VLM splits the instruction into robot and human phases, hands the human ones over as teleop
+# legs with written instructions, and checks from a photo that they happened. `main` has only
+# the operator-pressed hand-off.
+REFS = {
+    "tiptop": "origin/feat/hitl-phase-planning",
+    "cuTAMP": "HEAD",
+    "curobo": "HEAD",
+}
+
 PATCHES = REPO / "tools" / "patches"
 
 # Which component each patch applies to, by filename prefix.
@@ -98,11 +112,18 @@ def resolve_git_dir(source: Path, component: str) -> tuple[Path, list[str]]:
     raise SystemExit(f"Cannot find git history for {component} under {source}")
 
 
-def export(source: Path, component: str, dest: Path) -> dict:
+def export(source: Path, component: str, dest: Path, ref: str) -> dict:
     cwd, extra = resolve_git_dir(source, component)
-    commit = git([*extra, "rev-parse", "HEAD"], cwd)
+    try:
+        commit = git([*extra, "rev-parse", ref], cwd)
+    except SystemExit:
+        raise SystemExit(
+            f"{component}: no ref {ref!r} in {source}. Fetch it first "
+            f"(git -C {source} submodule foreach git fetch --all), or pass --ref {component}=<ref>."
+        ) from None
     url = git([*extra, "config", "--get", "remote.origin.url"], cwd) or ""
-    described = git([*extra, "describe", "--tags", "--always"], cwd)
+    described = git([*extra, "describe", "--tags", "--always", commit], cwd)
+    print(f"  {component}: {ref} -> {commit[:12]}")
 
     if dest.exists():
         shutil.rmtree(dest)
@@ -110,7 +131,7 @@ def export(source: Path, component: str, dest: Path) -> dict:
 
     with tempfile.NamedTemporaryFile(suffix=".tar") as archive:
         subprocess.run(
-            ["git", *extra, "archive", "--format=tar", "-o", archive.name, "HEAD"],
+            ["git", *extra, "archive", "--format=tar", "-o", archive.name, commit],
             cwd=cwd, check=True,
         )
         with tarfile.open(archive.name) as tar:
@@ -138,6 +159,7 @@ def export(source: Path, component: str, dest: Path) -> dict:
         "commit": commit,
         "url": url,
         "version": described,
+        "ref": ref,
         "trimmed": [relative for relative, _ in dropped],
         "patches": patches,
         "bytes": kept,
@@ -186,7 +208,35 @@ def copy_extras(source: Path) -> list[str]:
     return copied
 
 
+def read_manifest() -> dict:
+    """The manifest as it stands, so a partial re-vendor keeps the other components' entries."""
+    path = VENDOR / "VENDOR.toml"
+    if not path.is_file():
+        return {}
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # py3.10
+        try:
+            import tomli as tomllib  # type: ignore
+        except ModuleNotFoundError:
+            return {}
+    try:
+        return tomllib.loads(path.read_text())
+    except Exception:
+        return {}
+
+
 def write_manifest(entries: dict, extras: list[str]) -> None:
+    # Re-vendoring one component must not erase the provenance of the others. Losing that is
+    # not cosmetic: two of the three trees are under a licence that governs redistribution,
+    # and the commit is the only record of which planner a build actually contains.
+    existing = read_manifest()
+    merged = {name: meta for name, meta in existing.items() if name in TRIM}
+    merged.update(entries)
+    entries = {name: merged[name] for name in TRIM if name in merged}
+    if not extras:
+        extras = list((existing.get("checkpoints") or {}).get("files") or [])
+
     lines = [
         "# Provenance for the vendored planner sources.",
         "#",
@@ -202,6 +252,7 @@ def write_manifest(entries: dict, extras: list[str]) -> None:
         lines.append(f'url = "{meta["url"]}"')
         lines.append(f'commit = "{meta["commit"]}"')
         lines.append(f'version = "{meta["version"]}"')
+        lines.append(f'ref = "{meta.get("ref", "")}"')
         lines.append(f"bytes = {meta['bytes']}")
         trimmed = ", ".join(f'"{t}"' for t in meta["trimmed"])
         lines.append(f"trimmed = [{trimmed}]")
@@ -219,7 +270,20 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--source", required=True, type=Path, help="Path to a hitl-tamp-vla checkout")
     parser.add_argument("--component", action="append", choices=list(TRIM), help="Only re-vendor these")
+    parser.add_argument(
+        "--ref", action="append", default=[], metavar="COMPONENT=REF",
+        help=f"Override the ref for one component. Defaults: {REFS}",
+    )
     args = parser.parse_args()
+
+    refs = dict(REFS)
+    for override in args.ref:
+        if "=" not in override:
+            raise SystemExit(f"--ref wants COMPONENT=REF, got {override!r}")
+        component, _, ref = override.partition("=")
+        if component not in TRIM:
+            raise SystemExit(f"unknown component {component!r}; one of {sorted(TRIM)}")
+        refs[component] = ref
 
     source = args.source.expanduser().resolve()
     if not source.is_dir():
@@ -231,7 +295,7 @@ def main() -> int:
     print(f"Vendoring from {source}")
     entries = {}
     for component in components:
-        entries[component] = export(source, component, VENDOR / component)
+        entries[component] = export(source, component, VENDOR / component, refs[component])
 
     extras = copy_extras(source)
     write_manifest(entries, extras)

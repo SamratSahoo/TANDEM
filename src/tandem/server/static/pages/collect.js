@@ -13,6 +13,8 @@ const PIPELINE = [
   ["next", ["awaiting_task"]],
 ];
 
+const HANDOVER_STATES = new Set(["handing_off", "teleop_handoff", "awaiting_human_phase"]);
+
 const TERMINAL = new Set(["stopped", "failed"]);
 
 export function renderCollect(host, state) {
@@ -20,23 +22,22 @@ export function renderCollect(host, state) {
     mount(host, h("div.empty", h("div.big", "◈"), h("div", "No profile yet.")));
     return;
   }
-  if (!state.runtimeReady) {
-    mount(host, notReady());
-    return;
-  }
-
   const shell = h("div.stack");
   mount(host, shell);
 
+  // A live session is shown whatever the runtime probe says. The readiness gate exists to stop
+  // you STARTING a session; hiding one that is already running would leave an operator with no
+  // controls while the arm is still moving.
   api.sessions()
     .then((payload) => {
       const live = (payload.sessions || []).find(
         (session) => session.profile === state.profile && !TERMINAL.has(session.state)
       );
       if (live) attachSession(shell, state, live);
+      else if (!state.runtimeReady) mount(shell, notReady());
       else mount(shell, startForm(shell, state));
     })
-    .catch(() => mount(shell, startForm(shell, state)));
+    .catch(() => mount(shell, state.runtimeReady ? startForm(shell, state) : notReady()));
 }
 
 function notReady() {
@@ -109,6 +110,7 @@ function attachSession(shell, state, initial) {
   const statHost = h("div.row.wrap", { style: { gap: "18px" } });
   const actionHost = h("div.row.wrap", { style: { gap: "8px" } });
   const noticeHost = h("div");
+  const phaseHost = h("div");
   const reviewHost = h("div");
   const logHost = h("div.logs");
 
@@ -124,6 +126,7 @@ function attachSession(shell, state, initial) {
         h("span.faint.small", { id: "sess-id" }, summary.id)),
       pipelineHost, h("div", { style: { height: "12px" } }), statHost,
       h("div", { style: { height: "14px" } }), noticeHost, actionHost),
+    phaseHost,
     reviewHost,
     h("div.card", h("div.card-title", "Driver output"), logHost));
 
@@ -141,6 +144,7 @@ function attachSession(shell, state, initial) {
     renderPipeline(pipelineHost, summary.state);
     renderStats(statHost, summary);
     renderNotice(noticeHost, summary);
+    renderPhase(phaseHost, summary);
     renderActions(actionHost, summary, state, { onEnded: () => renderCollect(shell.parentElement, state) });
     maybeShowReview();
   }
@@ -186,22 +190,22 @@ function attachSession(shell, state, initial) {
     }
   });
 
-  api.session(summary.id).then((payload) => {
-    summary = payload;
-    clear(logHost);
-    for (const line of payload.logs || []) appendLog(line);
-    paint();
-  }).catch(() => paint());
-
+  // No separate snapshot fetch. The stream already opens with a state frame and the recent
+  // log history, so asking for the same thing over HTTP as well raced it: whichever arrived
+  // second appended a second copy of every line the two had in common.
   paint();
 }
 
 function renderPipeline(host, state) {
   clear(host);
-  if (state === "handing_off" || state === "teleop_handoff") {
+  if (HANDOVER_STATES.has(state)) {
+    const label = {
+      handing_off: "handing the arm over…",
+      teleop_handoff: "the human has the arm",
+      awaiting_human_phase: "waiting on you",
+    }[state];
     host.appendChild(h("div.step.now",
-      h("span.pd", { style: { background: "var(--violet)" } }),
-      state === "handing_off" ? "handing the arm over…" : "the human has the arm"));
+      h("span.pd", { style: { background: "var(--violet)" } }), label));
     return;
   }
   let reached = false;
@@ -219,6 +223,9 @@ function renderStats(host, summary) {
     stat(String(summary.success || 0), "success", "var(--green)"),
     stat(String((summary.labeled || 0) - (summary.success || 0)), "failure", "var(--red)"),
     stat(`${summary.labeled || 0}/${summary.target || "—"}`, "labeled"),
+    summary.phase_progress
+      ? stat(`${summary.phase_progress[0]}/${summary.phase_progress[1]}`, "phases", "var(--violet)")
+      : null,
     stat(fmtDuration(elapsed), "elapsed"),
     h("div.spacer"),
     h("span.chip" + (TERMINAL.has(summary.state) ? "" : ".accent"), summary.state.replace(/_/g, " ")));
@@ -228,6 +235,77 @@ function stat(value, label, color) {
   return h("div",
     h("div", { style: { fontSize: "20px", fontWeight: 700, color: color || "var(--text)" } }, value),
     h("div.faint.small", label));
+}
+
+/**
+ * The step the plan says only a person can do.
+ *
+ * The expectations are shown because they are the same list the model is about to be asked
+ * about — being judged against a standard you were never told is the fastest way to make an
+ * operator stop trusting the verification.
+ */
+function renderPhase(host, summary) {
+  const phase = summary.human_phase;
+  if (!phase) {
+    clear(host);
+    return;
+  }
+
+  const id = summary.id;
+  const act = (fn, failure) => async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      await fn();
+    } catch (error) {
+      reportError(error, failure);
+      button.disabled = false;
+    }
+  };
+
+  const heading = phase.total
+    ? `${phase.description} — step ${phase.index + 1} of ${phase.total}`
+    : phase.description || "Your turn";
+
+  mount(host,
+    h("div.card", { style: { borderColor: "var(--violet)" } },
+      h("div.card-head",
+        h("div.card-title", h("span.chip.violet", "your turn"), " ", heading),
+        phase.attempt > 1 ? h("span.chip.eval", `attempt ${phase.attempt}`) : null),
+
+      phase.instructions ? h("div", { style: { fontSize: "15px", marginBottom: "14px" } }, phase.instructions) : null,
+
+      phase.missing && phase.missing.length
+        ? h("div.alert", { style: { marginBottom: "14px" } },
+            h("div", { style: { fontWeight: 650, marginBottom: "6px" } },
+              "That did not look done. Still expected:"),
+            h("ul", { style: { margin: 0, paddingLeft: "18px" } },
+              ...phase.missing.map((item) => h("li", item))))
+        : null,
+
+      phase.expected && phase.expected.length
+        ? h("div", { style: { marginBottom: "16px" } },
+            h("div.faint.small", { style: { marginBottom: "4px" } }, "When you are done, this should be true:"),
+            h("ul.muted.small", { style: { margin: 0, paddingLeft: "18px" } },
+              ...phase.expected.map((item) => h("li", item))))
+        : null,
+
+      h("div.row.wrap", { style: { gap: "8px" } },
+        summary.teleop_available
+          ? h("button.violet.big", {
+              title: "Take the arm through the teleop rig, then hand it back.",
+              onclick: act(() => api.teleopSwitch(id), "Could not take the arm"),
+            }, "Take the arm")
+          : null,
+        h("button.primary.big", {
+          title: "You did it by hand. The plan checks a photo before carrying on.",
+          onclick: act(() => api.humanPhaseDone(id), "Could not complete the phase"),
+        }, "✔ I did it"),
+        h("div.spacer"),
+        h("button.ghost", {
+          title: "Give up on this step, and with it this attempt at the task.",
+          onclick: act(() => api.humanPhaseAbort(id), "Could not abort the phase"),
+        }, "Give up on this task"))));
 }
 
 function renderNotice(host, summary) {
@@ -246,6 +324,16 @@ function renderNotice(host, summary) {
     host.appendChild(h("div.alert",
       "Finishing the current plan step, then releasing the robot and cameras. Camera teardown takes about 15 seconds."));
   }
+
+  // The plan covers less than the instruction asked for. Worth saying loudly: every later
+  // phase is planned against this, and the episode is labeled with the whole instruction.
+  for (const clause of summary.unrepresented || []) {
+    host.appendChild(h("div.alert", { style: { marginTop: "8px" } },
+      h("strong", "Not covered by the plan: "),
+      clause.clause || JSON.stringify(clause),
+      clause.reason ? h("div.small", { style: { marginTop: "4px" } }, clause.reason) : null));
+  }
+
   if (host.childElementCount) host.appendChild(h("div", { style: { height: "12px" } }));
 }
 

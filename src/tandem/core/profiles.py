@@ -189,6 +189,62 @@ class PerceptionSpec(BaseModel):
     mask_erosion_pixels: int = 3
 
 
+class HitlSpec(BaseModel):
+    """Phase planning — the deep human-in-the-loop mode.
+
+    With this on, a VLM breaks the instruction into an ORDERED list of phases, each one either
+    a sub-goal for the planner or something only a person can do. It invents the predicate it
+    needs to describe the human's part, hands that phase over with written instructions, and
+    checks from a photo that it happened.
+
+    That ordering runs both ways, which is why phases rather than one final-state goal: "put
+    the toy on the cloth, then fold it" needs the human last, "open the box, then put the toy
+    in" needs the robot last, and some tasks need an intermediate state no final-state goal
+    can express.
+
+    Off by default. Disabled, the package is never imported and a session behaves exactly as
+    it always has — the operator can still press "hand to human" whenever they like.
+
+    Mirrors tiptop.hitl.config.HITLConfig; keep the two in step.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    enabled: bool = False
+    # Splitting a task into phases and inventing a predicate is reasoning, not localisation, so
+    # it does NOT reuse the detection model — that one runs with thinking disabled.
+    proposal_model: str = "gemini-2.5-pro"
+    # Grounding ("is the cloth folded?") is one visual judgement over one image, and it is the
+    # query a run pays for repeatedly. Flash is enough.
+    vlm_model: str = "gemini-2.5-flash"
+    # Reprompts allowed when a proposal comes back unparseable. The error is fed back to the
+    # model, which is what makes a second attempt worth making.
+    max_attempts: int = 3
+    # Classify the invented predicates on the first image, before anything runs. Off by
+    # default: a human is asked precisely because the predicate is false. Worth turning on for
+    # a scene that may start already solved.
+    classify_initial: bool = False
+    # Extra chances at a human phase the VLM says did not happen.
+    verify_retries: int = 1
+    # Treat a failed verification as a rollout failure. False records the verdict and carries
+    # on, which is what you want while calibrating the classifier prompts.
+    verify_enforced: bool = True
+    # Write every image sent to the VLM and a rendered PNG of the reply into vlm/ beside the
+    # rollout. When a run goes wrong the question is always "what did the model see, and what
+    # did it say", and that is unanswerable afterwards without this.
+    save_vlm_io: bool = True
+    # SQLite cache for PROPOSAL responses only. Worth setting while iterating on prompts;
+    # never applied to grounding or verification.
+    cache_path: str | None = None
+
+    @field_validator("verify_retries", "max_attempts")
+    @classmethod
+    def _non_negative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("must be >= 0")
+        return v
+
+
 class RecordingSpec(BaseModel):
     model_config = {"extra": "forbid"}
 
@@ -217,6 +273,9 @@ class Profile(BaseModel):
     perception: PerceptionSpec = Field(default_factory=PerceptionSpec)
     # Flat, using tiptop's own key names -- see tandem/core/tamp_keys.py for why.
     tamp: dict[str, Any] = Field(default_factory=dict)
+    # Deliberately NOT part of `tamp`: that dict is a solver-cost funnel read by a hand-written
+    # if-ladder, and this changes what a dataset CONTAINS rather than how the arm moves.
+    hitl: HitlSpec = Field(default_factory=HitlSpec)
     recording: RecordingSpec = Field(default_factory=RecordingSpec)
     export: ExportSpec = Field(default_factory=ExportSpec)
 

@@ -56,6 +56,44 @@ restart.
 | **Hand off** | Take the arm mid-task. The planner parks at a plan-step boundary, releases the robot and cameras, and waits. When you hand back, it replans the *same* task from wherever you left the arm — no homing, no dropped object. All the legs merge into **one** trajectory. |
 | **Label** | Mark the rollout success or failure while watching the video of it. |
 
+### Phase planning
+
+The loop above still leaves the human's part *outside* the system: you have to notice the
+planner cannot fold a cloth, carve that clause out of the instruction by hand, and remember to
+press the button. Nothing knows your part was ever part of the task, and nothing checks it
+happened.
+
+Turn on `hitl.enabled` and a VLM does that carving itself. It breaks the instruction into an
+**ordered list of phases** — each one either a sub-goal for the planner or something only a
+person can do — invents the predicate it needs to describe your part, hands that phase over
+with written instructions, and verifies from a photo that you did it.
+
+```
+   "put the toy on the cloth, then fold it"
+                    │
+        ┌───────────┴────────────┐
+        ▼                        ▼
+   phase 1  robot            phase 2  human
+   On(toy, cloth)            Folded(cloth)
+   → cuTAMP plans it         → "Fold the near edge of the cloth
+                                over the toy so it is covered."
+                             → checked from a photo afterwards
+```
+
+Phases rather than one final-state goal because **the ordering runs both ways**: that task
+needs the human last, "open the box, then put the toy in" needs the robot last, and some tasks
+need an intermediate state no final-state goal can express at all.
+
+If the check says it did not happen you are told what is still missing and given another go,
+rather than losing the demonstration to one bad classifier call. Every rollout drops a
+`hitl.json` — the phases, the invented predicates, which clauses of the instruction each phase
+covered, and every verdict — plus a `vlm/` folder holding each image sent to the model and a
+rendered PNG of what it said, rejected attempts included. When a run goes wrong the question is
+always "what did the model see, and what did it decide", and that is unanswerable afterwards
+without it.
+
+Off by default, and disabled the package is never even imported.
+
 ---
 
 ## Install
@@ -212,6 +250,16 @@ system tandem is extracted from, a config shipped `blend_ops: [Pick, MoveFree. M
 — one typo'd period — and the planner silently ignored the whole list for months. A setting
 that quietly does nothing is the one failure mode that looks exactly like success.
 
+Phase planning is configured separately, because it changes what a dataset *contains* rather
+than how the arm moves:
+
+```yaml
+hitl:
+  enabled: true
+  verify_retries: 1        # extra goes at a step the check says did not happen
+  verify_enforced: true    # false records the verdict and carries on
+```
+
 ```console
 $ tandem profile show fold-cloth --tamp
 ◆ planner overrides  passed as --curobo-overrides
@@ -253,7 +301,9 @@ trajectories/success/2026-08-16_21-14-02/
 ├── external_cam.mp4  external_cam_2.mp4  hand_cam.mp4
 ├── tiptop_plan.json        the TAMP plan that was executed
 ├── robot_state.npz         the per-frame arrays below
-└── _meta.json              instruction, fps, timestamps, lineage
+├── _meta.json              instruction, fps, timestamps, lineage
+├── hitl.json               the phase plan and its verdicts   (phase planning only)
+└── vlm/                    every image sent to the model, and what it said
 ```
 
 | array | shape | what it is |
@@ -376,8 +426,9 @@ python tools/vendor.py --source /path/to/hitl-tamp-vla
 
 Built on work by others:
 
-- **[TiPToP](https://github.com/LJ1356/tiptop)** — the real-robot TAMP pipeline. MIT.
-  William Shen, Nishanth Kumar, and contributors.
+- **[TiPToP](https://github.com/LJ1356/tiptop)** — the real-robot TAMP pipeline, and the
+  `tiptop.hitl` phase planner behind the phase mode above. Vendored from the
+  `feat/hitl-phase-planning` branch. MIT. William Shen, Nishanth Kumar, and contributors.
 - **[cuTAMP](https://github.com/SamratSahoo/cuTAMP)** — GPU-parallel task-and-motion planning.
   NVIDIA License.
 - **[cuRobo](https://github.com/NVlabs/curobo)** — GPU motion generation and collision-aware IK.

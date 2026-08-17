@@ -67,6 +67,8 @@ export const api = {
   forceStop: (id) => request("POST", `/sessions/${id}/force-stop`),
   teleopSwitch: (id) => request("POST", `/sessions/${id}/teleop-switch`),
   teleopResume: (id) => request("POST", `/sessions/${id}/teleop-resume`),
+  humanPhaseDone: (id) => request("POST", `/sessions/${id}/human-phase/done`),
+  humanPhaseAbort: (id) => request("POST", `/sessions/${id}/human-phase/abort`),
 
   // ---- settings
   settings: () => request("GET", "/settings"),

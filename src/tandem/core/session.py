@@ -66,6 +66,9 @@ class State(str, Enum):
     AWAITING_LABEL = "awaiting_label"
     LABELING = "labeling"
     AWAITING_TASK = "awaiting_task"
+    # Phase planning reached a step only a person can do. The driver is blocked on a prompt
+    # showing what to do and what will be checked afterwards.
+    AWAITING_HUMAN_PHASE = "awaiting_human_phase"
     HANDING_OFF = "handing_off"
     TELEOP_HANDOFF = "teleop_handoff"
     QUITTING = "quitting"
@@ -87,6 +90,36 @@ class LogLine:
 
     def to_dict(self) -> dict:
         return {"stream": self.stream, "text": self.text, "at": self.at}
+
+
+@dataclass
+class HumanPhase:
+    """A step of the task the plan says only a person can do.
+
+    `instructions` is what the operator is shown; `expected` is what the VLM will be asked
+    about afterwards — the same list, so nobody is checked against a hidden standard.
+    """
+
+    description: str
+    instructions: str
+    expected: list[str] = field(default_factory=list)
+    index: int = 0
+    total: int = 0
+    attempt: int = 1
+    verified: bool | None = None
+    missing: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "description": self.description,
+            "instructions": self.instructions,
+            "expected": self.expected,
+            "index": self.index,
+            "total": self.total,
+            "attempt": self.attempt,
+            "verified": self.verified,
+            "missing": self.missing,
+        }
 
 
 @dataclass
@@ -145,6 +178,14 @@ class Session:
         self.teleop_pending = False
         self.handoff_error: str | None = None
 
+        # Phase planning. `human_phase` is set only while the driver is blocked waiting for a
+        # person; `phase_progress` survives across the legs of one task so the operator can see
+        # how far through it is.
+        self.hitl_enabled = profile.hitl.enabled
+        self.human_phase: HumanPhase | None = None
+        self.phase_progress: tuple[int, int] | None = None
+        self.unrepresented: list[dict] = []
+
         self._proc: subprocess.Popen | None = None
         self._pgid: int | None = None
         self._tailer: events_mod.EventTailer | None = None
@@ -199,6 +240,9 @@ class Session:
         overrides = self._files.get("overrides_file")
         if overrides is not None:
             args += ["--curobo-overrides", str(overrides)]
+        hitl = self._files.get("hitl_file")
+        if hitl is not None:
+            args += ["--hitl-config", str(hitl)]
 
         cmd = self.runtime.command(args)
         self._log("tandem", "$ " + " ".join(cmd))
@@ -270,6 +314,26 @@ class Session:
         # episodes of the same thing wants.
         self._write(text)
         self._set_state(State.ROLLING)
+
+    def complete_human_phase(self) -> None:
+        """Tell the driver the human step is done, so it can check and carry on.
+
+        This is the "I did it by hand" answer. Taking the arm through the teleop rig instead
+        is `request_teleop()`, which the driver honours immediately at this prompt rather than
+        waiting for a plan-step boundary that will never come.
+        """
+        self._require(State.AWAITING_HUMAN_PHASE, "complete a human phase")
+        self._write("done")
+
+    def abort_human_phase(self) -> None:
+        """Give up on this phase, abandoning the task attempt.
+
+        Distinct from a preempt: it is the answer the prompt asks for, so the driver tears the
+        phase plan down deliberately and says why, rather than unwinding from a signal.
+        """
+        self._require(State.AWAITING_HUMAN_PHASE, "abort a human phase")
+        self._write("abort")
+        self.human_phase = None
 
     def preempt(self) -> None:
         """Abort the rollout in flight, keeping the session warm.
@@ -513,6 +577,52 @@ class Session:
                 self.current = None
                 self._set_state(State.AWAITING_TASK, locked=True)
 
+            elif name == "awaiting_human_phase":
+                # Re-emitted on every retry, so a repeat means the check said it did not happen
+                # and the operator is being given another go.
+                previous = self.human_phase
+                description = str(event.payload.get("description") or "")
+                attempt = (
+                    previous.attempt + 1
+                    if previous is not None and previous.description == description
+                    else 1
+                )
+                self.human_phase = HumanPhase(
+                    description=description,
+                    instructions=str(event.payload.get("instructions") or ""),
+                    expected=[str(x) for x in (event.payload.get("expected") or [])],
+                    index=int(event.payload.get("phase_index") or (previous.index if previous else 0)),
+                    total=int(event.payload.get("n_phases") or (previous.total if previous else 0)),
+                    attempt=attempt,
+                    missing=previous.missing if previous is not None and attempt > 1 else [],
+                )
+                self._set_state(State.AWAITING_HUMAN_PHASE, locked=True)
+
+            elif name == "human_phase_verified":
+                ok = bool(event.payload.get("ok"))
+                verdicts = event.payload.get("verdicts") or []
+                if self.human_phase is not None:
+                    self.human_phase.verified = ok
+                    self.human_phase.missing = _missing_from(verdicts)
+                if ok:
+                    self.human_phase = None
+
+            elif name == "hitl_phase_complete":
+                # A robot phase finished with more phases to go. The driver stays in the same
+                # trajectory rather than returning to the task prompt, so no awaiting_task
+                # follows -- the next rollout_start belongs to the same attempt.
+                index = event.payload.get("phase_index")
+                total = event.payload.get("n_phases")
+                if index is not None and total is not None:
+                    self.phase_progress = (int(index), int(total))
+                self.current = None
+
+            elif name == "hitl_instruction_not_fully_represented":
+                # The plan covers less than the instruction asked for. Worth surfacing loudly:
+                # every later phase is planned against this, and the dataset will be labeled
+                # with the whole instruction regardless.
+                self.unrepresented = [dict(u) for u in (event.payload.get("unrepresented") or [])]
+
             elif name == "teleop_switch_pending":
                 self.teleop_pending = True
                 self._set_state(State.HANDING_OFF, locked=True)
@@ -646,6 +756,10 @@ class Session:
                 "handoff_error": self.handoff_error,
                 "can_preempt": self.state not in TERMINAL and self.state not in NO_PREEMPT,
                 "events_file": str(self._files.get("events_file", "")),
+                "hitl_enabled": self.hitl_enabled,
+                "human_phase": self.human_phase.to_dict() if self.human_phase else None,
+                "phase_progress": list(self.phase_progress) if self.phase_progress else None,
+                "unrepresented": self.unrepresented,
             }
 
     @property
@@ -838,6 +952,25 @@ def manager() -> SessionManager:
     if _manager is None:
         _manager = SessionManager()
     return _manager
+
+
+def _missing_from(verdicts: Iterable[dict]) -> list[str]:
+    """What a failed verification says is still expected.
+
+    Mirrors the driver's own `missing_statements`: the statements that should hold and do not,
+    already phrased for a person. The `reason` is appended when the model gave one, because
+    "the cloth is not folded" is much less useful than knowing it saw a corner sticking out.
+    """
+    missing = []
+    for verdict in verdicts:
+        if not isinstance(verdict, dict) or verdict.get("holds", True):
+            continue
+        statement = str(verdict.get("statement") or verdict.get("atom") or "").strip()
+        if not statement:
+            continue
+        reason = str(verdict.get("reason") or "").strip()
+        missing.append(f"{statement} — {reason}" if reason else statement)
+    return missing
 
 
 def _trajectory_id_of(directory: Path) -> str | None:

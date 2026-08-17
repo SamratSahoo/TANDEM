@@ -169,3 +169,19 @@ async def teleop_resume(session_id: str) -> dict:
     session = session_mod.manager().get(session_id)
     session.resume_from_teleop()
     return session.summary()
+
+
+@router.post("/sessions/{session_id}/human-phase/done")
+async def human_phase_done(session_id: str) -> dict:
+    """The person did the step by hand. The driver checks it from a photo before carrying on."""
+    session = session_mod.manager().get(session_id)
+    session.complete_human_phase()
+    return session.summary()
+
+
+@router.post("/sessions/{session_id}/human-phase/abort")
+async def human_phase_abort(session_id: str) -> dict:
+    """Give up on this phase, and with it the task attempt."""
+    session = session_mod.manager().get(session_id)
+    session.abort_human_phase()
+    return session.summary()

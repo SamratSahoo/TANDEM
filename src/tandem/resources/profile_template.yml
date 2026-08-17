@@ -108,6 +108,52 @@ tamp:
   # grasp's EE orientation and the arm's initial one. Absent or 0 disables it.
   grasp_pose_change_weight: 0.1
 
+# ─────────────────────────────────────────────────────────────────────────────────────────
+#  Phase planning  —  the deep human-in-the-loop mode
+#
+#  Off by default. Turned on, a VLM breaks the instruction into an ORDERED list of phases,
+#  each one either a sub-goal for the planner or something only a person can do. It invents
+#  the predicate it needs to describe the human's part, hands that phase over with written
+#  instructions, and checks from a photo that it happened.
+#
+#  Phases rather than one final-state goal because the ordering runs both ways: "put the toy
+#  on the cloth, then fold it" needs the human last, "open the box, then put the toy in"
+#  needs the robot last, and some tasks need an intermediate state no final-state goal can
+#  express at all.
+#
+#  Each rollout then drops a hitl.json (the phases, the invented predicates, per-clause
+#  coverage and every verification verdict) and a vlm/ folder holding each image sent to the
+#  model and a rendered PNG of what it answered — rejected attempts included.
+#
+#  Disabled, none of this is even imported and a session behaves exactly as it always has;
+#  you can still hand the arm over yourself whenever you like.
+# ─────────────────────────────────────────────────────────────────────────────────────────
+hitl:
+  enabled: false
+  # Splitting a task and inventing a predicate is reasoning, not localisation, so this is a
+  # general model with thinking left on — not the detection model perception uses.
+  proposal_model: gemini-2.5-pro
+  # Grounding ("is the cloth folded?") is one visual judgement over one image, and it is the
+  # query a run pays for repeatedly.
+  vlm_model: gemini-2.5-flash
+  # Reprompts allowed when a proposal comes back unparseable. The error is fed back to the
+  # model, which is what makes a second attempt worth making.
+  max_attempts: 3
+  # Classify the invented predicates on the first image, before anything runs. Off by
+  # default: a human is asked precisely because the predicate is false. Worth turning on for
+  # a scene that may start already solved.
+  classify_initial: false
+  # Extra chances at a human phase the check says did not happen. A demonstration should not
+  # be thrown away because one classifier call went the wrong way.
+  verify_retries: 1
+  # Treat a failed check as a rollout failure. Set false while calibrating the classifier
+  # prompts: the verdict is still recorded, the run just carries on.
+  verify_enforced: true
+  save_vlm_io: true
+  # SQLite cache for proposals only, useful while iterating on prompts. Never applied to
+  # grounding or verification.
+  cache_path: null
+
 # recording: whether camera video is captured during execution, and at what rate.
 recording:
   enabled: true

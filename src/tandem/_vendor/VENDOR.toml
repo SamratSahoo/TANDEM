@@ -8,9 +8,10 @@
 
 [tiptop]
 url = "https://github.com/LJ1356/tiptop.git"
-commit = "367cf1ac142e03747b3f7728f4868ad1d5873480"
-version = "367cf1a"
-bytes = 5630123
+commit = "f2293f7227dd37e3e8281938465ad9d4ae3e7a64"
+version = "f2293f7"
+ref = "origin/feat/hitl-phase-planning"
+bytes = 5780792
 trimmed = ["docs/_static", "docs/blogs", ".github"]
 patches = ["0001-tiptop-config-from-env.patch", "0002-tiptop-optional-realsense.patch"]
 
@@ -18,6 +19,7 @@ patches = ["0001-tiptop-config-from-env.patch", "0002-tiptop-optional-realsense.
 url = "https://github.com/SamratSahoo/cuTAMP.git"
 commit = "732cab5545279b5c8e0cb2e352d28f175a932ce1"
 version = "732cab5"
+ref = "HEAD"
 bytes = 6993056
 trimmed = ["cutamp/robots/assets/yam_description", "docs"]
 patches = []
@@ -26,6 +28,7 @@ patches = []
 url = "https://github.com/SamratSahoo/curobo.git"
 commit = "bc1559a3706590d24879544a8802b55655b382f7"
 version = "bc1559a"
+ref = "HEAD"
 bytes = 43817048
 trimmed = ["src/curobo/content/assets/robot/techman", "src/curobo/content/assets/robot/iiwa_allegro_description", "src/curobo/content/assets/robot/jaco", "src/curobo/content/assets/robot/kinova", "src/curobo/content/assets/scene/nvblox", "images", "benchmark", "docker", ".github"]
 patches = []

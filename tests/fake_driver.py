@@ -53,6 +53,12 @@ def main() -> int:
     output_dir = Path(args[args.index("--output-dir") + 1]) if "--output-dir" in args else Path(".")
     task = os.environ.get("TIPTOP_TASK", "")
 
+    # Phase planning is opt-in through --hitl-config, exactly as upstream: with the flag
+    # absent the package is never imported and a run behaves as it always has.
+    hitl = None
+    if "--hitl-config" in args:
+        hitl = json.loads(Path(args[args.index("--hitl-config") + 1]).read_text())
+
     emit("session_start")
     print(f"warming up for task: {task}", flush=True)
     emit("awaiting_task")
@@ -94,6 +100,11 @@ def main() -> int:
                     emit("teleop_handoff_done")
                     break
             else:
+                if hitl and hitl.get("enabled"):
+                    if not _run_human_phase(hitl):
+                        emit("awaiting_task")
+                        continue
+
                 rollout.mkdir(parents=True, exist_ok=True)
                 (rollout / "_meta.json").write_text(json.dumps({"instruction": task, "n_frames": 42}))
                 emit("rollout_saved", dir=str(rollout), n_frames=42)
@@ -113,6 +124,63 @@ def main() -> int:
 
     emit("session_end")
     return 0
+
+
+def _run_human_phase(hitl: dict) -> bool:
+    """One human phase: ask, then verify. Returns False when the operator gave up.
+
+    Mirrors the real prompt's vocabulary — 'done' / 'abort', with SIGUSR1 handing the arm over
+    from the prompt itself rather than at a plan-step boundary that will never arrive here.
+    """
+    attempts_left = int(hitl.get("verify_retries", 1))
+    # The first attempt fails verification when the config leaves retries available, so the
+    # retry path is exercised rather than merely present.
+    verify_ok = attempts_left <= 0
+
+    while True:
+        emit(
+            "awaiting_human_phase",
+            description="fold the cloth over the toy",
+            instructions="Fold the near edge of the cloth over the toy so the toy is covered.",
+            expected=["the cloth is folded over the toy"],
+            phase_index=1,
+            n_phases=2,
+        )
+        answer = sys.stdin.readline().strip().lower()
+
+        if _teleop_requested:
+            # "Switch to teleop" at the prompt: hand the arm over, then treat it as done.
+            emit("teleop_handoff_start")
+            emit("awaiting_teleop_resume")
+            _wait_for_resume()
+            emit("teleop_handoff_done")
+            answer = "done"
+
+        if answer in ("abort", "skip", "n", "no"):
+            return False
+        if answer in ("q", "exit", "quit"):
+            raise SystemExit(0)
+        if answer not in ("done", "y", "yes"):
+            continue
+
+        emit(
+            "human_phase_verified",
+            description="fold the cloth over the toy",
+            ok=verify_ok,
+            verdicts=[{
+                "atom": "Folded(cloth)",
+                "statement": "the cloth is folded over the toy",
+                "holds": verify_ok,
+                "reason": "" if verify_ok else "a corner of the toy is still visible",
+            }],
+        )
+        if verify_ok:
+            emit("hitl_phase_complete", phase_index=1, n_phases=2, message="phase 1 of 2 done")
+            return True
+        if attempts_left <= 0:
+            return False
+        attempts_left -= 1
+        verify_ok = True
 
 
 def _wait_for_resume() -> None:
