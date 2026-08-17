@@ -20,13 +20,24 @@ def ui(
     host: str = typer.Option(None, "--host", help="Address to bind."),
     no_open: bool = typer.Option(False, "--no-open", help="Do not open a browser."),
     profile_name: str = typer.Option(None, "--profile", help="Profile to open on."),
-    reload: bool = typer.Option(False, "--reload", hidden=True, help="Auto-reload (development)."),
 ) -> None:
     """Browse profiles, play the camera videos, inspect the plots, and run collection.
 
     Works with no GPU, no robot and no cameras — everything except starting a session is
     pure file reading, so this is the command to run on a laptop.
     """
+    serve(port=port, host=host, open_browser=not no_open, profile_name=profile_name)
+
+
+def serve(
+    *,
+    port: int | None = None,
+    host: str | None = None,
+    open_browser: bool = True,
+    profile_name: str | None = None,
+) -> None:
+    """Serve the UI. Kept separate from the Typer command so other commands can call it
+    without going through argument objects that only mean something to the CLI."""
     import uvicorn
 
     cfg = settings_mod.load()
@@ -56,7 +67,7 @@ def ui(
     theme.info("Ctrl-C to stop")
     theme.blank()
 
-    if not no_open and cfg.ui.open_browser:
+    if open_browser and cfg.ui.open_browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
 
     from tandem.server.app import create_app

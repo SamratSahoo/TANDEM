@@ -56,13 +56,15 @@ def collect(
     cfg = settings_mod.load()
 
     if web:
-        from tandem.cli.ui import ui as serve_ui
+        from tandem.cli.ui import serve
 
         theme.info(f"Starting the browser UI to collect under {profile.name!r}.")
-        serve_ui(port=cfg.ui.port, host=cfg.ui.host, no_open=False, profile_name=profile.name)
+        serve(profile_name=profile.name)
         return
 
     runtime = runtime_mod.Runtime(cfg.resolved_runtime_dir())
+    # Fail before printing a session header for a session that cannot start.
+    runtime.require_ready()
 
     theme.blank()
     theme.heading(f"collect · {profile.name}", profile.description)
