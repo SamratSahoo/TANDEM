@@ -6,43 +6,16 @@ protocol are what stand between an operator and a robot that is already moving.
 
 from __future__ import annotations
 
-import sys
 import time
 from pathlib import Path
 
 import pytest
+from helpers import FakeRuntime, wait_for
 
 from tandem.core import secrets
 from tandem.core import session as session_mod
 from tandem.core.errors import SessionConflict
 from tandem.core.session import Session, State
-
-FAKE_DRIVER = Path(__file__).parent / "fake_driver.py"
-
-
-class FakeRuntime:
-    """A runtime that runs the stand-in driver instead of `pixi run tiptop-run`."""
-
-    def __init__(self, root: Path) -> None:
-        self.root = root
-        self.tiptop_dir = root
-        root.mkdir(parents=True, exist_ok=True)
-
-    def require_ready(self) -> None:
-        return None
-
-    def command(self, args: list[str]) -> list[str]:
-        # Drop the console-script name; keep the flags so argument handling is exercised.
-        return [sys.executable, str(FAKE_DRIVER), *args[1:]]
-
-
-def wait_for(predicate, timeout: float = 8.0, interval: float = 0.02) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(interval)
-    return False
 
 
 @pytest.fixture

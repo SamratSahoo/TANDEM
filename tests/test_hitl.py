@@ -10,13 +10,13 @@ from __future__ import annotations
 import json
 
 import pytest
+from helpers import FakeRuntime, wait_for
 from pydantic import ValidationError
 
 from tandem.core import render, secrets
 from tandem.core.errors import SessionConflict
 from tandem.core.profiles import Profile
 from tandem.core.session import Session, State
-from tests.test_session import FakeRuntime, wait_for
 
 # --- config ----------------------------------------------------------------
 
