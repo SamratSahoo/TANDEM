@@ -11,7 +11,7 @@ Plan with a GPU TAMP solver, watch it run, step in when it goes wrong, and keep 
 [![Platform](https://img.shields.io/badge/platform-linux%20%C2%B7%20cuda%2012-3fb950)](#requirements)
 
 ```bash
-pip install tandem-tamp && tandem init
+pipx install git+https://github.com/SamratSahoo/tandem.git && tandem init
 ```
 
 </div>
@@ -98,15 +98,27 @@ Off by default, and disabled the package is never even imported.
 
 ## Install
 
+`tandem` is a command-line tool, so install it with [pipx](https://pipx.pypa.io) — that gives
+it a private environment and puts just the `tandem` command on your PATH:
+
 ```bash
-pip install tandem-tamp
+pipx install git+https://github.com/SamratSahoo/tandem.git
 tandem init
 ```
+
+`uv tool install git+https://github.com/SamratSahoo/tandem.git` does the same thing if you
+prefer uv.
+
+> **Not on PyPI yet**, so the install is from git. Once it is published this becomes
+> `pipx install tandem-tamp`.
+>
+> Plain `pip install` works *inside a virtualenv*, but on Debian and Ubuntu it fails against
+> the system Python with `externally-managed-environment`. pipx exists for exactly this.
 
 That is the whole install. `tandem` itself is pure Python — the heavy stack (torch, cuRobo's
 compiled CUDA kernels, cuTAMP, tiptop) is built by `tandem init` into a self-contained
 runtime under `~/.local/share/tandem/`. The sources for all three ship inside the package, so
-the build needs no network and no `git`.
+that build needs no network and no `git`.
 
 <table>
 <tr><td width="50%">
@@ -114,7 +126,6 @@ the build needs no network and no `git`.
 **On the robot workstation**
 
 ```bash
-pip install tandem-tamp
 tandem init
 ```
 
@@ -126,7 +137,6 @@ Probes the GPU, installs [pixi](https://pixi.sh) if needed, compiles the planner
 **On a laptop**
 
 ```bash
-pip install tandem-tamp
 tandem init --viz-only
 tandem ui
 ```
@@ -136,6 +146,13 @@ just point the data root at them.
 
 </td></tr>
 </table>
+
+Working on tandem itself? An editable install in a virtualenv instead:
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e '.[export,dev]'
+```
 
 Already have a [`hitl-tamp-vla`](https://github.com/SamratSahoo/tamp-vla) checkout? Import its
 setup instead of retyping it:
@@ -282,12 +299,13 @@ $ tandem profile show fold-cloth --tamp
 | `tandem collect [profile]` | Run a session in the terminal. |
 | `tandem ui` | Serve the browser UI. |
 | `tandem profile list \| show \| create \| use \| edit \| delete` | Manage profiles. |
-| `tandem traj list \| show \| open \| relabel \| rm` | Inspect trajectories. `open` is a 3D replay in Rerun. |
+| `tandem traj list \| show \| open \| relabel \| rm \| merge` | Inspect trajectories. `open` is a 3D replay in Rerun; `merge` re-joins a hand-off's legs if the automatic merge failed. |
 | `tandem export lerobot` | Build a LeRobot v3.0 dataset and optionally push it to the Hub. |
 | `tandem config set-gemini-key` | Store the Gemini key. `--stdin` keeps it out of shell history. |
 | `tandem runtime status \| build \| shell \| run` | The GPU runtime. |
 
-Every read command takes `--json`. `NO_COLOR` is honoured.
+The commands that report state — `doctor`, `profile list|show`, `traj list|show`,
+`runtime status`, `config list` — all take `--json`. `NO_COLOR` is honoured.
 
 ---
 
@@ -326,7 +344,7 @@ echo the gripper never closes it. `tandem export lerobot` refuses an episode who
 
 **To collect**
 
-- Linux, NVIDIA GPU with CUDA 12, a recent driver
+- Linux, NVIDIA GPU with CUDA 12 or newer, a recent driver
 - ~25 GB free disk for the runtime
 - Franka FR3 (or UR5) with a Robotiq 2F-85, reachable over the bamboo-polymetis shim —
   started with `--state-port` so encoders stay readable while the arm moves
@@ -400,6 +418,8 @@ src/tandem/
 ├── core/          profiles, trajectories, the session state machine, the runtime
 ├── server/        FastAPI + a no-build single-page app
 ├── export/        LeRobot v3.0 writer
+├── teleop/        the hand-off driver, run under a DROID environment
+├── resources/     the annotated profile template
 └── _vendor/       tiptop · cuTAMP · cuRobo, pinned and trimmed
 ```
 

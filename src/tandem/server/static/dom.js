@@ -1,7 +1,7 @@
 // A ~60-line DOM helper instead of a framework.
 //
 // The whole point of this UI is that it ships as package data with no build step and no
-// npm — `pip install tandem-tamp` must be the only install anyone runs. A framework would
+// npm — installing tandem must be the only install anyone runs. A framework would
 // mean either a bundler in the release process or a CDN fetch at runtime, and this app is
 // four pages; it does not need one.
 

@@ -2,7 +2,7 @@
 
 tandem itself is pure Python and installs with one pip command. Everything heavy lives here
 instead: torch, the compiled cuRobo CUDA kernels, cuTAMP, tiptop, SAM-2, open3d and the ZED
-bindings. That split is what lets `pip install tandem-tamp && tandem ui` work on a laptop.
+bindings. That split is what lets a plain install plus `tandem ui` work on a laptop.
 
 The runtime directory deliberately mirrors the source monorepo's relative layout::
 

@@ -30,7 +30,10 @@ def lerobot(
     except ImportError as exc:
         raise TandemError(
             f"The export dependencies are not installed ({exc}).",
-            hint='Install them with: pip install "tandem-tamp[export]"',
+            hint=(
+                "Add them with: pipx inject tandem-tamp av pyarrow huggingface_hub  "
+                "(or `pip install 'tandem-tamp[export]'` inside a virtualenv)."
+            ),
         ) from exc
 
     profile = profiles.load(profile_name)
