@@ -6,6 +6,7 @@
 
 Plan with a GPU TAMP solver, watch it run, step in when it goes wrong, and keep the data.
 
+[![CI](https://github.com/SamratSahoo/tandem/actions/workflows/ci.yml/badge.svg)](https://github.com/SamratSahoo/tandem/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.10%2B-4f9dff)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT%20%2B%20NVIDIA-a371f7)](NOTICE)
 [![Platform](https://img.shields.io/badge/platform-linux%20%C2%B7%20cuda%2012-3fb950)](#requirements)

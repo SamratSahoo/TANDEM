@@ -96,10 +96,10 @@ def test_the_ui_has_no_external_asset_references():
 def test_vendored_sources_are_pinned_and_trimmed():
     """Provenance is not optional here: two of the three vendored trees are under a licence
     that governs redistribution, and the wheel has to stay a reasonable size."""
-    import tomllib
+    import tomlkit
 
     vendor = Path(__file__).parent.parent / "src" / "tandem" / "_vendor"
-    manifest = tomllib.loads((vendor / "VENDOR.toml").read_text())
+    manifest = tomlkit.parse((vendor / "VENDOR.toml").read_text())
 
     for component in ("tiptop", "cuTAMP", "curobo"):
         assert component in manifest, f"{component} is missing from VENDOR.toml"

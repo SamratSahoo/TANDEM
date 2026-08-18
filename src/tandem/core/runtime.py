@@ -297,14 +297,9 @@ def _read_vendor(path: Path) -> dict | None:
     if not path.is_file():
         return None
     try:
-        import tomllib
-    except ModuleNotFoundError:  # py3.10
-        try:
-            import tomli as tomllib  # type: ignore
-        except ModuleNotFoundError:
-            return None
-    try:
-        return tomllib.loads(path.read_text())
+        import tomlkit
+
+        return dict(tomlkit.parse(path.read_text()))
     except Exception:
         return None
 

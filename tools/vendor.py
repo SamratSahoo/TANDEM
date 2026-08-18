@@ -214,14 +214,9 @@ def read_manifest() -> dict:
     if not path.is_file():
         return {}
     try:
-        import tomllib
-    except ModuleNotFoundError:  # py3.10
-        try:
-            import tomli as tomllib  # type: ignore
-        except ModuleNotFoundError:
-            return {}
-    try:
-        return tomllib.loads(path.read_text())
+        import tomlkit
+
+        return dict(tomlkit.parse(path.read_text()))
     except Exception:
         return {}
 

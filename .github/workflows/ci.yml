@@ -1,0 +1,209 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch makes the older run's answer irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Rich prints box-drawing and colour by default; CI logs are neither a terminal nor
+  # improved by escape codes.
+  NO_COLOR: "1"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: pip install ruff
+      # The vendored planner is third-party source we ship verbatim; pyproject excludes it.
+      - run: ruff check src/tandem tools tests
+
+  test:
+    name: test (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # requires-python is >=3.10, so every version that claim covers is exercised.
+        python: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e '.[dev,export]'
+
+      - name: Test
+        # The suite spawns a stand-in driver and drives a real state machine over pipes and
+        # signals, so it is timing-sensitive rather than slow; the timeout is a hang guard.
+        timeout-minutes: 10
+        run: pytest -q --durations=10
+
+  package:
+    name: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Build the wheel
+        run: |
+          pip install build
+          python -m build --wheel --outdir dist
+
+      - name: The wheel must carry the vendored planner and the UI
+        # These only exist as package-data globs. A wheel that silently drops them installs a
+        # CLI that cannot build a runtime or serve a page, and nothing else would notice.
+        run: |
+          python - <<'PY'
+          import sys, zipfile
+          from pathlib import Path
+
+          wheel = next(Path("dist").glob("*.whl"))
+          names = set(zipfile.ZipFile(wheel).namelist())
+          required = [
+              "tandem/resources/profile_template.yml",
+              "tandem/server/static/index.html",
+              "tandem/server/static/app.js",
+              "tandem/server/static/pages/collect.js",
+              "tandem/_vendor/VENDOR.toml",
+              "tandem/_vendor/tiptop/pixi.toml",
+              "tandem/_vendor/tiptop/tiptop/hitl/config.py",
+              "tandem/_vendor/cuTAMP/pyproject.toml",
+              "tandem/_vendor/curobo/setup.py",
+          ]
+          missing = [name for name in required if name not in names]
+          if missing:
+              sys.exit("wheel is missing package data:\n  " + "\n  ".join(missing))
+
+          size = wheel.stat().st_size / 1e6
+          print(f"{wheel.name}: {size:.0f} MB, {len(names)} files")
+          # A canary, not a budget. It was ~25 MB; this only fires if the trim list in
+          # tools/vendor.py stops working and the untrimmed 200 MB of meshes come back.
+          if size > 45:
+              sys.exit(f"wheel grew to {size:.0f} MB — check the trim list in tools/vendor.py")
+          PY
+
+      - name: Every optional extra must still resolve
+        # No test imports rerun-sdk and it is pinned to an exact version, so a yank or a
+        # missing wheel would only be discovered by a user running `traj open`.
+        run: |
+          for extra in export rerun dev; do
+            echo "resolving [$extra]"
+            pip install --dry-run --quiet "dist/$(ls dist | head -1)[$extra]" >/dev/null
+          done
+
+      - name: Install into a clean environment
+        # The promise is that one install command gives a working CLI. Installing from the
+        # built wheel, into an environment that has never seen the source tree, is the only
+        # way to test that promise rather than the checkout.
+        run: |
+          python -m venv /tmp/clean
+          /tmp/clean/bin/pip install --quiet dist/*.whl
+
+      - name: Smoke-test the installed CLI
+        env:
+          TANDEM_CONFIG_DIR: /tmp/tandem-ci/config
+          TANDEM_DATA_ROOT: /tmp/tandem-ci/data
+          TANDEM_STATE_DIR: /tmp/tandem-ci/state
+          TANDEM_SHARE_DIR: /tmp/tandem-ci/share
+        run: |
+          /tmp/clean/bin/tandem --version
+          # --viz-only is the laptop path: no GPU, no robot, no cameras. It has to work on a
+          # bare runner, because that is the same situation.
+          /tmp/clean/bin/tandem init --viz-only --yes
+          /tmp/clean/bin/tandem profile list --json
+          /tmp/clean/bin/tandem traj list --json
+          /tmp/clean/bin/tandem runtime status --json
+          # doctor exits non-zero when a check fails, which it will here (no GPU runtime, no
+          # Gemini key). What matters is that it runs and reports rather than crashing.
+          /tmp/clean/bin/tandem doctor --no-hardware --json || true
+
+      - name: The installed CLI must not have pulled in torch or a camera SDK
+        run: |
+          /tmp/clean/bin/python - <<'PY'
+          import importlib.util, sys
+          heavy = [m for m in ("torch", "cv2", "open3d", "curobo", "cutamp", "tiptop")
+                   if importlib.util.find_spec(m) is not None]
+          if heavy:
+              sys.exit(f"the base install pulled in {heavy}; the laptop path is broken")
+          print("base install is clean")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel
+          path: dist/*.whl
+          retention-days: 14
+
+  ui:
+    name: ui
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Syntax-check the single-page app
+        # There is no bundler, so nothing else parses this code before a browser does. A
+        # syntax error would otherwise ship and only show up as a blank page.
+        run: |
+          set -e
+          fail=0
+          for f in $(find src/tandem/server/static -name '*.js'); do
+            cp "$f" /tmp/check.mjs
+            if node --check /tmp/check.mjs; then
+              echo "  ok   $f"
+            else
+              echo "  FAIL $f"; fail=1
+            fi
+          done
+          exit $fail
+
+      - name: Every import must resolve to a file that exists
+        # Bare ES modules are resolved by the browser at runtime, so a typo'd path is a
+        # 404 at load rather than a build error.
+        run: |
+          python3 - <<'PY'
+          import re, sys
+          from pathlib import Path
+
+          static = Path("src/tandem/server/static")
+          broken = []
+          for path in static.rglob("*.js"):
+              for spec in re.findall(r"""from\s+["']([^"']+)["']""", path.read_text()):
+                  if not spec.startswith("."):
+                      broken.append(f"{path}: bare specifier {spec!r} (no bundler to resolve it)")
+                      continue
+                  if not (path.parent / spec).resolve().is_file():
+                      broken.append(f"{path}: imports {spec!r}, which does not exist")
+          if broken:
+              sys.exit("\n".join(broken))
+          print("every module import resolves")
+          PY
