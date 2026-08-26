@@ -1,37 +1,37 @@
 {
+  "254622075770": {
+    "pose": [
+      0.39,
+      0.0,
+      0.8551,
+      -2.9670597283903604,
+      0.0,
+      -1.5707963267948966
+    ],
+    "timestamp": 1785706584.496672,
+    "source": "sim design pose (droid-sim-evals bimanual_yam.top_camera_cfg) \u2014 NOT a measurement"
+  },
   "13222437": {
     "pose": [
-      0.030025294309738725,
-      0.0693824978027102,
-      -0.13016575504772884,
-      -0.3938870061353561,
-      0.008547434661345443,
-      3.125201660172329
+      0.026605548281701908,
+      0.07046765493116523,
+      -0.13915621509130938,
+      -0.45091960933266706,
+      -0.0045196269688771995,
+      3.12590156923969
     ],
-    "timestamp": 1784598573.6585317
-  },
-  "39379013": {
-    "pose": [
-      0.19564110524574535,
-      0.45448597428043697,
-      0.41536133654252017,
-      -2.0390496919615537,
-      0.017103113577024764,
-      -2.486228089521667
-    ],
-    "timestamp": 1783991597.6599455,
-    "source": "copied verbatim from droid 39379013_left; tiptop and droid agree exactly on third-person extrinsics (verified on 32439448)"
+    "timestamp": 1786519214.2278092
   },
   "34032889": {
     "pose": [
-      0.5910751310713035,
-      -0.5549574184102548,
-      0.3822894686382285,
-      -1.7661334236094726,
-      0.03738306174530326,
-      0.41597192208417944
+      0.5692872333872196,
+      -0.5515242575492293,
+      0.37494721747803583,
+      -1.8218005906340848,
+      0.046845638554643854,
+      0.586737186097219
     ],
-    "timestamp": 1785792139.3234599,
-    "source": "copied verbatim from droid 34032889_left (droid/droid/calibration/calibration_info.json, varied_camera_1). world_from_cam, the left ZED frame -- which is the frame tiptop's rgb/K_left come from"
+    "timestamp": 1786578132.566384,
+    "source": "side-view ZED 2i, the third-person camera cameras.perception: external reads. Copied from ~/hitl-tamp-vla assets/calibration_info_prpl.json on 2026-08-16 (same rig); originally from droid 34032889_left (varied_camera_1), recalibrated 2026-08-12 19:42. world_from_cam, the left ZED frame -- which is the frame tiptop's rgb/K_left come from. The prpl workspace carries the same entry; this default exists for runs with no DC_WORKSPACE"
   }
 }

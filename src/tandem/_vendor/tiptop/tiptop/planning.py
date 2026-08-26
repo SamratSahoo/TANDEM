@@ -3,9 +3,7 @@
 import json
 import logging
 import time
-from collections import defaultdict
 from pathlib import Path
-from typing import Sequence
 
 import numpy as np
 from curobo.wrap.reacher.ik_solver import IKSolver
@@ -16,11 +14,8 @@ from cutamp.constraint_checker import ConstraintChecker
 from cutamp.cost_reduction import CostReducer
 from cutamp.envs import TAMPEnvironment
 from cutamp.scripts.utils import default_constraint_to_mult, default_constraint_to_tol
-from cutamp.tamp_domain import get_initial_state
-from cutamp.task_planning import PlanSkeleton, State
 from cutamp.task_planning.constraints import StablePlacement
 from cutamp.task_planning.costs import GraspCost
-from cutamp.task_planning.search import FABRICABLE_TYPES
 from jaxtyping import Float
 
 from tiptop.trajectory_blending import arm_joint_limits, blend_cutamp_plan, resolve_blend_config
@@ -59,12 +54,18 @@ def build_tamp_config(
     enable_visualizer: bool = False,
     traj_length_norm: float = 2.0,
     grasp_orientation_cost: bool = False,
-    q_home: Sequence[float] | None = None,
+    arm_mode: str = "single",
+    dual_task: str = "parallel",
+    max_motion_refine_attempts: int | None = 32,
 ) -> TAMPConfiguration:
     """Build a TAMPConfiguration with TiPToP defaults.
 
     See https://github.com/tiptop-robot/cuTAMP/blob/main/cutamp/config.py for
     documentation of each TAMPConfiguration parameter.
+
+    ``arm_mode``/``dual_task`` opt into cuTAMP's simultaneous dual-arm planning (only valid with
+    ``robot_type == "bimanual_yam_dual"`` -- cuTAMP's own ``validate_tamp_config`` enforces the two
+    travel together). Every other embodiment leaves these at their single-arm defaults.
     """
     return TAMPConfiguration(
         num_particles=num_particles,
@@ -73,8 +74,10 @@ def build_tamp_config(
         m2t2_grasps=True,
         prop_satisfying_break=0.1,
         robot=robot_type,
+        arm_mode=arm_mode,
+        dual_task=dual_task,
         curobo_plan=True,
-        max_motion_refine_attempts=32,
+        max_motion_refine_attempts=max_motion_refine_attempts,
         warmup_ik=False,
         warmup_motion_gen=False,
         num_initial_plans=10,
@@ -96,75 +99,7 @@ def build_tamp_config(
         # Gate for the grasp orientation-change soft cost (weight set in run_planning). Enabled from
         # cfg/tamp when `grasp_pose_change_weight` is present; see resolve_grasp_orientation_cost.
         grasp_orientation_cost=grasp_orientation_cost,
-        # Where a plan parks the arm after its last operator. Pass the robot's real home (cfg/tiptop
-        # `robot.q_home`); left None, cuTAMP ends every plan back at the configuration it planned
-        # FROM, which on a rollout resuming from a teleop hand-off is wherever the human left the
-        # arm -- unreachable often enough to fail the whole plan (see cutamp motion_solver).
-        q_home=tuple(q_home) if q_home is not None else None,
     )
-
-
-def environment_initial_state(env: TAMPEnvironment) -> State:
-    """The symbolic initial state cuTAMP will derive for ``env``.
-
-    Mirrors ``TAMPWorld.initial_state``, which reads the same ``env.type_to_objects`` through
-    ``get_objects_by_type``. Reproduced here so a task plan can be checked against the environment
-    before paying for the world (and the GPU) that cuTAMP builds.
-
-    Note this state is a function of the object NAMES alone -- it says every movable has not been
-    picked up and the hand is empty, never where anything is. Two perception passes over the same
-    scene therefore give the same initial state whatever moved in between.
-    """
-    return get_initial_state(
-        movables=[obj.name for obj in env.type_to_objects.get("Movable", [])],
-        surfaces=[obj.name for obj in env.type_to_objects.get("Surface", [])],
-        sticks=[obj.name for obj in env.type_to_objects.get("Stick", [])],
-        buttons=[obj.name for obj in env.type_to_objects.get("Button", [])],
-    )
-
-
-def skeleton_reuse_rejection(skeleton: PlanSkeleton, initial_state: State, goal_state: State) -> str | None:
-    """Why ``skeleton`` cannot be reused for this problem, or None if it can be.
-
-    A ground operator carries only its lifted operator and object-name strings, so a skeleton found
-    against one perception pass is re-runnable against another -- as long as it still describes a
-    valid solution here. Checked exactly as ``breadth_first_search`` would have: every operator's
-    preconditions hold in turn, and the goal is a subset of the resulting state.
-
-    The object-name check is redundant with the precondition walk for every operator whose
-    preconditions mention all its arguments, but it is what turns "an object the skeleton needs was
-    not detected this time" into a clear rejection here rather than an index error deep inside
-    particle initialization. Configurations and trajectories (FABRICABLE_TYPES) are exempt: the
-    search invents those symbols, so they are never in the initial state -- same rule BFS applies to
-    goal literals.
-    """
-    if not skeleton:
-        return "the cached task plan is empty"
-    literals_by_type: dict[str, set[str]] = defaultdict(set)
-    for atom in initial_state:
-        for param, value in zip(atom.fluent.parameters, atom.values):
-            literals_by_type[param.type].add(value)
-    for op in skeleton:
-        missing = sorted(
-            {
-                f"{value} ({param.type})"
-                for param, value in zip(op.operator.parameters, op.values)
-                if param.type not in FABRICABLE_TYPES and value not in literals_by_type[param.type]
-            }
-        )
-        if missing:
-            return f"{op.name} refers to object(s) not in this scene: {', '.join(missing)}"
-
-    state = initial_state
-    for op in skeleton:
-        if not op.preconditions.issubset(state):
-            unmet = sorted(str(atom) for atom in op.preconditions - state)
-            return f"preconditions of {op.name} are not met: {', '.join(unmet)}"
-        state = op.apply(state)
-    if not goal_state.issubset(state):
-        unmet = sorted(str(atom) for atom in goal_state - state)
-        return f"it does not reach this goal, missing: {', '.join(unmet)}"
-    return None
 
 
 def run_planning(
@@ -177,8 +112,7 @@ def run_planning(
     all_surfaces: list,
     experiment_dir: Path | None = None,
     cost_overrides: dict | None = None,
-    reuse_plan_skeleton: PlanSkeleton | None = None,
-    plan_out: dict | None = None,
+    q_return: np.ndarray | list | None = None,
 ) -> tuple[list | None, float, str | None]:
     """Run cuTAMP planning and return (plan, planning_time_seconds, failure_reason).
 
@@ -188,17 +122,9 @@ def run_planning(
     trajectory-blending settings (``blend_trajectory`` etc. -- see resolve_blend_config). Blending is
     off unless the config opts in.
 
-    ``reuse_plan_skeleton`` is a task plan from an earlier call (see ``plan_out``) to reuse instead
-    of searching for one: grasps, placements and trajectories are all still solved from scratch
-    against this scene, only the symbolic search is skipped. It is rejected outright if it no longer
-    solves this problem (skeleton_reuse_rejection), and if it is accepted but yields no plan, this
-    falls back to a full search rather than returning empty-handed. Either way ``elapsed`` covers
-    every cuTAMP call made.
-
-    ``experiment_dir`` holds one `attempt_N` subdirectory per cuTAMP call (see attempt_dir), so the
-    reuse attempt and the fallback search each get their own logs instead of colliding.
-
-    ``plan_out``, if given, gets {"plan_skeleton": ..., "reused": bool} for the returned plan.
+    ``q_return`` overrides where the plan's closing GoToInitial drives to, which otherwise is the
+    ``q_init`` it started from. Only a caller concatenating plans needs it -- see
+    ``tiptop_run.plan_clear_then_task``, whose second plan starts mid-episode.
     """
     constraint_to_tol = default_constraint_to_tol.copy()
     constraint_to_mult = default_constraint_to_mult.copy()
@@ -219,61 +145,21 @@ def run_planning(
     cost_reducer = CostReducer(constraint_to_mult)
     constraint_checker = ConstraintChecker(constraint_to_tol)
 
-    def attempt_dir() -> Path | None:
-        """Pick this cuTAMP call's own `attempt_N` subdirectory of ``experiment_dir``.
-
-        cuTAMP's ExperimentLogger refuses to overwrite anything it has already written, so two calls
-        sharing one directory die on the second one's `optimization/opt_0001.json` (each call
-        restarts its own optimization counter). Picking the first free N off disk, rather than
-        counting in memory, also keeps two runs that land on the same directory apart.
-        """
-        if experiment_dir is None:
-            return None  # let cuTAMP name the experiment itself
-        n = 0
-        while (experiment_dir / f"attempt_{n}").exists():
-            n += 1
-        return experiment_dir / f"attempt_{n}"
-
-    def solve(skeleton):
-        cutamp_out: dict = {}
-        plan, _, reason = run_cutamp(
-            env,
-            config,
-            cost_reducer,
-            constraint_checker,
-            q_init=q_init,
-            ik_solver=ik_solver,
-            grasps=grasps,
-            motion_gen=motion_gen,
-            experiment_dir=attempt_dir(),
-            reuse_plan_skeleton=skeleton,
-            plan_out=cutamp_out,
-        )
-        return plan, reason, cutamp_out.get("plan_skeleton")
-
     start = time.perf_counter()
-    reused = False
-    if reuse_plan_skeleton is not None:
-        rejection = skeleton_reuse_rejection(reuse_plan_skeleton, environment_initial_state(env), env.goal_state)
-        if rejection:
-            _log.info(f"Not reusing the previous task plan ({rejection}); planning the task from scratch")
-            reuse_plan_skeleton = None
-        else:
-            _log.info(f"Reusing the previous task plan: {[op.name for op in reuse_plan_skeleton]}")
-
-    cutamp_plan, failure_reason, final_skeleton = solve(reuse_plan_skeleton)
-    if cutamp_plan is not None:
-        reused = reuse_plan_skeleton is not None
-    elif reuse_plan_skeleton is not None:
-        # The task plan still applies symbolically, but this scene admits no grasp/placement/motion
-        # for it -- the objects have moved. A different skeleton may well work, so search after all.
-        _log.warning(f"Reused task plan produced no motion plan ({failure_reason}); falling back to a full task search")
-        cutamp_plan, failure_reason, final_skeleton = solve(None)
+    cutamp_plan, _, failure_reason = run_cutamp(
+        env,
+        config,
+        cost_reducer,
+        constraint_checker,
+        q_init=q_init,
+        ik_solver=ik_solver,
+        grasps=grasps,
+        motion_gen=motion_gen,
+        experiment_dir=experiment_dir,
+        q_return=q_return,
+    )
     elapsed = time.perf_counter() - start
     _log.info(f"cuTAMP planning took: {elapsed:.2f}s")
-    if plan_out is not None:
-        plan_out["plan_skeleton"] = final_skeleton
-        plan_out["reused"] = reused
 
     if cutamp_plan is None:
         _log.error(f"cuTAMP failed to find a plan: {failure_reason}")
@@ -410,5 +296,15 @@ def serialize_plan(cutamp_plan: list[dict], q_init: Float[np.ndarray, "d"], trac
                 }
             )
         elif step["type"] == "gripper":
-            steps.append({"type": "gripper", "label": step["label"], "action": step["action"]})
-    return {"version": "1.3.0", "q_init": q_init, "steps": steps}
+            entry = {"type": "gripper", "label": step["label"], "action": step["action"]}
+            # Present only on cuTAMP's dual-arm path (motion_solver.py::gripper_step): "arms" names
+            # every hand this step actuates (plural -> simultaneous, e.g. PickBoth/PlaceBoth); "arm"
+            # is set too when exactly one hand acts (PickGiver/PlaceTaker, or one side of a
+            # Handover), for consumers that only care about a single hand. Single-arm cuTAMP steps
+            # never carry either key, so this is purely additive for existing plans.
+            if "arm" in step:
+                entry["arm"] = step["arm"]
+            if "arms" in step:
+                entry["arms"] = list(step["arms"])
+            steps.append(entry)
+    return {"version": "1.4.0", "q_init": q_init, "steps": steps}

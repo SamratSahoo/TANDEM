@@ -1,6 +1,6 @@
 """The authoritative set of TAMP override keys, mirrored from tiptop.
 
-These are the knobs that reach the planner through ``tiptop-run --curobo-overrides``. The
+These are the knobs that reach the planner's solvers as cost overrides. The
 list is transcribed from the code that reads them, so a key here is a key that actually does
 something:
 

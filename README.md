@@ -93,7 +93,26 @@ rendered PNG of what it said, rejected attempts included. When a run goes wrong 
 always "what did the model see, and what did it decide", and that is unanswerable afterwards
 without it.
 
-Off by default, and disabled the package is never even imported.
+**Check the decomposition before the arm moves.** The phase planner is tandem's own code and
+needs no planner, no GPU and no robot to run, so you can ask for a plan from a photograph:
+
+```bash
+tandem plan "put the toy on the cloth, then fold it" --image workspace.png
+```
+
+It prints the ordered phases, who does each, the sub-goal the planner would be handed, the
+invented predicates and their classifiers, and — loudly — any clause it could not express. That
+last one matters: the usual cause is an object the instruction names that perception did not
+detect, and the remedy (put it on the table, or reword the task) is only available *before* you
+start collecting.
+
+**A phase the planner cannot plan becomes yours.** tandem decides who does what, so when the
+planner fails to find a plan for a robot phase the sub-goal is described to you, you do it by
+hand, and the same check verifies it — the task carries on instead of ending. Set
+`hitl.on_robot_phase_failure` to `abort` for the older behaviour, or `replan` to hand the
+failure back to the model.
+
+Off by default, and disabled nothing in it runs.
 
 ---
 
@@ -298,6 +317,7 @@ $ tandem profile show fold-cloth --tamp
 | `tandem init` | Set up this machine. Idempotent — re-run it any time. |
 | `tandem doctor` | Every check, what it found, and what to do about it. |
 | `tandem collect [profile]` | Run a session in the terminal. |
+| `tandem plan "<task>" --image photo.png` | Decompose a task into phases from a photo, with no robot and no GPU. Prints who does each step, the sub-goal the planner gets, and anything the model could not express. |
 | `tandem ui` | Serve the browser UI. |
 | `tandem profile list \| show \| create \| use \| edit \| delete` | Manage profiles. |
 | `tandem traj list \| show \| open \| relabel \| rm \| merge` | Inspect trajectories. `open` is a 3D replay in Rerun; `merge` re-joins a hand-off's legs if the automatic merge failed. |
@@ -417,6 +437,9 @@ nothing is proxying `/api/media/` without passing Range headers through.
 src/tandem/
 ├── cli/           the command tree (Typer + Rich)
 ├── core/          profiles, trajectories, the session state machine, the runtime
+├── planning/      phase planning: proposal, invented predicates, verification
+├── planners/      the planner backends, behind one narrow protocol
+│   └── tiptop/    a capability declaration, a client, and a sidecar
 ├── server/        FastAPI + a no-build single-page app
 ├── export/        LeRobot v3.0 writer
 ├── teleop/        the hand-off driver, run under a DROID environment
@@ -424,10 +447,45 @@ src/tandem/
 └── _vendor/       tiptop · cuTAMP · cuRobo, pinned and trimmed
 ```
 
-The **session engine** (`core/session.py`) drives the collection process over a deliberately
-dumb channel — a JSONL events file, stdin, and POSIX signals — which is what lets it survive
-being preempted, re-warmed, and handed to a teleop process mid-task. The same object backs
+The **session engine** (`core/session.py`) walks a task's phases: it decides who does each one,
+calls the planner for the robot's, hands the arm to a person for theirs, checks from a photo that
+their step happened, and mints the trajectory id that joins every leg into one episode. It survives
+being preempted, re-warmed and handed over mid-task, and appends a line per event to a JSONL file
+so a session that went wrong can be read off disk after the process is gone. The same object backs
 both `tandem collect` and the browser UI, so the state machine exists once.
+
+**tandem plans the task; a planner plans the motion.** `planning/` breaks an instruction into
+an ordered list of phases and decides which are the robot's and which are yours. For a robot
+phase it asks a planner for one thing — *achieve this goal in this scene, and record what you
+did* — and that request is the whole of `planners/base.py`. Everything tandem knows about a
+particular planner is a `Capabilities` declaration: which predicates a goal may be stated
+over, which of them the planner supplies for itself, whether one plan can pick the same object
+twice. Nothing about any planner is hardcoded in the phase planner, so pointing tandem at a
+different task-and-motion planner means writing a backend, not patching the planner.
+
+A backend needs torch, CUDA kernels, a camera SDK and a robot client; tandem needs none of
+those and never will. So a hosted backend runs as a child process inside the GPU runtime and
+answers verbs over newline-delimited JSON:
+
+```
+tandem (pure python, no CUDA)              the pixi runtime (CUDA)
+  planning/          phases                  planners/tiptop/sidecar.py   ← tandem's code
+  planners/base.py   the protocol            │  import tiptop, cutamp
+  planners/tiptop/backend.py  ──JSON──►      │  run_perception(goal_builder=…)
+                              ◄──JSON──      │  run_planning / execute / record
+```
+
+`sidecar.py` is tandem's own file executed by the runtime's interpreter — it imports nothing
+from `tandem`, and every line of it is a call to a **public function of an unmodified
+planner**. Goals reach cuTAMP through `run_perception`'s existing `goal_builder` hook, so
+there is no planner-side change to keep alive. That is the difference from the design this
+replaces, where the phase planner lived inside a fork of the planner and every planner tandem
+wanted to drive had to be forked with it.
+
+With phase planning off there is nothing to decompose, so the goal is the one the planner's own
+translator made of the instruction during perception — the same translator, the same atoms, one
+code path, and no extra model call. A session with the feature off behaves exactly as it always
+did.
 
 The **runtime** mirrors the source monorepo's directory layout on purpose. Three separate
 modules resolve default asset paths by walking up from `__file__` to what they assume is a
@@ -447,9 +505,11 @@ python tools/vendor.py --source /path/to/hitl-tamp-vla
 
 Built on work by others:
 
-- **[TiPToP](https://github.com/LJ1356/tiptop)** — the real-robot TAMP pipeline, and the
-  `tiptop.hitl` phase planner behind the phase mode above. Vendored from the
-  `feat/hitl-phase-planning` branch. MIT. William Shen, Nishanth Kumar, and contributors.
+- **[TiPToP](https://github.com/SamratSahoo/tiptop)** — the real-robot TAMP pipeline tandem
+  drives as its default backend, used unmodified. MIT. William Shen, Nishanth Kumar, and
+  contributors. The phase planner is tandem's own (`src/tandem/planning/`); its design and its
+  prompts began life as `tiptop.hitl` on the `feat/hitl-phase-planning` branch of
+  [LJ1356/tiptop](https://github.com/LJ1356/tiptop).
 - **[cuTAMP](https://github.com/SamratSahoo/cuTAMP)** — GPU-parallel task-and-motion planning.
   NVIDIA License.
 - **[cuRobo](https://github.com/NVlabs/curobo)** — GPU motion generation and collision-aware IK.

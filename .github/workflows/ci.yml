@@ -93,7 +93,8 @@ jobs:
               "tandem/server/static/pages/collect.js",
               "tandem/_vendor/VENDOR.toml",
               "tandem/_vendor/tiptop/pixi.toml",
-              "tandem/_vendor/tiptop/tiptop/hitl/config.py",
+              "tandem/_vendor/tiptop/tiptop/tiptop_run.py",
+              "tandem/planners/tiptop/sidecar.py",
               "tandem/_vendor/cuTAMP/pyproject.toml",
               "tandem/_vendor/curobo/setup.py",
           ]

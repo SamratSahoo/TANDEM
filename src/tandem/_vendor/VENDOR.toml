@@ -7,29 +7,29 @@
 # kept intact inside each tree; see NOTICE at the repository root.
 
 [tiptop]
-url = "https://github.com/LJ1356/tiptop.git"
-commit = "f2293f7227dd37e3e8281938465ad9d4ae3e7a64"
-version = "f2293f7"
-ref = "origin/feat/hitl-phase-planning"
-bytes = 5780792
+url = "https://github.com/SamratSahoo/tiptop.git"
+commit = "4db8f92671b431de4e5a456523dc84b5246401ee"
+version = "4db8f92"
+ref = "origin/main"
+bytes = 6172978
 trimmed = ["docs/_static", "docs/blogs", ".github"]
 patches = ["0001-tiptop-config-from-env.patch", "0002-tiptop-optional-realsense.patch"]
 
 [cuTAMP]
 url = "https://github.com/SamratSahoo/cuTAMP.git"
-commit = "732cab5545279b5c8e0cb2e352d28f175a932ce1"
-version = "732cab5"
-ref = "HEAD"
-bytes = 6993056
+commit = "7b0aeaea452f13a4ee73d95f2aacbb3af720ad0f"
+version = "7b0aeae"
+ref = "origin/main"
+bytes = 6999003
 trimmed = ["cutamp/robots/assets/yam_description", "docs"]
 patches = []
 
 [curobo]
 url = "https://github.com/SamratSahoo/curobo.git"
-commit = "bc1559a3706590d24879544a8802b55655b382f7"
-version = "bc1559a"
-ref = "HEAD"
-bytes = 43817048
+commit = "3a90ff49eee169d9636b2a679d98457a2592fb52"
+version = "3a90ff4"
+ref = "origin/main"
+bytes = 43848956
 trimmed = ["src/curobo/content/assets/robot/techman", "src/curobo/content/assets/robot/iiwa_allegro_description", "src/curobo/content/assets/robot/jaco", "src/curobo/content/assets/robot/kinova", "src/curobo/content/assets/scene/nvblox", "images", "benchmark", "docker", ".github"]
 patches = []
 

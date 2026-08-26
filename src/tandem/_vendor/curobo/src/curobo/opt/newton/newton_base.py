@@ -29,6 +29,14 @@ from curobo.types.tensor import T_BDOF, T_BHDOF_float, T_BHValue_float, T_BValue
 from curobo.util.torch_utils import get_torch_jit_decorator
 
 
+#: Box half-width for the VAE-retiming duration knots (see ArmBase.enable_time_variables). The
+#: knots enter the cost only through tanh(theta), which is saturated well before |theta| = 3, so
+#: this is a generous rail rather than a constraint -- its job is to keep the JOINT POSITION limits
+#: off these rows, since two of the FR3's joint boxes do not contain 0 and theta == 0 is what the
+#: whole parameterization means by "the uniform clock".
+TIME_VAR_BOUND = 3.0
+
+
 class LineSearchType(Enum):
     GREEDY = "greedy"
     ARMIJO = "armijo"
@@ -85,9 +93,30 @@ class NewtonOptBase(Optimizer, NewtonOptConfig):
 
         self.reset()
 
+        # Extra action rows this solver owns beyond the dynamics model's (the VAE retiming duration
+        # knots -- see ArmBase.enable_time_variables). Everything else in this class is layout
+        # agnostic: trust-region caps, line-search scales and the LBFGS history buffers are all flat
+        # length-d_opt vectors applied elementwise, and the CUDA line-search / update-best / fused-
+        # LBFGS kernels all take d_opt as a runtime argument. Only the bounds below and the two
+        # fix_terminal_action sites care.
+        self._n_time_rows = getattr(self.rollout_fn, "_n_time_rows", 0)
+        self._joint_action_horizon = self.action_horizon - self._n_time_rows
+
         # reshape action lows and highs:
         self.action_lows = self.action_lows.repeat(self.action_horizon)
         self.action_highs = self.action_highs.repeat(self.action_horizon)
+        if self._n_time_rows > 0:
+            # The knot rows are NOT joints, so tiling the joint position box over them is wrong --
+            # and not harmlessly so: the FR3's j4 box is [-3.04, -0.15] and its j6 box is
+            # [0.54, 4.52], neither of which contains 0. clip_bounds/project_bounds then pin one in
+            # seven knots at -0.15 and another at +0.54 from the very first step, which the
+            # optimizer can never undo, so the "theta == 0 is the uniform clock" invariant that
+            # _widen_seed and get_init_action_seq both rely on is violated before the first cost
+            # evaluation. Measured on a 32-step FR3 segment that stretched 4 of 31 intervals by
+            # 1.42x and shrank 4 by 0.90x, inflating the emitted clock ~4% above nominal.
+            n_time_slots = self._n_time_rows * self.d_action
+            self.action_lows[-n_time_slots:] = -TIME_VAR_BOUND
+            self.action_highs[-n_time_slots:] = TIME_VAR_BOUND
         self.action_range = self.action_highs - self.action_lows
         self.action_step_max = self.step_scale * torch.abs(self.action_range)
         self.c_1 = 1e-5
@@ -112,6 +141,17 @@ class NewtonOptBase(Optimizer, NewtonOptConfig):
             self._temporal_mat += eye_mat
         self.rollout_fn.sum_horizon = True
 
+    def _widen_seed(self, q: torch.Tensor) -> torch.Tensor:
+        """Append zero duration-knot rows to a seed that was produced without them.
+
+        The preceding MPPI stage runs on its own rollout (built from particle_trajopt.yml), which has
+        no time rows, so its output is one row block short of this solver's decision vector. Zero
+        knots are the uniform clock, i.e. the seed keeps exactly the timing it came in with."""
+        if self._n_time_rows == 0 or q.dim() != 3 or q.shape[1] >= self.action_horizon:
+            return q
+        pad = q.new_zeros(q.shape[0], self.action_horizon - q.shape[1], q.shape[2])
+        return torch.cat([q, pad], dim=1)
+
     def reset_cuda_graph(self):
         if self.cu_opt_graph is not None:
             self.cu_opt_graph.reset()
@@ -132,6 +172,7 @@ class NewtonOptBase(Optimizer, NewtonOptConfig):
         return True
 
     def _optimize(self, q: T_BHDOF_float, shift_steps=0, n_iters=None):
+        q = self._widen_seed(q)
         with profiler.record_function("newton_base/shift"):
             self._shift(shift_steps)
         # reshape q:
@@ -418,7 +459,10 @@ class NewtonOptBase(Optimizer, NewtonOptConfig):
         if self.step_scale != 0.0 and self.step_scale != 1.0:
             step_direction = self.scale_step_direction(step_direction)
         if self.fix_terminal_action and self.action_horizon > 1:
-            step_direction[..., (self.action_horizon - 1) * self.d_action :] = 0.0
+            # the terminal WAYPOINT is frozen; the duration knots that follow it are not. With no
+            # time rows this is the same open-ended slice cuRobo ships (jah * d_action == d_opt).
+            jah = self._joint_action_horizon
+            step_direction[..., (jah - 1) * self.d_action : jah * self.d_action] = 0.0
         if self.line_search_type == LineSearchType.GREEDY:
             best_x, best_c, best_grad = self._greedy_line_search(x, step_direction)
         elif self.line_search_type == LineSearchType.ARMIJO:
@@ -430,7 +474,8 @@ class NewtonOptBase(Optimizer, NewtonOptConfig):
         ]:
             best_x, best_c, best_grad = self._wolfe_line_search(x, step_direction)
         if self.fix_terminal_action and self.action_horizon > 1:
-            best_grad[..., (self.action_horizon - 1) * self.d_action :] = 0.0
+            jah = self._joint_action_horizon
+            best_grad[..., (jah - 1) * self.d_action : jah * self.d_action] = 0.0
         return best_x, best_c, best_grad
 
     def check_convergence(self, cost):

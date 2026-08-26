@@ -190,6 +190,15 @@ class Runtime:
         say = log or (lambda _msg: None)
         self.root.mkdir(parents=True, exist_ok=True)
 
+        # What this runtime currently holds, versus what the installed wheel ships. "Already
+        # present" is only a safe thing to say when they are the SAME sources -- and after a
+        # re-vendor they are not. Skipping the copy while stamping the new commits anyway left a
+        # runtime built from the old planner while claiming to be the new one, which surfaces as an
+        # ImportError forty seconds into a warm-up with an operator standing next to the arm.
+        installed = self.status().vendor or {}
+        manifest = _read_vendor(vendor_root / "VENDOR.toml")
+        incoming = manifest or {}
+
         for name in (TIPTOP, CUTAMP, CUROBO, "vae", "rnd"):
             src = vendor_root / name
             dst = self.root / name
@@ -203,16 +212,24 @@ class Runtime:
                         ),
                     )
                 continue
-            if dst.exists() and not force:
+            here = (installed.get(name) or {}).get("commit")
+            wanted = (incoming.get(name) or {}).get("commit")
+            stale = bool(wanted) and here != wanted
+            if dst.exists() and not force and not stale:
                 say(f"{name}: already present")
                 continue
             if dst.exists():
+                if stale:
+                    say(f"{name}: replacing {here or 'an unrecorded copy'} with {wanted}")
                 shutil.rmtree(dst)
-            say(f"{name}: copying")
+            else:
+                say(f"{name}: copying")
             shutil.copytree(src, dst, symlinks=False, ignore=_ignore_build_junk)
 
-        vendor_meta = vendor_root / "VENDOR.toml"
-        stamp = {"vendor": _read_vendor(vendor_meta), "built_at": None}
+        # Stamped only after the sources are actually on disk, so the record describes the tree
+        # rather than the intention. `built_at` is cleared because a changed source means the
+        # compiled kernels and the installed packages are stale too.
+        stamp = {"vendor": manifest, "built_at": None}
         self.stamp_file.write_text(json.dumps(stamp, indent=2) + "\n")
 
     def build_env(self, *, log=None, extra_env: dict | None = None) -> None:
@@ -230,10 +247,28 @@ class Runtime:
         env = {
             "CUROBO_DIR": str(self.curobo_dir),
             "CUTAMP_DIR": str(self.cutamp_dir),
+            # cuRobo takes its version from setuptools_scm with no fallback, and a vendored tree has
+            # no SCM metadata -- it is extracted with `git archive` precisely so no VCS state rides
+            # along. Without this the editable install fails with "unable to detect version ... make
+            # sure you're building from a fully intact git repository" before the 5-20 minute kernel
+            # build even starts. tiptop's own pixi manifest pins itself the same way; cuTAMP carries
+            # a static version and needs nothing.
+            "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_NVIDIA_CUROBO": self._vendored_version(CUROBO),
             **(extra_env or {}),
         }
         self._pixi(["run", "setup-planners"], log=log, extra_env=env, what="pixi run setup-planners")
         self._touch_built()
+
+    def _vendored_version(self, component: str) -> str:
+        """A PEP 440 version for a vendored component, from what the manifest recorded.
+
+        The commit is the honest answer to "which sources are these", but it is not a version, so
+        it rides along as a local segment: ``0.0.0+g4db8f92``. Nothing resolves a dependency on
+        these, so the number itself does not matter — only that one exists.
+        """
+        recorded = (self.status().vendor or {}).get(component) or {}
+        described = str(recorded.get("version") or "").strip()
+        return f"0.0.0+g{described}" if described else "0.0.0"
 
     def _touch_built(self) -> None:
         from datetime import datetime, timezone

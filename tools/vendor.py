@@ -72,17 +72,23 @@ EXTRA_FILES = [
 SUBMODULES = {"tiptop": ".git/modules/tiptop", "cuTAMP": ".git/modules/cuTAMP", "curobo": ".git/modules/curobo"}
 
 # Which ref each component is vendored from. Named here rather than taken from whatever the
-# checkout's HEAD happens to be: which branch the planner comes from decides what tandem can
-# do, so it belongs in the source, under review, next to the trim list.
+# checkout's HEAD happens to be, and EXPLICIT for all three rather than `HEAD`: a source checkout
+# is usually a working monorepo whose submodules sit on a detached head or a local branch, so
+# `HEAD` vendors whatever someone was last working on. It has already produced a build carrying an
+# unpushed commit, which is unreproducible by anyone else and unrecorded except as a hash.
 #
-# tiptop tracks feat/hitl-phase-planning because that is where the phase-planning HITL lives —
-# a VLM splits the instruction into robot and human phases, hands the human ones over as teleop
-# legs with written instructions, and checks from a photo that they happened. `main` has only
-# the operator-pressed hand-off.
+# All three are the clean upstreams, with no phase-planning logic in any of them. That logic is
+# tandem's own now (src/tandem/planning), and tandem drives an unmodified planner through
+# src/tandem/planners — which is the whole point: a planner tandem has to fork is a planner tandem
+# has to keep forking.
+#
+# tiptop and cuTAMP MUST move together. Upstream tiptop passes `pick_transparent` and `q_return`,
+# which older cuTAMP trees do not accept; pinning one forward and not the other is a TypeError on
+# every plan.
 REFS = {
-    "tiptop": "origin/feat/hitl-phase-planning",
-    "cuTAMP": "HEAD",
-    "curobo": "HEAD",
+    "tiptop": "origin/main",
+    "cuTAMP": "origin/main",
+    "curobo": "origin/main",
 }
 
 PATCHES = REPO / "tools" / "patches"
@@ -187,6 +193,18 @@ def apply_patches(component: str) -> list[str]:
             raise SystemExit(
                 f"{patch.name} does not apply to the new {component}:\n{result.stderr}\n"
                 "Upstream moved. Rewrite the patch against the new source before re-vendoring."
+            )
+        # Exit 0 is NOT enough. Run from inside a repository, `git apply` filters a git-style diff
+        # (one carrying `diff --git` headers) by the current prefix and quietly drops everything
+        # outside it -- reporting "Skipped patch" on stderr and success to the shell. A patch that
+        # went nowhere is exactly the failure this whole mechanism exists to make loud, and it has
+        # already shipped a vendor tree missing a patch that was reported as applied.
+        skipped = [ln for ln in result.stderr.splitlines() if ln.startswith("Skipped patch")]
+        if skipped:
+            raise SystemExit(
+                f"{patch.name} was skipped rather than applied to {component}:\n"
+                + "\n".join(f"  {ln}" for ln in skipped)
+                + "\nA plain unified diff (--- a/path, no `diff --git` header) is not filtered this way."
             )
         applied.append(patch.name)
         print(f"      patch: {patch.name}")

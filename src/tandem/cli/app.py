@@ -51,6 +51,7 @@ from tandem.cli import config as _config  # noqa: E402
 from tandem.cli import doctor as _doctor  # noqa: E402
 from tandem.cli import export as _export  # noqa: E402
 from tandem.cli import init as _init  # noqa: E402
+from tandem.cli import plan as _plan  # noqa: E402
 from tandem.cli import profile as _profile  # noqa: E402
 from tandem.cli import runtime as _runtime  # noqa: E402
 from tandem.cli import traj as _traj  # noqa: E402
@@ -59,6 +60,7 @@ from tandem.cli import ui as _ui  # noqa: E402
 app.command("init", help="Set tandem up on this machine (onboarding wizard).")(_init.init)
 app.command("doctor", help="Check that everything tandem needs is present and working.")(_doctor.doctor)
 app.command("collect", help="Run a human-in-the-loop collection session.")(_collect.collect)
+app.command("plan", help="Decompose a task from a photo, with no robot and no GPU.")(_plan.plan)
 app.command("ui", help="Serve the web UI for collecting and visualizing trajectories.")(_ui.ui)
 app.add_typer(_profile.app, name="profile", help="Create and manage collection profiles.")
 app.add_typer(_config.app, name="config", help="Global settings and credentials.")

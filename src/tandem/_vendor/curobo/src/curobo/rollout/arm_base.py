@@ -9,6 +9,7 @@
 # its affiliates is strictly prohibited.
 #
 # Standard Library
+import math
 from abc import abstractmethod
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Union
@@ -238,6 +239,10 @@ class ArmBase(RolloutBase, ArmBaseConfig):
         # self.retract_state = None
         self._goal_buffer = Goal()
         self._goal_idx_update = True
+        # Extra action rows carrying NON-JOINT decision variables (the VAE retiming duration knots,
+        # see enable_time_variables). 0 keeps the action tensor exactly as cuRobo ships it.
+        self._n_time_rows = 0
+        self._n_time_vars = 0
         # Create the dynamical system used for rollouts
         self.dynamics_model = KinematicModel(self.model_cfg)
 
@@ -596,7 +601,7 @@ class ArmBase(RolloutBase, ArmBaseConfig):
             raise ValueError("start_state is not set in rollout")
         with profiler.record_function("robot_model/rollout"):
             state = self.dynamics_model.forward(
-                self.start_state, act_seq, self._goal_buffer.batch_current_state_idx
+                self.start_state, self.joint_act_seq(act_seq), self._goal_buffer.batch_current_state_idx
             )
 
         with profiler.record_function("cost/all"):
@@ -657,7 +662,7 @@ class ArmBase(RolloutBase, ArmBaseConfig):
     ) -> JointState:
         return self.dynamics_model.get_robot_command(
             current_state,
-            act_seq,
+            self.joint_act_seq(act_seq),
             shift_steps=shift_steps,
             state_idx=state_idx,
         )
@@ -692,10 +697,57 @@ class ArmBase(RolloutBase, ArmBaseConfig):
 
     @property
     def action_horizon(self):
-        return self.dynamics_model.action_horizon
+        """Rows of the optimizer's action tensor: the dynamics model's, plus any time-variable rows."""
+        return self.dynamics_model.action_horizon + self._n_time_rows
+
+    @property
+    def n_time_vars(self) -> int:
+        """Number of per-interval duration knots carried in the action tensor (0 when off)."""
+        return self._n_time_vars
+
+    def enable_time_variables(self, n_time_vars: int):
+        """Carry ``n_time_vars`` duration knots as extra rows of the action tensor.
+
+        The knots ride along as whole extra rows (ceil(n / d_action) of them) so the flat decision
+        vector the Newton/LBFGS layer owns simply gets longer -- that layer is layout-agnostic, and
+        the dynamics model never sees the extra rows because every act_seq consumer here routes
+        through :meth:`joint_act_seq`. That is what keeps the clique tensor-step CUDA kernels, which
+        read a single shared ``traj_dt[0]``, completely untouched."""
+        if n_time_vars <= 0:
+            self._n_time_rows = self._n_time_vars = 0
+            return
+        d_action = self.dynamics_model.d_action
+        self._n_time_vars = n_time_vars
+        self._n_time_rows = int(math.ceil(n_time_vars / d_action))
+
+    def joint_act_seq(self, act_seq: torch.Tensor) -> torch.Tensor:
+        """The JOINT rows of an action tensor -- what the dynamics model and the robot command need.
+
+        Keyed off the tensor's own shape rather than this instance's ``_n_time_rows``: TrajOptSolver
+        builds several rollouts from different config files, and only the GRADIENT one carries time
+        rows, so the safety rollout is handed a widened act_seq it must still trim."""
+        n_joint_rows = self.dynamics_model.action_horizon
+        if act_seq.shape[1] <= n_joint_rows:
+            return act_seq
+        return act_seq[:, :n_joint_rows].contiguous()
+
+    def time_vars_from_act_seq(self, act_seq: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+        """The duration knots [batch, n_time_vars] packed into an action tensor's extra rows."""
+        if self._n_time_rows == 0 or act_seq is None:
+            return None
+        if act_seq.shape[1] < self.action_horizon:
+            return None  # un-widened seed (e.g. the very first warmup call): uniform clock
+        tail = act_seq[:, self.dynamics_model.action_horizon :]
+        return tail.reshape(tail.shape[0], -1)[:, : self._n_time_vars]
 
     def get_init_action_seq(self) -> torch.Tensor:
         act_seq = self.dynamics_model.init_action_mean.unsqueeze(0).repeat(self.batch_size, 1, 1)
+        if self._n_time_rows > 0:
+            # zero knots == the uniform clock, so an un-warped seed is the constant-dt trajectory.
+            act_seq = torch.cat(
+                [act_seq, act_seq.new_zeros(act_seq.shape[0], self._n_time_rows, act_seq.shape[2])],
+                dim=1,
+            )
         return act_seq
 
     def reset_shape(self):

@@ -13,15 +13,18 @@ another's fixtures and module-level state as a side effect.
 
 from __future__ import annotations
 
-import sys
 import time
 from pathlib import Path
 
-FAKE_DRIVER = Path(__file__).parent / "fake_driver.py"
-
 
 class FakeRuntime:
-    """A runtime that runs the stand-in driver instead of `pixi run tiptop-run`."""
+    """A runtime that is ready and refuses to launch anything.
+
+    The session drives a planner BACKEND now, not a subprocess, so a runtime in a test exists only
+    to satisfy the readiness preflight. `command` raises rather than returning something plausible:
+    reaching it means something is still trying to spawn a planner, which is exactly the thing this
+    design removed.
+    """
 
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -32,16 +35,82 @@ class FakeRuntime:
         return None
 
     def command(self, args: list[str]) -> list[str]:
-        # Drop the console-script name; keep the flags so argument handling is exercised.
-        return [sys.executable, str(FAKE_DRIVER), *args[1:]]
+        raise AssertionError(f"nothing should be spawning a planner in a test: {args}")
+
+
+def use_fake_backend(monkeypatch, **kwargs):
+    """Make every session in this test build a FakeBackend, and return the one it builds.
+
+    Patched at the registry rather than on the profile, so `planner.backend` stays a real name and
+    the session takes exactly the path it takes in production.
+    """
+    from fake_backend import FakeBackend
+
+    from tandem.planners import registry
+
+    built: list = []
+
+    def backend_class(_name: str):
+        def build(runtime, **session_kwargs):
+            backend = FakeBackend(runtime, **{**session_kwargs, **kwargs})
+            built.append(backend)
+            return backend
+
+        return build
+
+    monkeypatch.setattr(registry, "backend_class", backend_class)
+    return built
+
+
+class FakeGemini:
+    """A model client that answers by the KIND of question it was asked.
+
+    Keying on the prompt rather than on call order is what makes it usable: a test that cares about
+    verification should not have to know how many times the engine will re-propose a plan, and one
+    that cares about re-planning should not have to pad a list with verdicts. Getting that wrong
+    does not fail cleanly either — a verdict handed to the proposal parser is rejected as "the plan
+    must contain at least one phase" and reprompted three times before the run gives up.
+    """
+
+    #: Text unique to each prompt, from tandem/planning/prompts.py.
+    PLAN_MARKER = "ORDERED list of phases"
+    CLASSIFY_MARKER = "Statement:"
+
+    def __init__(self, plan: str, verdicts=None):
+        self.plan = plan
+        # The last verdict repeats, so "it never verifies" needs one entry rather than a guess at
+        # how many retries the config allows.
+        self.verdicts = list(verdicts or [])
+        self.prompts: list[str] = []
+        self.plan_calls = 0
+        self.verdict_calls = 0
+        self.aio = self
+
+    @property
+    def models(self):
+        return self
+
+    async def generate_content(self, model, contents, config):
+        from unittest import mock
+
+        prompt = contents[-1]
+        self.prompts.append(prompt)
+        if self.CLASSIFY_MARKER in prompt and self.PLAN_MARKER not in prompt:
+            self.verdict_calls += 1
+            if not self.verdicts:
+                raise AssertionError("the model was asked to classify but no verdict was provided")
+            text = self.verdicts.pop(0) if len(self.verdicts) > 1 else self.verdicts[0]
+        else:
+            self.plan_calls += 1
+            text = self.plan
+        return mock.Mock(text=text)
 
 
 def wait_for(predicate, timeout: float = 8.0, interval: float = 0.02) -> bool:
     """Poll until a predicate holds. Returns False on timeout so the caller can assert.
 
-    The session engine is driven by threads reading pipes and a file tailer, so state
-    changes land asynchronously; sleeping a fixed amount instead would be both slower and
-    flakier.
+    The session engine is driven by threads reading pipes and a file tailer, so state changes land
+    asynchronously; sleeping a fixed amount instead would be both slower and flakier.
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:

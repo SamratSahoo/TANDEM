@@ -153,6 +153,30 @@ hitl:
   # SQLite cache for proposals only, useful while iterating on prompts. Never applied to
   # grounding or verification.
   cache_path: null
+  # What happens when the planner cannot plan one of the robot's phases.
+  #   teleop  the sub-goal is described to you and you do it by hand, checked exactly as any
+  #           other human step, and the task carries on
+  #   abort   the attempt ends and the episode is labeled a failure
+  #   replan  the failure is handed back to the model, which decomposes the task differently
+  # `teleop` is the option the old design could not offer at all: who did what was decided at
+  # planning time inside the planner's own process, so a phase it turned out not to be able to
+  # plan could only end the run.
+  on_robot_phase_failure: teleop
+  # Which camera the verification photo comes from. Third-person by default: after a hand-off
+  # the arm is wherever you left it, so a wrist view points nowhere useful.
+  verification_camera: external
+
+# ─────────────────────────────────────────────────────────────────────────────────────────
+#  planner  —  which task and motion planner tandem calls
+#
+#  tandem plans the task itself: it decides the phases, which are yours and which are the
+#  robot's, runs your legs as teleop, and asks a planner only for "achieve this goal in this
+#  scene". Which planner that is, is a setting — an unknown name is an error, never a silent
+#  fallback, because a dataset collected against a different planner from the one the config
+#  named is a dataset nobody can interpret afterwards.
+# ─────────────────────────────────────────────────────────────────────────────────────────
+planner:
+  backend: tiptop
 
 # recording: whether camera video is captured during execution, and at what rate.
 recording:

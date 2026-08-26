@@ -36,6 +36,12 @@ dependencies = [
     "tomlkit>=0.12",
     "fastapi>=0.110",
     "uvicorn[standard]>=0.27",
+    # Phase planning is tandem's own now, so its model client and image handling are tandem's
+    # dependencies rather than the planner's. Both are pure Python (google-genai pulls httpx,
+    # google-auth and websockets; Pillow ships wheels everywhere), so the laptop install stays a
+    # laptop install -- no torch, no CUDA, no camera SDK.
+    "google-genai>=1.0",
+    "pillow>=10.0",
 ]
 
 [project.optional-dependencies]

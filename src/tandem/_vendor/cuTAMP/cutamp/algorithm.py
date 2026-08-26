@@ -461,23 +461,15 @@ def run_cutamp(
     grasps: Optional[dict] = None,
     motion_gen: Optional[MotionGen] = None,
     experiment_dir: Optional[Path] = None,
-    reuse_plan_skeleton: Optional[PlanSkeleton] = None,
-    plan_out: Optional[dict] = None,
+    q_return: Optional[List[float]] = None,
 ):
     """Overall cuTAMP algorithm implementation.
 
-    ``reuse_plan_skeleton`` fixes the task plan instead of searching for one: the symbolic search is
-    skipped and the given skeleton is the only one considered, while its continuous parameters
-    (grasps, placements) and cuRobo trajectories are solved from scratch against THIS world. A
-    ground operator carries only its operator and object-name strings, so a skeleton from an earlier
-    call is reusable here as-is -- but it is the caller's job to check it still applies to this
-    world's initial state (its object names may not even exist here). Nothing validates it below;
-    an inapplicable skeleton simply fails to produce satisfying particles and returns no plan.
-
-    ``plan_out``, if given, is filled in with {"plan_skeleton": ...} -- the skeleton behind the
-    returned plan, so a caller can feed it back in later. Returned this way rather than in the
-    return tuple, which callers unpack positionally.
+    ``q_return`` overrides where the closing GoToInitial drives to; see ``solve_curobo``. Single-arm
+    only -- the dual solver builds its return leg from the named q0 rather than a configuration.
     """
+    if q_return is not None and config.arm_mode == "dual":
+        raise NotImplementedError("q_return is not supported for dual-arm plans")
     if config.m2t2_grasps and not grasps:
         _log.warning(f"M2T2 grasps enabled but no grasps provided! Falling back to grasp_dof={config.grasp_dof}")
 
@@ -489,21 +481,15 @@ def run_cutamp(
     _log.info(f"Initial State: {world.initial_state}")
     _log.info(f"Goal State: {world.goal_state}")
     with timer.time("get_plan_generator", log_callback=_log.info):
-        if reuse_plan_skeleton is not None:
-            # Reusing a task plan: yield exactly that skeleton, then run dry. The sampling loop below
-            # takes the StopIteration as "ran out of plans" and moves on to optimizing the one it got.
-            _log.info(f"Reusing the given task plan, skipping the symbolic search: {[op.name for op in reuse_plan_skeleton]}")
-            plan_gen = iter([reuse_plan_skeleton])
-        else:
-            plan_gen = task_plan_generator(
-                world.initial_state,
-                world.goal_state,
-                # Dual-arm skeletons come from a SEPARATE operator list so a plan can never mix a
-                # lockstep two-hand operator with a single-hand one (which would break the invariant
-                # that both hands are always in the same state).
-                operators=_operators_for(config),
-                explored_state_check=config.explored_state_check,
-            )
+        plan_gen = task_plan_generator(
+            world.initial_state,
+            world.goal_state,
+            # Dual-arm skeletons come from a SEPARATE operator list so a plan can never mix a
+            # lockstep two-hand operator with a single-hand one (which would break the invariant
+            # that both hands are always in the same state).
+            operators=_operators_for(config),
+            explored_state_check=config.explored_state_check,
+        )
 
     # Sample initial plans and particles
     found_solution_initially = False
@@ -538,7 +524,6 @@ def run_cutamp(
     _log.info(f"Num plans: {len(plan_queue)}, num skipped: {num_skipped_plans}")
 
     curobo_plan = None
-    curobo_plan_skeleton = None  # the skeleton curobo_plan came from; see plan_out
     failure_reason = None
     overall_metrics = {
         "num_optimized_plans": 0,
@@ -737,13 +722,10 @@ def run_cutamp(
                             obj_to_initial_pose=obj_to_initial_pose,
                             timeline=f"curobo_{curr_idx}",
                             motion_gen=motion_gen,
+                            **({} if solver is solve_curobo_dual else {"q_return": q_return}),
                         )
                         _log.info("Successful plan found!")
                         failure_reason = None
-                        # Pin the skeleton this plan came from. final_plan_skeleton below advances
-                        # with the loop, and curobo_plan is never cleared once set, so with
-                        # break_on_satisfying off the two can end up describing different skeletons.
-                        curobo_plan_skeleton = plan_skeleton
                         break
                     except MotionPlanningError as e:
                         _log.warning(f"Failed to motion plan: {e}")
@@ -834,9 +816,4 @@ def run_cutamp(
     # Log constraint and cost multipliers
     exp_logger.log_dict("multipliers", cost_reducer.cost_config)
     exp_logger.log_dict("tolerances", constraint_checker.constraint_config)
-    # Hand back the skeleton behind the plan we're returning, so a caller can reuse it (see
-    # reuse_plan_skeleton). Only on success: a skeleton whose motion planning failed is not one to
-    # feed back in. overall_metrics keeps its own str() copy for the logs, which is not re-groundable.
-    if plan_out is not None:
-        plan_out["plan_skeleton"] = curobo_plan_skeleton
     return curobo_plan, overall_metrics["num_satisfying_final"], failure_reason

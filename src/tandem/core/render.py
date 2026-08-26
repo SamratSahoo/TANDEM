@@ -84,7 +84,7 @@ def write_tiptop_config(profile: Profile, dest: Path) -> Path:
 
 
 def render_tamp_overrides(profile: Profile, *, runtime_dir: Path | None = None) -> dict:
-    """The flat dict handed to ``tiptop-run --curobo-overrides``.
+    """The flat dict of solver-cost knobs the planner backend is built with.
 
     Path-valued knobs are resolved to absolute paths here rather than left for tiptop to
     interpret against a repo root, so "relative" means "relative to the profile" — the only
@@ -130,32 +130,19 @@ def write_tamp_overrides(profile: Profile, dest: Path, *, runtime_dir: Path | No
     return dest
 
 
-def render_hitl_config(profile: Profile) -> dict:
-    """The `hitl` block handed to ``tiptop-run --hitl-config``.
+def resolve_cache_path(profile: Profile) -> str | None:
+    """The proposal cache's absolute path, or None when the profile sets none.
 
-    Emitted whole rather than sparsely: the reader rejects unknown keys loudly (unlike the
-    cost overrides, which drop them silently), so sending every field is safe and makes the
-    JSON on disk a complete record of what the run was configured with.
+    A relative cache path means "beside the profile", the same rule the checkpoint paths follow —
+    not "wherever the command happened to be started from". One reading, because three different
+    commands read this key: a collection session, `tandem plan --profile`, and `tandem doctor`.
+    Resolving it differently in any of them means they open DIFFERENT SQLite files, so the cache
+    never hits across them — and since opening one creates its parent directories, the odd one out
+    silently litters a second cache wherever it was run from.
     """
-    data = profile.hitl.model_dump(mode="python")
-    if data.get("cache_path"):
-        # A relative cache path means "beside the profile", the same rule the checkpoint paths
-        # follow — not "wherever the driver happened to be started from".
-        data["cache_path"] = str(_resolve_asset(profile, str(data["cache_path"]), "cache_path", None))
-    return data
-
-
-def write_hitl_config(profile: Profile, dest: Path) -> Path | None:
-    """Write the HITL JSON, or return None when phase planning is off.
-
-    Returning None matters: with no --hitl-config the driver never imports the package at all,
-    so a disabled run is not merely a run that skips the feature.
-    """
-    if not profile.hitl.enabled:
+    if not profile.hitl.cache_path:
         return None
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(json.dumps(render_hitl_config(profile), indent=2, sort_keys=True) + "\n")
-    return dest
+    return str(_resolve_asset(profile, str(profile.hitl.cache_path), "cache_path", None))
 
 
 def check_assets(profile: Profile, *, runtime_dir: Path | None = None) -> list[str]:
@@ -205,9 +192,12 @@ def render_env(
     runtime_dir: Path | None = None,
     base: dict[str, str] | None = None,
 ) -> dict[str, str]:
-    """The environment for a tiptop-run child.
+    """The environment the planner backend's process runs in.
 
-    Every name here is read by code in the vendored tree; nothing is aspirational.
+    Every name here is read by code in the vendored tree; nothing is aspirational. tandem no longer
+    spawns the planner's own CLI — it runs its own sidecar inside the same environment (see
+    ``tandem.planners.tiptop``) — but that sidecar calls the same functions, which read the same
+    variables.
     """
     env = dict(base if base is not None else os.environ)
 
@@ -284,7 +274,6 @@ def prepare_session_files(profile: Profile, session_id: str, *, runtime_dir: Pat
 
     config_file = write_tiptop_config(profile, _session_config_path(profile))
     overrides_file = write_tamp_overrides(profile, session_dir / "curobo-overrides.json", runtime_dir=runtime_dir)
-    hitl_file = write_hitl_config(profile, session_dir / "hitl-config.json")
 
     events_file = session_dir / "events.jsonl"
     # Pre-create so the tailer can attach before the child writes its first line.
@@ -301,5 +290,4 @@ def prepare_session_files(profile: Profile, session_id: str, *, runtime_dir: Pat
         "events_file": events_file,
         "config_file": config_file,
         "overrides_file": overrides_file,
-        "hitl_file": hitl_file,
     }

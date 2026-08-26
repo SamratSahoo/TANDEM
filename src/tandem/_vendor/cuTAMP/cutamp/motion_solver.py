@@ -39,6 +39,30 @@ class MotionPlanningError(RuntimeError):
     pass
 
 
+def _start_state_in_world_collision(result) -> bool:
+    """Whether cuRobo rejected a plan because its START configuration is in world collision."""
+    return result.status is not None and result.status.name == "INVALID_START_STATE_WORLD_COLLISION"
+
+
+@contextlib.contextmanager
+def _obstacles_hidden(motion_gen, names):
+    """Hide named world obstacles for one planning segment, then restore them.
+
+    For the reach-into surfaces (``TAMPWorld.pick_transparent``): an open container reconstructs as
+    a filled solid, so the legs that deliberately enter it -- the grasp approach, and the retract
+    that lifts the held object back out -- are unplannable while it is enabled. Every other segment,
+    transit above all, keeps it as a full obstacle.
+    """
+    names = tuple(names)
+    for name in names:
+        motion_gen.world_coll_checker.enable_obstacle(name=name, enable=False)
+    try:
+        yield
+    finally:
+        for name in names:
+            motion_gen.world_coll_checker.enable_obstacle(name=name, enable=True)
+
+
 def solve_curobo(
     plan_info: PlanContainer,
     best_particle: Particles,
@@ -49,10 +73,16 @@ def solve_curobo(
     obj_to_initial_pose: dict[str, torch.Tensor],
     timeline: str = "curobo",
     motion_gen: Optional[MotionGen] = None,
+    q_return: Optional[torch.Tensor] = None,
 ):
     """
     Solve for full motion plan given a plan skeleton and optimized particles.
     Note that visualization adds non-trivial overhead.
+
+    ``q_return`` overrides the configuration the closing GoToInitial drives to. It defaults to q0 --
+    the configuration this plan started from -- which is what a standalone plan wants. A caller that
+    CONCATENATES plans needs the override: the second plan starts wherever the first one handed over,
+    so its q0 is a mid-episode pose, and defaulting would end the episode by driving back to it.
     """
     plan_skeleton = plan_info["plan_skeleton"]
     if motion_gen is None:
@@ -159,17 +189,20 @@ def solve_curobo(
                 world_from_ee = world_from_grasp @ world.tool_from_ee
 
                 world_from_approach = world_from_ee @ approach_offset
-                approach_result = motion_gen.plan_single(retract_js, Pose.from_matrix(world_from_approach), plan_config)
-                if not approach_result.success:
-                    raise MotionPlanningError(
-                        f"Failed to plan for approach for {ground_op.name}. Status: {approach_result.status}"
+                with _obstacles_hidden(motion_gen, world.pick_transparent):
+                    approach_result = motion_gen.plan_single(
+                        retract_js, Pose.from_matrix(world_from_approach), plan_config
                     )
+                    if not approach_result.success:
+                        raise MotionPlanningError(
+                            f"Failed to plan for approach for {ground_op.name}. Status: {approach_result.status}"
+                        )
 
-                # Plan to from approach to target EE pose for grasp
-                approach_js = JointState.from_position(approach_result.get_interpolated_plan().position[-1:])
-                end_result = motion_gen.plan_single(
-                    approach_js, Pose.from_matrix(world_from_ee), constrained_plan_config
-                )
+                    # Plan to from approach to target EE pose for grasp
+                    approach_js = JointState.from_position(approach_result.get_interpolated_plan().position[-1:])
+                    end_result = motion_gen.plan_single(
+                        approach_js, Pose.from_matrix(world_from_ee), constrained_plan_config
+                    )
                 if not end_result.success:
                     raise MotionPlanningError(
                         f"Failed to plan from approach to end for {ground_op.name}. Status: {end_result.status}"
@@ -265,37 +298,8 @@ def solve_curobo(
             with timer.time(f"{timeline}_planning"):
                 start_js = last_js
 
-                # Plan to retract
-                world_from_ee = world.kin_model.get_state(start_js.position).ee_pose.get_matrix()[0]
-                world_from_ee_start = world_from_ee
-                world_from_retract = world_from_ee @ approach_offset
-                retract_result = motion_gen.plan_single(
-                    start_js, Pose.from_matrix(world_from_retract), constrained_plan_config
-                )
-                if not retract_result.success:
-                    if (
-                        retract_result.status is not None
-                        and retract_result.status.name == "INVALID_START_STATE_WORLD_COLLISION"
-                    ):
-                        kin_config = motion_gen.kinematics.kinematics_config
-                        link_name = "attached_object"
-                        curr_obj_sphs = kin_config.get_link_spheres(link_name).clone()
-                        kin_config.detach_object(link_name)
-                        retract_result = motion_gen.plan_single(
-                            start_js, Pose.from_matrix(world_from_retract), plan_config
-                        )
-                        kin_config.attach_object(sphere_tensor=curr_obj_sphs, link_name=link_name)
-                        if not retract_result.success:
-                            raise MotionPlanningError(
-                                f"Failed to plan for retract for {ground_op.name}. Status: {retract_result.status}"
-                            )
-                    else:
-                        raise MotionPlanningError(
-                            f"Failed to plan for retract for {ground_op.name}. Status: {retract_result.status}"
-                        )
-
-                # Plan from retract to approach
-                retract_js = JointState.from_position(retract_result.get_interpolated_plan().position[-1:])
+                # Where the object has to end up. Independent of the retract, so compute it once.
+                world_from_ee_start = world.kin_model.get_state(start_js.position).ee_pose.get_matrix()[0]
                 world_from_obj = action_4dof_to_mat4x4(best_particle[placement].clone())
                 if best_particle[grasp].shape == (4, 4):  # already a 4x4, probably came from M2T2
                     obj_from_grasp = best_particle[grasp].clone()
@@ -306,19 +310,70 @@ def solve_curobo(
                 world_from_grasp = world_from_obj @ obj_from_grasp
                 world_from_ee = world_from_grasp @ world.tool_from_ee
                 world_from_approaches = world_from_ee @ approach_offsets
-                for app_idx, world_from_approach in enumerate(world_from_approaches):
-                    approach_result = motion_gen.plan_single(
-                        retract_js, Pose.from_matrix(world_from_approach), plan_config
-                    )
-                    _log.debug(
-                        f"Approach attempt {app_idx + 1}/{len(world_from_approaches)}. {approach_result.success}"
-                    )
-                    if approach_result.success:
+
+                # Lift the held object clear of whatever it came out of, THEN transit to the place.
+                #
+                # The retract runs with the reach-into surfaces hidden (it starts inside one) and as
+                # a LADDER rather than a fixed 5 cm, because the approach that follows starts where
+                # the retract ended and runs with those surfaces back ON. If the retract is too
+                # short the held object is still inside the container's solid proxy and cuRobo
+                # rejects the approach with INVALID_START_STATE_WORLD_COLLISION -- identically for
+                # every approach offset, since those vary only the GOAL. Measured on a scene reset:
+                # a plate rim topping out at z = +0.042 against toy bottoms at z = -0.011 needs
+                # 5.1-5.4 cm of lift, and the grasps are near-vertical so a 5 cm tool-axis retract
+                # supplies at most 5.0 cm -- 0/56 grasps cleared, and every one of those picks
+                # failed. Climbing the ladder is what keeps the approach itself honest: it is an
+                # unconstrained free-space plan across the table, and planning THAT with the
+                # container hidden would let cuRobo sweep the held object straight through it.
+                retract_result = approach_result = None
+                retract_status = approach_status = None
+                for ret_idx, world_from_retract in enumerate(world_from_ee_start @ approach_offsets):
+                    with _obstacles_hidden(motion_gen, world.pick_transparent):
+                        ret_result = motion_gen.plan_single(
+                            start_js, Pose.from_matrix(world_from_retract), constrained_plan_config
+                        )
+                        if not ret_result.success and _start_state_in_world_collision(ret_result):
+                            # Start state still invalid: the held object's own spheres. Hide it for
+                            # this one short constrained move, then put it straight back.
+                            kin_config = motion_gen.kinematics.kinematics_config
+                            link_name = "attached_object"
+                            curr_obj_sphs = kin_config.get_link_spheres(link_name).clone()
+                            kin_config.detach_object(link_name)
+                            ret_result = motion_gen.plan_single(
+                                start_js, Pose.from_matrix(world_from_retract), plan_config
+                            )
+                            kin_config.attach_object(sphere_tensor=curr_obj_sphs, link_name=link_name)
+                    if not ret_result.success:
+                        retract_status = ret_result.status
+                        continue
+
+                    retract_js = JointState.from_position(ret_result.get_interpolated_plan().position[-1:])
+                    for app_idx, world_from_approach in enumerate(world_from_approaches):
+                        app_result = motion_gen.plan_single(
+                            retract_js, Pose.from_matrix(world_from_approach), plan_config
+                        )
+                        _log.debug(
+                            f"Retract attempt {ret_idx + 1}/{len(approach_offsets)}, approach attempt "
+                            f"{app_idx + 1}/{len(world_from_approaches)}. {app_result.success}"
+                        )
+                        if app_result.success:
+                            break
+                    approach_status = app_result.status
+                    if app_result.success:
+                        retract_result, approach_result = ret_result, app_result
+                        break
+                    if not _start_state_in_world_collision(app_result):
+                        # A longer retract only moves the approach's START state, so a failure that
+                        # is not about the start state will not be fixed by climbing the ladder.
                         break
 
-                if not approach_result.success:
+                if approach_result is None:
+                    if retract_status is not None and approach_status is None:
+                        raise MotionPlanningError(
+                            f"Failed to plan for retract for {ground_op.name}. Status: {retract_status}"
+                        )
                     raise MotionPlanningError(
-                        f"Failed to plan for approach for {ground_op.name}. Status: {approach_result.status}"
+                        f"Failed to plan for approach for {ground_op.name}. Status: {approach_status}"
                     )
 
                 # Plan from approach to end js
@@ -385,7 +440,22 @@ def solve_curobo(
                 interp = torch.linspace(0.02, end_val, 20)[:, None]
                 interp = interp.repeat(1, 2)
             dt = 0.02
-            accum_plans.append({"type": "gripper", "action": "open", "label": ground_op.name})
+            accum_plans.append(
+                {
+                    "type": "gripper",
+                    "action": "open",
+                    "label": ground_op.name,
+                    # Where this Place leaves the object, in world frame. Recorded on the step because
+                    # this is the only point it is known exactly: it is what the collision world is
+                    # updated to on the line above, and it accounts for the approach offsets and the
+                    # attachment transform that a caller reconstructing it from the trajectory's
+                    # kinematics would have to re-derive (and get wrong -- ee_from_obj above is taken
+                    # at the START of this operator, not at the grasp). A consumer that plans a
+                    # FOLLOW-ON problem against the post-plan scene needs exactly this.
+                    "placed_object": obj,
+                    "world_from_obj": obj_pose.detach().cpu().numpy(),
+                }
+            )
 
             all_pos = last_js.position.expand(interp.shape[0], -1).cpu()
             all_pos = torch.cat([all_pos, interp], dim=1)
@@ -423,19 +493,10 @@ def solve_curobo(
     last_js = JointState.from_position(plan[-1:].position)
     ts = visualizer.log_joint_trajectory(plan.position, timeline=timeline, start_time=ts, dt=dt)
 
-    # Plan to go home at the end. `config.q_home` when the caller named one, else q0 -- this plan's
-    # own starting configuration, which is only "home" if something put the arm there beforehand.
-    # The distinction matters because this target is the SAME for every particle: when it cannot be
-    # reached, no particle's trajectory can complete, and the whole plan fails at once.
+    # Plan to go home at the end, which is q0 unless the caller named somewhere else (see q_return).
     q_last = last_js.position[0]
-    if config.q_home is not None:
-        if len(config.q_home) != q_last.shape[0]:
-            raise ValueError(
-                f"config.q_home has {len(config.q_home)} joints but the robot has {q_last.shape[0]}"
-            )
-        q_home = torch.tensor(config.q_home, dtype=q_last.dtype, device=q_last.device)
-    else:
-        q_home = best_particle["q0"].clone()
+    q0 = best_particle["q0"]
+    q_home = q0.clone() if q_return is None else torch.as_tensor(q_return).to(q0).clone()
     js_last = JointState.from_position(q_last[None])
     js_home = JointState.from_position(q_home[None])
     with timer.time(f"{timeline}_planning"):

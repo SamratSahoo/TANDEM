@@ -272,7 +272,9 @@ class HitlSpec(BaseModel):
     Off by default. Disabled, the package is never imported and a session behaves exactly as
     it always has — the operator can still press "hand to human" whenever they like.
 
-    Mirrors tiptop.hitl.config.HITLConfig; keep the two in step.
+    Read by ``tandem.planning``, which is tandem's own code -- so this model is the definition
+    of these settings rather than a mirror of one inside a planner, and ``extra: forbid`` below is
+    the only validation layer there is.
     """
 
     model_config = {"extra": "forbid"}
@@ -303,12 +305,83 @@ class HitlSpec(BaseModel):
     # SQLite cache for PROPOSAL responses only. Worth setting while iterating on prompts;
     # never applied to grounding or verification.
     cache_path: str | None = None
+    # What happens when the planner cannot plan a robot phase. `teleop` describes the sub-goal to
+    # the operator and lets them do it by hand, checked exactly as any other human phase; `abort`
+    # ends the attempt; `replan` feeds the failure back to the proposer. `teleop` is the option the
+    # old design could not express at all -- the executor split was decided at proposal time inside
+    # the planner's process, so a phase it turned out not to be able to plan could only end the run.
+    on_robot_phase_failure: str = "teleop"
+    # Which camera the verification frame comes from. Third-person by default: after a hand-off the
+    # arm is wherever the operator left it, so a wrist view points nowhere useful.
+    verification_camera: str = "external"
 
-    @field_validator("verify_retries", "max_attempts")
+    @field_validator("verify_retries")
     @classmethod
     def _non_negative(cls, v: int) -> int:
         if v < 0:
             raise ValueError("must be >= 0")
+        return v
+
+    @field_validator("max_attempts")
+    @classmethod
+    def _at_least_one_attempt(cls, v: int) -> int:
+        # Not merely non-negative. Zero attempts means never asking, which is not a configuration of
+        # the feature but a way of turning it off, and it used to pass validation here and then raise
+        # out of the planner package with the raw traceback the CLI exists to suppress.
+        if v < 1:
+            raise ValueError("must be >= 1 (0 would mean never asking the model at all)")
+        return v
+
+    @field_validator("on_robot_phase_failure")
+    @classmethod
+    def _known_failure_policy(cls, v: str) -> str:
+        from tandem.planning.config import ON_FAILURE_CHOICES
+
+        if v not in ON_FAILURE_CHOICES:
+            raise ValueError(f"must be one of {', '.join(ON_FAILURE_CHOICES)}")
+        return v
+
+    @field_validator("verification_camera")
+    @classmethod
+    def _known_camera(cls, v: str) -> str:
+        if v not in ("external", "hand", "perception"):
+            raise ValueError("must be one of external, hand, perception")
+        return v
+
+    def to_planning_config(self, *, cache_path: str | None = None):
+        """The same settings as ``tandem.planning`` takes them.
+
+        A plain dataclass on the other side, so the phase planner can be used -- and tested -- with
+        no profile, no runtime and no robot. ``cache_path`` overrides the stored one when a caller
+        has already resolved it against the profile directory.
+        """
+        from tandem.planning.config import PlanningConfig
+
+        data = self.model_dump(mode="python")
+        data["cache_path"] = cache_path if cache_path is not None else data.get("cache_path")
+        return PlanningConfig(**data)
+
+
+class PlannerSpec(BaseModel):
+    """Which task and motion planner tandem drives.
+
+    tandem plans the task itself and calls a planner for the robot's phases, so which planner that
+    is, is a setting. `backend` names one of ``tandem.planners.registry.available()``; an unknown
+    name is an error rather than a fallback, because a session that silently planned with a
+    different planner from the one asked for produces a dataset nobody can interpret afterwards.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    backend: str = "tiptop"
+
+    @field_validator("backend")
+    @classmethod
+    def _known_backend(cls, v: str) -> str:
+        from tandem.planners import registry
+
+        if v not in registry.available():
+            raise ValueError(f"must be one of {', '.join(registry.available())}")
         return v
 
 
@@ -343,6 +416,7 @@ class Profile(BaseModel):
     # Deliberately NOT part of `tamp`: that dict is a solver-cost funnel read by a hand-written
     # if-ladder, and this changes what a dataset CONTAINS rather than how the arm moves.
     hitl: HitlSpec = Field(default_factory=HitlSpec)
+    planner: PlannerSpec = Field(default_factory=PlannerSpec)
     recording: RecordingSpec = Field(default_factory=RecordingSpec)
     export: ExportSpec = Field(default_factory=ExportSpec)
 

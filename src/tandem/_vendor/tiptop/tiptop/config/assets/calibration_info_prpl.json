@@ -1,14 +1,14 @@
 {
   "13222437": {
     "pose": [
-      0.039348876190207376,
-      0.06542238381036676,
-      -0.13254275355821651,
-      -0.427813593344996,
-      0.005794548753957018,
-      3.125632412177157
+      0.03248409488997367,
+      0.06982439842116614,
+      -0.13126433852707062,
+      -0.3453526819383341,
+      0.004192260479797705,
+      3.124541086636678
     ],
-    "timestamp": 1785182754.0539758
+    "timestamp": 1786984253.0329657
   },
   "39379013": {
     "pose": [
@@ -32,6 +32,6 @@
       0.586737186097219
     ],
     "timestamp": 1786578132.566384,
-    "source": "copied verbatim from droid 34032889_left (droid/droid/calibration/calibration_info.json, varied_camera_1), recalibrated 2026-08-12 19:42. Supersedes 2026-08-10 19:54, which it agrees with to ~1.9deg in rotation and ~22mm in translation (dx -8.5, dy +17.9, dz -10.0 mm). world_from_cam, the left ZED frame -- which is the frame tiptop's rgb/K_left come from"
+    "source": "copied from ~/hitl-tamp-vla assets/calibration_info_prpl.json on 2026-08-16 (same rig, same unit); originally from droid 34032889_left (droid/droid/calibration/calibration_info.json, varied_camera_1), recalibrated 2026-08-12 19:42. world_from_cam, the left ZED frame -- which is the frame tiptop's rgb/K_left come from, and what cameras.perception: external reads"
   }
 }

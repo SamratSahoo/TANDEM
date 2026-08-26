@@ -1,6 +1,7 @@
 import json
 import os
 import re
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -10,12 +11,39 @@ from scipy.spatial.transform import Rotation
 
 config_dir = Path(__file__).parent
 config_assets_dir = config_dir / "assets"
-# $TIPTOP_CONFIG / $TIPTOP_CALIBRATION let a caller own these files (tandem points them at
-# the active profile). Unset, both resolve exactly as they did before.
-tiptop_config_path = Path(os.environ.get("TIPTOP_CONFIG") or (config_dir / "tiptop.yml"))
+# $TIPTOP_CALIBRATION lets a caller own this file. tandem points it at the active profile, so a
+# re-calibration lands next to the data it describes instead of inside the shared runtime, and
+# nothing about a run depends on mutable state there. Unset, it resolves exactly as it did before.
 calib_info_path = Path(
     os.environ.get("TIPTOP_CALIBRATION") or (config_assets_dir / "calibration_info.json")
 )
+
+
+def _resolve_config_path() -> Path:
+    """Which YAML ``tiptop_cfg()`` reads, honouring ``$TIPTOP_CONFIG``.
+
+    Robot type, DOF and camera setup all live in one file, so a second embodiment needs a second
+    file rather than a few overrides -- and the entry points are tyro CLIs, which reject the
+    ``key=value`` tokens ``OmegaConf.from_cli`` would otherwise pick up. Set ``TIPTOP_CONFIG`` to a
+    filename (resolved inside this directory) or an absolute path, e.g.::
+
+        TIPTOP_CONFIG=tiptop_yam.yml pixi run python -m tiptop.tiptop_websocket_server
+
+    Everything that reads ``tiptop_config_path`` follows, including the copy of the config that
+    ``recording.save_run_outputs`` drops into each run directory.
+    """
+    override = (os.environ.get("TIPTOP_CONFIG") or "").strip()
+    if not override:
+        return config_dir / "tiptop.yml"
+    path = Path(os.path.expanduser(override))
+    if not path.is_absolute():
+        path = config_dir / path
+    if not path.exists():
+        raise FileNotFoundError(f"TIPTOP_CONFIG={override!r} resolved to {path}, which does not exist")
+    return path
+
+
+tiptop_config_path = _resolve_config_path()
 
 # data-collection scopes each robot's data to a workspace and spawns tiptop with $DC_WORKSPACE set
 # (see data-collection/server/lib/sessions.js). Each robot has its own cameras, so a workspace can
@@ -30,8 +58,8 @@ def workspace_calib_path() -> Path | None:
 
     Existence is not checked: reads layer it on only if present, writes create it.
     """
-    # An explicit $TIPTOP_CALIBRATION is already the single source for this robot, so there
-    # is nothing to layer over it -- and layering would send writes into the shared runtime.
+    # An explicit $TIPTOP_CALIBRATION is already the single source for this robot, so there is
+    # nothing to layer over it -- and layering would send writes into the shared runtime.
     if os.environ.get("TIPTOP_CALIBRATION"):
         return None
     workspace = (os.environ.get("DC_WORKSPACE") or "").strip()
@@ -54,6 +82,29 @@ def tiptop_cfg(force_reload: bool = False) -> DictConfig:
         cli = OmegaConf.from_cli()
         _cached_cfg = OmegaConf.merge(_cached_cfg, cli)
     return _cached_cfg
+
+
+@contextmanager
+def as_robot_type(robot_type: str):
+    """Make ``robot_type`` the active embodiment for the duration of the block.
+
+    ``robot.type`` is read by ~50 call sites to decide which robot they are talking about — cuRobo
+    solver selection, the workspace cuboids, the Rerun model, cuTAMP's ``TAMPConfiguration.robot``,
+    the hardware client. Swapping it here is what makes all of them agree at once.
+
+    Exists because one embodiment per process is not enough for a bimanual YAM: cuTAMP plans a
+    single kinematic chain, so an episode that uses both arms genuinely runs two embodiments in
+    sequence (``bimanual_yam_left`` then ``bimanual_yam_right``). Restoring on exit keeps a
+    single-embodiment session byte-identical. Not a lock: tiptop plans and executes one arm at a
+    time, and nothing else in the process mutates ``robot.type``.
+    """
+    cfg = tiptop_cfg()
+    previous = cfg.robot.type
+    cfg.robot.type = robot_type
+    try:
+        yield robot_type
+    finally:
+        cfg.robot.type = previous
 
 
 def load_calibration_info():

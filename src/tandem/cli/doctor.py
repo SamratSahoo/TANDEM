@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import typer
 
@@ -10,7 +11,7 @@ from tandem.cli import theme
 from tandem.core import probe, profiles, render
 from tandem.core import runtime as runtime_mod
 from tandem.core import settings as settings_mod
-from tandem.core.errors import ProfileError
+from tandem.core.errors import ProfileError, TandemError
 
 GROUP_TITLES = {
     "core": "environment",
@@ -118,6 +119,8 @@ def collect_checks(*, profile_name: str | None = None, probe_hardware: bool = Tr
             )
         )
 
+    checks.append(_phase_planning_check(profile))
+
     if probe_hardware:
         checks.append(probe.check_zed_sdk())
         checks.append(probe.check_robot(profile.robot.host, profile.robot.port))
@@ -125,6 +128,64 @@ def collect_checks(*, profile_name: str | None = None, probe_hardware: bool = Tr
         checks.append(probe.check_m2t2(profile.perception.m2t2.url))
 
     return checks
+
+
+def _phase_planning_check(profile) -> probe.Check:
+    """Whether a session with phase planning on would get as far as proposing a plan.
+
+    Answerable without the runtime now that the phase planner is tandem's own — which is the point.
+    Before, "will this work?" needed a warm cuRobo, an open camera and an arm, so the answer arrived
+    with an operator already standing next to one.
+    """
+    from tandem.core import secrets
+    from tandem.planners import registry
+
+    backend = profile.planner.backend
+    if not profile.hitl.enabled:
+        return probe.Check(
+            "phase planning",
+            probe.SKIP,
+            f"off · the {backend} planner gets the whole instruction as one goal",
+            "Set hitl.enabled to let a model split it into robot and human steps.",
+            group="profile",
+        )
+
+    try:
+        caps = registry.capabilities(backend)
+    except TandemError as exc:
+        return probe.Check("phase planning", probe.FAIL, exc.message, exc.hint or "", group="profile")
+
+    if not secrets.gemini_api_key():
+        return probe.Check(
+            "phase planning",
+            probe.FAIL,
+            "on, but no Gemini API key is set — nothing can propose a plan",
+            "Run `tandem config set-gemini-key`.",
+            group="profile",
+        )
+
+    # Through render, so this names the file a session would actually use rather than one relative
+    # to wherever doctor was run from.
+    cache = render.resolve_cache_path(profile)
+    if cache:
+        parent = Path(cache).parent
+        if not parent.is_dir():
+            return probe.Check(
+                "phase planning",
+                probe.WARN,
+                f"the proposal cache directory does not exist: {parent}",
+                "Create it, or clear hitl.cache_path.",
+                group="profile",
+            )
+
+    detail = (
+        f"{profile.hitl.proposal_model} splits the task · {profile.hitl.vlm_model} checks it · "
+        f"goals in {backend}'s {', '.join(caps.goal_predicates)}"
+    )
+    hint = ""
+    if profile.hitl.on_robot_phase_failure == "teleop":
+        hint = "A phase the planner cannot plan is offered to you as teleop."
+    return probe.Check("phase planning", probe.OK, detail, hint, group="profile")
 
 
 def doctor(

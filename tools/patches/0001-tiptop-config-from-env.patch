@@ -1,41 +1,43 @@
-Let a tandem profile own tiptop's config and calibration files.
+Let a tandem profile own tiptop's per-robot calibration file.
 
-Upstream resolves both relative to the installed package: tiptop.yml sits beside the code,
-and per-robot extrinsics are picked with $DC_WORKSPACE out of an assets directory inside the
-tree. tandem keeps each profile self-contained instead — its own tiptop.yml rendered from
-profile.yml, and its own calibration.json next to the trajectories it produced — so nothing
-about a run depends on mutable state inside the shared runtime, and a re-calibration lands
-next to the data it describes.
+Upstream resolves camera extrinsics relative to the installed package: they are picked with
+$DC_WORKSPACE out of an assets directory inside the tree. tandem keeps each profile
+self-contained instead — its own calibration.json next to the trajectories it produced — so
+nothing about a run depends on mutable state inside the shared runtime, and a re-calibration
+lands next to the data it describes.
 
-$TIPTOP_CALIBRATION also disables the workspace layering, because with an explicit file
-there is nothing left to layer: it is already the single source, and leaving the layering on
-would make writes land in the runtime instead of the profile.
+$TIPTOP_CALIBRATION also disables the workspace layering, because with an explicit file there
+is nothing left to layer: it is already the single source, and leaving the layering on would
+make writes land in the runtime instead of the profile.
 
-Both variables fall back to the upstream behaviour when unset.
+The variable falls back to upstream's behaviour when unset. Its companion $TIPTOP_CONFIG needs
+no patch any more — upstream implements it natively in _resolve_config_path(), with slightly
+different semantics that suit tandem fine: a relative value resolves inside tiptop/config/
+rather than against the working directory, and a missing file raises at import. tandem always
+passes an absolute path to a file it has just written.
 
 --- a/tiptop/config/__init__.py
 +++ b/tiptop/config/__init__.py
-@@ -10,8 +10,12 @@
-
+@@ -11,7 +11,12 @@ from scipy.spatial.transform import Rotation
+ 
  config_dir = Path(__file__).parent
  config_assets_dir = config_dir / "assets"
--tiptop_config_path = config_dir / "tiptop.yml"
 -calib_info_path = config_assets_dir / "calibration_info.json"
-+# $TIPTOP_CONFIG / $TIPTOP_CALIBRATION let a caller own these files (tandem points them at
-+# the active profile). Unset, both resolve exactly as they did before.
-+tiptop_config_path = Path(os.environ.get("TIPTOP_CONFIG") or (config_dir / "tiptop.yml"))
++# $TIPTOP_CALIBRATION lets a caller own this file. tandem points it at the active profile, so a
++# re-calibration lands next to the data it describes instead of inside the shared runtime, and
++# nothing about a run depends on mutable state there. Unset, it resolves exactly as it did before.
 +calib_info_path = Path(
 +    os.environ.get("TIPTOP_CALIBRATION") or (config_assets_dir / "calibration_info.json")
 +)
-
- # data-collection scopes each robot's data to a workspace and spawns tiptop with $DC_WORKSPACE set
- # (see data-collection/server/lib/sessions.js). Each robot has its own cameras, so a workspace can
-@@ -25,6 +29,10 @@
-
+ 
+ 
+ def _resolve_config_path() -> Path:
+@@ -53,6 +58,10 @@ def workspace_calib_path() -> Path | None:
+ 
      Existence is not checked: reads layer it on only if present, writes create it.
      """
-+    # An explicit $TIPTOP_CALIBRATION is already the single source for this robot, so there
-+    # is nothing to layer over it -- and layering would send writes into the shared runtime.
++    # An explicit $TIPTOP_CALIBRATION is already the single source for this robot, so there is
++    # nothing to layer over it -- and layering would send writes into the shared runtime.
 +    if os.environ.get("TIPTOP_CALIBRATION"):
 +        return None
      workspace = (os.environ.get("DC_WORKSPACE") or "").strip()

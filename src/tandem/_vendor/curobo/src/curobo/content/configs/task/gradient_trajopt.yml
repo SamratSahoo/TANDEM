@@ -91,10 +91,20 @@ cost:
   # cluster -> pull the motion style toward DROID (see cost/vae_manifold_cost.py). This is the
   # DECIDING phase for cuTAMP/tiptop-viz (enable_finetune_trajopt=False), so set the weight HERE.
   # weight: 0 disables. checkpoint_path falls back to the cost-module default (vae/checkpoints/vae_full.pt).
+  # `retiming` (the vae_retiming tamp_override) additionally makes the duration of EACH waypoint
+  # interval a decision variable of this same LBFGS solve, carried as extra rows of the action
+  # tensor, so one backward pass yields d(cost)/d(waypoint) and d(cost)/d(dt_i) together. The total
+  # duration stays (horizon - 1) * source_dt; only its distribution moves. It is set here rather
+  # than in particle_trajopt.yml on purpose -- keeping MPPI on the stock action shape means the
+  # knots are searched only by the gradient phase that can actually differentiate them.
   vae_manifold_cfg:
     weight: 0.0
     n_joints: 7
     source_dt: 0.15
+    retiming: False
+    retime_scale: 0.7          # longest/shortest interval ratio is railed at exp(2 * this) ~ 4x
+    retime_smooth_weight: 10.0 # penalizes a sawtooth clock (relative to maha^2)
+    retime_limit_weight: 500.0 # hinge on the warped vel/accel vs the arm's limits
 
   # RND novelty cost: encode each segment's joint [q|v|a|j] motion with the DROID-trained Filterbank
   # VAE (same latent as vae_manifold_cfg) and MAXIMIZE its RND novelty -- push the motion toward what

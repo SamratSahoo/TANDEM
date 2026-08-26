@@ -38,17 +38,21 @@ DEFAULT_TARGET_FPS = 15
 GRIPPER_MAX_WIDTH = 0.085
 
 
-def _read_gripper_width(robot) -> float | None:
+def _read_gripper_width(robot, arm: str | None = None) -> float | None:
     """Best-effort read of the measured gripper opening width in metres. None if unavailable.
 
     The bamboo client returns ``{"success": ..., "state": {"width": <m>, ...}}``; older
     code read ``["width"]`` directly and always missed, defaulting the gripper to a
     constant. Navigate the real payload, tolerating the flatter shapes too.
+
+    ``arm`` addresses a specific hand -- only meaningful for a YamClient in dual mode, where there
+    is no default active arm to fall back to (see ``YamClient.arm``); every other client/embodiment
+    leaves it None and nothing changes.
     """
     try:
         if not hasattr(robot, "get_gripper_state"):
             return None
-        res = robot.get_gripper_state()
+        res = robot.get_gripper_state(arm) if arm is not None else robot.get_gripper_state()
         if not isinstance(res, dict):
             return float(res)
         if res.get("success") is False:
@@ -239,11 +243,14 @@ def _load_plan(plan_path: Path) -> dict:
     return plan
 
 
-def _flatten_plan(plan: dict, timeline: list | None = None) -> dict:
+def _flatten_plan(plan: dict, timeline: list | None = None, dof: int = 7) -> dict:
     """Flatten plan steps into dense 50 Hz arrays.
 
+    ``dof`` is the arm's joint count — 7 for the Franka, 6 for one YAM arm. It only sizes the
+    zero-velocity hold rows and the ``q_init`` fallback; every other array comes from the plan.
+
     Returns a dict with, for the M dense rows:
-      positions[M,7], velocities[M,7], gripper[M], dt[M] (per-row duration),
+      positions[M,dof], velocities[M,dof], gripper[M], dt[M] (per-row duration),
       t_plan[M] (start time of each row on the plan clock), and
       t_wall[M] (wall-clock time of each row, NaN where no execution timeline).
 
@@ -267,7 +274,7 @@ def _flatten_plan(plan: dict, timeline: list | None = None) -> dict:
     """
     HOLD_DT = 0.02  # 50 Hz, matching the plan's trajectory rate, for inserted hold rows
     pos_chunks, vel_chunks, grip_chunks, dt_chunks, twall_chunks = [], [], [], [], []
-    q_init = np.asarray(plan.get("q_init", np.zeros(7)), dtype=np.float32).reshape(-1)
+    q_init = np.asarray(plan.get("q_init", np.zeros(dof)), dtype=np.float32).reshape(-1)
     last_pos = q_init  # arm pose to freeze at during a gripper pause
     g = 0.0  # DROID convention: 0 = open, 1 = closed. Episodes start open.
     for i, step in enumerate(plan["steps"]):
@@ -300,7 +307,7 @@ def _flatten_plan(plan: dict, timeline: list | None = None) -> dict:
                 ts, te = float(entry["t_start"]), float(entry["t_end"])
                 n_hold = max(1, round((te - ts) / HOLD_DT))
                 pos_chunks.append(np.tile(last_pos, (n_hold, 1)))
-                vel_chunks.append(np.zeros((n_hold, 7), dtype=np.float32))
+                vel_chunks.append(np.zeros((n_hold, dof), dtype=np.float32))
                 grip_chunks.append(np.full(n_hold, g, dtype=np.float32))
                 dt_chunks.append(np.full(n_hold, HOLD_DT, dtype=np.float64))
                 twall_chunks.append(np.linspace(ts, te, n_hold))
@@ -360,7 +367,6 @@ def dump_raw_episode(
     config_id: str | None = None,
     record_start: float | None = None,
     record_stop: float | None = None,
-    trajectory_id: str | None = None,
 ) -> Path | None:
     """Write ``robot_state.npz`` + ``_meta.json`` (ARCHITECTURE.md §3) for one executed rollout.
 
@@ -376,13 +382,9 @@ def dump_raw_episode(
     state frame to a camera frame by wall clock (ARCHITECTURE.md "Camera <-> state alignment"); each
     is written as a float, or ``None`` when unavailable.
 
-    A plan that stopped early (a teleop hand-off) is dumped as the partial rollout it is: only the
-    executed prefix of the plan has wall times, and only that prefix is kept. ``trajectory_id`` ties
-    such a leg to the other legs of the same task attempt (see ``collect/merge_trajectory.py``).
-
-    Returns the npz path, or None if fewer than two rows executed or the measured joint trace is
-    missing (in which case we REFUSE to fall back to plan positions -- that silent fallback is the
-    exact proprioception bug this rewrite fixes).
+    Returns the npz path, or None if the plan is too short, has no execution timeline, or the
+    measured joint trace is missing (in which case we REFUSE to fall back to plan positions -- that
+    silent fallback is the exact proprioception bug this rewrite fixes).
     """
     save_dir = Path(save_dir)
     plan_path = Path(plan_path)
@@ -392,26 +394,10 @@ def dump_raw_episode(
 
     dense = _flatten_plan(_load_plan(plan_path), timeline=timeline)
     t_wall = dense["t_wall"]
-    # A teleop hand-off (and any other early stop) leaves the tail of the plan unexecuted. Those
-    # steps get no timeline entry, so _flatten_plan gives them NaN wall times -- and since
-    # execute_cutamp_plan appends one entry per step, in order, immediately before honouring
-    # should_stop, the executed rows are always a contiguous PREFIX. Keep that prefix and dump the
-    # partial rollout: it is a real leg of a hand-off trajectory, and dropping it threw away every
-    # state/action the human-in-the-loop run produced.
-    executed = int(np.count_nonzero(np.isfinite(t_wall)))
-    if executed and not np.all(np.isfinite(t_wall[:executed])):
-        _log.error("Execution timeline has non-finite wall times inside the executed prefix "
-                   "(%d finite of %d rows); refusing to guess where the rollout stopped. save_dir=%s",
-                   executed, len(t_wall), save_dir)
-        return None
-    if executed < len(t_wall):
-        _log.info("Partial rollout: keeping the %d executed rows of %d (the plan stopped early, "
-                  "e.g. a teleop hand-off)", executed, len(t_wall))
-        dense = {k: v[:executed] for k, v in dense.items()}
-        t_wall = dense["t_wall"]
     m = len(t_wall)
-    if m < 2:
-        _log.warning("Plan has no usable execution timeline (%d executed rows); skipping raw episode dump", m)
+    if m < 2 or not np.all(np.isfinite(t_wall)):
+        _log.warning("Plan has no usable execution timeline (%d rows, finite=%s); skipping raw episode dump",
+                     m, bool(m) and np.all(np.isfinite(t_wall)))
         return None
 
     # Uniform fps grid over the measured wall-clock span; the last frame clamps to t_wall[-1].
@@ -471,11 +457,6 @@ def dump_raw_episode(
         "cameras": cameras,
         "record_start": float(record_start) if record_start is not None else None,
         "record_stop": float(record_stop) if record_stop is not None else None,
-        # Hand-off lineage: every leg of one task attempt (tamp -> teleop -> tamp -> ...) shares a
-        # trajectory_id, and collect/merge_trajectory.py joins them into a single episode. None for
-        # a rollout that was never handed off.
-        "trajectory_id": trajectory_id,
-        "segment_source": "tamp",
     }
     (save_dir / "_meta.json").write_text(json.dumps(meta, indent=2))
     _log.info("Wrote raw episode (%d frames @ %d Hz, %.1fs) to %s", n, fps, t1 - t0, npz_path)

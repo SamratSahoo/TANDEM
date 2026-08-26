@@ -132,6 +132,7 @@ def get_batch_interpolated_trajectory(
     min_dt: float = 0.02,
     max_dt: float = 0.15,
     optimize_dt: bool = True,
+    opt_dt_override: Optional[torch.Tensor] = None,
 ):
     # compute dt across trajectory:
     if len(raw_traj.shape) == 2:
@@ -171,6 +172,7 @@ def get_batch_interpolated_trajectory(
             max_dt,
             horizon,
             optimize_dt,
+            opt_dt_override,
         )
     else:
         traj_steps, steps_max = calculate_traj_steps(raw_dt, interpolation_dt, horizon)
@@ -594,6 +596,7 @@ def calculate_tsteps(
     max_dt: float,
     horizon: int,
     optimize_dt: bool = True,
+    opt_dt_override: Optional[torch.Tensor] = None,
 ):
     # compute scaled dt:
     opt_dt = calculate_dt_fixed(
@@ -607,7 +610,12 @@ def calculate_tsteps(
         min_dt,
         max_dt,
     )
-    if not optimize_dt:
+    if opt_dt_override is not None:
+        # A caller that computed the trajectory's duration itself (VAE retiming, where the
+        # per-interval durations are trajopt decision variables). Distinct from raw_dt, which stays
+        # the spacing of the RAW waypoints the interpolation kernel reads.
+        opt_dt = opt_dt_override.to(device=opt_dt.device, dtype=opt_dt.dtype).reshape(-1)
+    elif not optimize_dt:
         opt_dt[:] = raw_dt
     # check for nan:
     opt_dt = torch.nan_to_num(opt_dt, nan=min_dt)

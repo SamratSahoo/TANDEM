@@ -29,7 +29,7 @@ from __future__ import annotations
 # Standard Library
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 # Third Party
@@ -47,6 +47,7 @@ from curobo.opt.particle.parallel_es import ParallelES, ParallelESConfig
 from curobo.opt.particle.parallel_mppi import ParallelMPPI, ParallelMPPIConfig
 from curobo.rollout.arm_reacher import ArmReacher, ArmReacherConfig
 from curobo.rollout.cost.pose_cost import PoseCostMetric
+from curobo.rollout.cost.vae_manifold_cost import warp_positions
 from curobo.rollout.dynamics_model.integration_utils import interpolate_kernel
 from curobo.rollout.rollout_base import Goal, RolloutBase, RolloutMetrics
 from curobo.types.base import TensorDeviceType
@@ -666,6 +667,8 @@ class TrajOptSolver(TrajOptSolverConfig):
         self._interpolation_dt_tensor = self.tensor_args.to_device([self.interpolation_dt])
         self._n_seeds = self._get_seed_numbers(self.num_seeds)
         self._goal_buffer = None
+        self._vae_retiming_cost = self._setup_vae_retiming()
+        self._vae_retime_dt = None  # per-seed emitted dt when retiming is on (see _apply_vae_retiming)
         self._solve_state = None
         self._velocity_bounds = self.solver.rollout_fn.state_bounds.velocity[1]
         self._og_newton_iters = self.solver.optimizers[-1].outer_iters
@@ -1297,6 +1300,127 @@ class TrajOptSolver(TrajOptSolverConfig):
 
         raise NotImplementedError()
 
+    def _setup_vae_retiming(self):
+        """Return the VAE cost that owns the trajectory clock, or None when retiming is off.
+
+        When it is on, cuRobo's own time-optimal retiming is switched off: ``optimize_dt`` normally
+        rescales every trajectory to sit exactly on the velocity/acceleration/jerk limits, which
+        would overwrite the pace the VAE chose. The distribution of time within the segment would
+        survive that rescale (it is baked into the waypoints), but the absolute duration would not,
+        and "use the timing we got from the VAE" means both. The safety net moves accordingly: the
+        cost's own warp limit penalty is what keeps the emitted clock executable, and a segment it
+        fails to keep feasible is reported as a FAILED plan by TrajEvaluator rather than quietly
+        slowed down."""
+        newton = getattr(self.solver, "newton_optimizer", None)
+        rollout = getattr(newton, "rollout_fn", None)
+        cost = getattr(rollout, "vae_manifold_cost", None)
+        if cost is None or not getattr(cost, "retiming", False) or not cost.enabled:
+            return None
+        if self.optimize_dt:
+            self.optimize_dt = False
+            log_info(
+                "VAE retiming active: per-interval dt is a trajopt decision variable; cuRobo's "
+                "time-optimal retiming (optimize_dt) is disabled so the optimized clock is emitted "
+                "verbatim."
+            )
+        # ...and the evaluator's dt ceiling has to move with it. TrajEvaluator rejects any
+        # trajectory whose emitted dt exceeds max_dt (evaluate_interpolated_smootheness), and max_dt
+        # is maximum_trajectory_dt -- which MotionGenConfig defaults to 0.15 and then also hands to
+        # trajopt_dt, so the ceiling and the nominal clock are the same number by construction (and
+        # gradient_trajopt.yml's base_dt is 0.15 too). interval_durations rails each interval
+        # at nominal_dt * exp(+-retime_scale), so the retiming is free to make a segment up to
+        # exp(retime_scale) SLOWER than nominal, and every such segment was being marked failed. With
+        # enable_finetune_trajopt=False (how cuTAMP plans) MotionGen never assigns a status on that
+        # path, so it surfaced as "Failed to motion plan ... Status: None" on every particle.
+        #
+        # That gate is cuRobo's "my own dt optimizer railed out" signal; a slower-than-nominal
+        # trajectory is not an unsafe one. What still keeps the emitted clock EXECUTABLE is
+        # compute_smoothness_opt_dt -- same evaluator call, unchanged -- plus the cost's own
+        # warp_limit_penalty. So raise the ceiling to the top of the rail the retiming can produce,
+        # and no further.
+        rail_dt = float(cost.source_dt) * math.exp(float(cost.retime_scale))
+        if float(self.traj_evaluator_config.max_dt) < rail_dt:
+            max_dt = torch.as_tensor(
+                rail_dt,
+                device=self.traj_evaluator_config.max_dt.device,
+                dtype=self.traj_evaluator_config.max_dt.dtype,
+            )
+            log_info(
+                "VAE retiming active: raising TrajEvaluator max_dt from "
+                f"{float(self.traj_evaluator_config.max_dt):.4f} to {rail_dt:.4f} "
+                "(source_dt * exp(retime_scale)) so a retimed-slower segment is not rejected."
+            )
+            # Replaced, not mutated: MotionGenConfig builds ONE TrajEvaluatorConfig and hands the
+            # same object to the trajopt, js_trajopt and finetune solvers, so an in-place write here
+            # would raise the ceiling for the finetune solver too -- which has no retiming (it loads
+            # finetune_trajopt.yml) and still wants the stock gate. The TrajEvaluator instance IS
+            # per-solver (each one constructs its own), so that one is safe to set.
+            self.traj_evaluator_config = replace(self.traj_evaluator_config, max_dt=max_dt)
+            if self.traj_evaluator is not None:
+                self.traj_evaluator.max_dt = max_dt
+        return cost
+
+    @profiler.record_function("trajopt/vae_retiming")
+    def _apply_vae_retiming(self, result: WrapResult):
+        """Bake the optimized per-interval clock into the emitted waypoints, in place.
+
+        The duration knots ride in the extra rows of the solver's action tensor, so they are read
+        back off ``result.raw_action``. Resampling the waypoints on that clock and re-emitting them
+        at a UNIFORM dt is what makes the timing survive: every stage after trajopt -- scale_by_dt,
+        the interpolation kernel, cuTAMP's plan step, the executor and the LeRobot export -- carries
+        one scalar dt per trajectory, so a non-uniform clock can only travel inside the positions.
+
+        The warp is the identity at both endpoints (tau spans exactly [0, D]), so the start and goal
+        waypoints are untouched and the plan still reaches its target. The boundary derivatives are
+        carried over from the solver's own result rather than re-differenced, which preserves the
+        start-state anchoring the robot command was built with and the terminal rest condition
+        cuTAMP relies on when it stitches segments around a gripper action."""
+        cost = self._vae_retiming_cost
+        theta = self.solver.newton_optimizer.rollout_fn.time_vars_from_act_seq(result.raw_action)
+        self._vae_retime_dt = None
+        if theta is None:
+            return
+        with torch.no_grad():
+            pos = result.action.position
+            horizon = pos.shape[1]
+            if theta.shape[-1] != horizon - 1:
+                log_warn(
+                    f"VAE retiming: {theta.shape[-1]} duration knots for {horizon} waypoints; "
+                    "skipping the warp for this solve."
+                )
+                return
+            warped, _, total = warp_positions(
+                pos, theta.detach(), float(cost.source_dt), cost.retime_scale
+            )
+            # The clock's SHAPE is now baked into `warped`; its SCALE is the emitted dt. Derivatives
+            # are rebuilt at the solver dt and converted by the existing scale_by_dt(solver_dt,
+            # opt_dt) step, exactly as cuRobo's own optimize_dt path does.
+            self._vae_retime_dt = (total / (horizon - 1)).view(-1)
+            dt = self.solver_dt_tensor
+            vel = self._fd_uniform(warped, dt)
+            acc = self._fd_uniform(vel, dt)
+            jerk = self._fd_uniform(acc, dt)
+            for buf, src in ((vel, result.action.velocity), (acc, result.action.acceleration),
+                             (jerk, result.action.jerk)):
+                buf[:, 0] = src[:, 0]
+                buf[:, -1] = src[:, -1]
+            result.action.position = warped
+            result.action.velocity = vel
+            result.action.acceleration = acc
+            result.action.jerk = jerk
+
+    @staticmethod
+    def _fd_uniform(x: torch.Tensor, dt: torch.Tensor) -> torch.Tensor:
+        """d x / dt along the horizon, central inside and one-sided at the edges, keeping length.
+
+        cuRobo's own ``fd_tensor`` drops the last row, which would leave position, velocity,
+        acceleration and jerk with four different horizons -- invisible where it is used today
+        (every consumer reduces over time) but not to the interpolation kernel."""
+        interior = (x[:, 2:] - x[:, :-2]) / (2.0 * dt)
+        first = (x[:, 1:2] - x[:, 0:1]) / dt
+        last = (x[:, -1:] - x[:, -2:-1]) / dt
+        return torch.cat([first, interior, last], dim=1)
+
     @profiler.record_function("trajopt/get_result")
     def _get_result(
         self,
@@ -1321,6 +1445,18 @@ class TrajOptSolver(TrajOptSolverConfig):
             TrajOptResult: Result of the trajectory optimization.
         """
         st_time = time.time()
+        if self._vae_retiming_cost is not None:
+            # BEFORE the trim: the knots were optimized over the intervals of the full state
+            # horizon, so warping a trimmed trajectory would apply a different clock than the one
+            # the cost scored.
+            self._apply_vae_retiming(result)
+            # ...and once consumed, drop the knot rows so raw_action goes back to the stock
+            # [batch, action_horizon, dof]. It leaves this function as both `raw_action` and
+            # `optimized_seeds`, and MotionGen re-seeds the finetune stage straight from it
+            # (motion_gen.py:3516) into a solver whose action horizon has no knot rows.
+            result.raw_action = self.solver.newton_optimizer.rollout_fn.joint_act_seq(
+                result.raw_action
+            )
         if self.trim_steps is not None:
             result.action = result.action.trim_trajectory(self.trim_steps[0], self.trim_steps[1])
         interpolated_trajs, last_tstep, opt_dt, buffer_change = self.get_interpolated_trajectory(
@@ -1763,6 +1899,13 @@ class TrajOptSolver(TrajOptSolverConfig):
             )
             self._interpolated_traj_buffer.joint_names = self.rollout_fn.joint_names
         interpolation_buffer_reallocated = False
+        # Under VAE retiming the segment's duration is a decision variable, so the trajectory is
+        # emitted at the dt the optimizer chose. That is opt_dt (the OUTPUT timing), not raw_dt --
+        # raw_dt stays the spacing of the raw waypoints the interpolation kernel reads, and the
+        # warp kernel takes it as a scalar.
+        opt_dt_override = getattr(self, "_vae_retime_dt", None)
+        if opt_dt_override is not None and opt_dt_override.shape[0] != traj_state.position.shape[0]:
+            opt_dt_override = None
         state, last_tstep, opt_dt = get_batch_interpolated_trajectory(
             traj_state,
             self.solver_dt_tensor,
@@ -1776,6 +1919,7 @@ class TrajOptSolver(TrajOptSolverConfig):
             min_dt=self.traj_evaluator_config.min_dt,
             max_dt=self.traj_evaluator_config.max_dt,
             optimize_dt=self.optimize_dt,
+            opt_dt_override=opt_dt_override,
         )
 
         if state.shape != self._interpolated_traj_buffer.shape:

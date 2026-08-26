@@ -227,6 +227,18 @@ class ArmReacher(ArmBase, ArmReacherConfig):
 
         if self.cost_cfg.vae_manifold_cfg is not None:
             self.vae_manifold_cost = VaeManifoldCost(self.cost_cfg.vae_manifold_cfg)
+            if self.vae_manifold_cost.retiming and self.vae_manifold_cost.enabled:
+                # One duration knot per waypoint interval of the STATE horizon; they ride as extra
+                # action rows so LBFGS optimizes them alongside the waypoints (see
+                # ArmBase.enable_time_variables). The limits are what stop the warp from compressing
+                # an interval past what the arm can execute -- BoundCost cannot see it, because it
+                # differentiates at the solver's fixed traj_dt.
+                self.enable_time_variables(self.dynamics_model.horizon - 1)
+                dof = self.dynamics_model.d_action
+                self.vae_manifold_cost.set_joint_limits(
+                    self.state_bounds.velocity.view(2, dof)[1],
+                    self.state_bounds.acceleration.view(2, dof)[1],
+                )
 
         if self.cost_cfg.rnd_novelty_cfg is not None:
             self.rnd_novelty_cost = RndNoveltyCost(self.cost_cfg.rnd_novelty_cfg)
@@ -359,7 +371,11 @@ class ArmReacher(ArmBase, ArmReacherConfig):
             self.cost_cfg.vae_manifold_cfg is not None
             and self.vae_manifold_cost.enabled
         ):
-            vae_manifold = self.vae_manifold_cost.forward(state_batch.position)
+            # The duration knots travel in the action tensor's extra rows, so one backward pass
+            # through this cost yields both d(cost)/d(waypoint) and d(cost)/d(dt_i).
+            vae_manifold = self.vae_manifold_cost.forward(
+                state_batch.position, self.time_vars_from_act_seq(action_batch)
+            )
             cost_list.append(vae_manifold)
         if (
             self.cost_cfg.rnd_novelty_cfg is not None

@@ -109,7 +109,7 @@ def collect(
             theme.blank()
             theme.busy("Stopping the session and parking the arm")
             session.stop()
-            session.wait(timeout=session_mod.HOME_EXIT_GRACE + 20)
+            session.wait(timeout=session_mod.STOP_GRACE)
         path = session_mod.write_session_log(session)
         _final_summary(session, profile, path)
 
