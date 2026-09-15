@@ -295,9 +295,10 @@ class Runtime:
         env.setdefault("SETUPTOOLS_SCM_PRETEND_VERSION_FOR_TIPTOP", "0.1.0")
         env.update(extra_env or {})
 
-        # --manifest-path goes before the subcommand: after `run` it would be read as an
-        # argument to the task rather than to pixi.
-        cmd = [str(pixi), "--manifest-path", str(self.tiptop_dir / "pixi.toml"), *args]
+        # --manifest-path is a per-subcommand option, not a global one: `pixi --manifest-path ...
+        # install` is rejected outright. It goes after the subcommand but *before* any task name,
+        # since `pixi run` treats everything from the task name onward as the task's own argv.
+        cmd = [str(pixi), args[0], "--manifest-path", str(self.tiptop_dir / "pixi.toml"), *args[1:]]
 
         proc = subprocess.Popen(
             cmd,
