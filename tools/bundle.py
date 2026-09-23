@@ -2,7 +2,7 @@
 """Make an offline bundle of a planner's pinned sources, for a workstation with no network.
 
 tandem fetches a planner's sources when its runtime is installed. A machine that cannot reach GitHub
-installs from a directory instead -- ``tandem runtime build --sources DIR``, or
+installs from a directory instead -- ``tandem planners install NAME --sources DIR``, or
 ``$TANDEM_PLANNER_SOURCES=DIR`` -- and this makes that directory, on a machine that can:
 
     DIR/
@@ -144,7 +144,7 @@ def main() -> int:
             for name in written:
                 tar.add(out / name, arcname=name)
         print(f"archive: {archive}  ({archive.stat().st_size / 1e6:.1f} MB)")
-    print(f"\nInstall from it with:  tandem runtime build --sources {out}")
+    print(f"\nInstall from it with:  tandem planners install {args.planner} --sources {out}")
     return 0
 
 

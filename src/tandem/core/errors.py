@@ -22,7 +22,7 @@ class ProfileError(TandemError):
 
 
 class RuntimeNotReady(TandemError):
-    """The GPU runtime `tandem init` builds is absent or incomplete."""
+    """A planner's runtime (`tandem planners install`, which `tandem init` runs) is absent or incomplete."""
 
 
 class SessionConflict(TandemError):
