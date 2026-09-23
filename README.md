@@ -109,9 +109,16 @@ last one matters: the usual cause is an object the instruction names that percep
 detect, and the remedy (put it on the table, or reword the task) is only available *before* you
 start collecting.
 
+**Your part is recorded like the robot's.** A human phase is carried out by
+`hitl.human_executor` — `teleop`, you driving the arm, is the only one that ships — and its leg
+is stamped with the phase it carried out, so the merged episode says which stretch of frames was
+which phase. Answering "I did it" without teleoperating would leave that phase with no
+demonstration while the episode looks complete, so while recording it is refused unless you set
+`hitl.allow_unrecorded_human_phase: true`.
+
 **A phase the planner cannot plan ends the trial, unless you say otherwise.** That is how the
 paper counts it, so it is the default (`hitl.on_robot_phase_failure: abort`). tandem decides who
-does what, so with `teleop` the sub-goal is described to you instead: you do it by hand, the same
+does what, so with `teleop` the sub-goal is described to you instead: you carry it out, the same
 check verifies it, and the task carries on. `replan` proposes the task again and tells the model
 why the planner could not plan that phase. A leg that was planned but failed to *execute* always
 ends the trial: the arm is somewhere no plan put it.

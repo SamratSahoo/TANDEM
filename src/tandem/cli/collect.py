@@ -193,11 +193,19 @@ def _handle_key(key: str, session, keys: KeyReader, note, live) -> bool:
     if state is State.AWAITING_HUMAN_PHASE:
         # A human phase has its own answers; the labeling keys would be ambiguous here.
         if key == "d":
+            # Refused (SessionConflict, shown as a warning) while recording, unless the profile allows
+            # a step done by hand: it would leave the episode without that step's demonstration.
             session.complete_human_phase()
             note("Checking that the step was done…")
         elif key == "t":
+            # Whoever carries out human steps (hitl.human_executor): a person at the teleop rig, by
+            # default. The answer is honoured here, not at a plan-step boundary.
             session.request_teleop()
-            note("[violet]Taking the arm — the driver hands it over from this prompt[/violet]")
+            executor = session.summary().get("human_executor") or {}
+            if executor.get("name", "teleop") == "teleop":
+                note("[violet]Taking the arm — the driver hands it over from this prompt[/violet]")
+            else:
+                note(f"[violet]Handing this step to {_escape(executor.get('display_name', ''))}[/violet]")
         elif key == "a":
             session.abort_human_phase()
             note("[warn]Phase abandoned[/warn]")
@@ -284,7 +292,7 @@ def _render(session, profile, logs: deque[str], status_note: dict) -> Panel:
     log_panel = Group(*(Text.from_markup(line) for line in logs)) if logs else Text("…", style="faint")
 
     parts = [header, Text("")]
-    phase_panel = _human_phase_panel(summary.get("human_phase"))
+    phase_panel = _human_phase_panel(summary.get("human_phase"), summary.get("human_executor") or {})
     if phase_panel is not None:
         parts += [phase_panel, Text("")]
     parts += [log_panel, Text(""), _footer(state, summary)]
@@ -300,12 +308,16 @@ def _render(session, profile, logs: deque[str], status_note: dict) -> Panel:
     )
 
 
-def _human_phase_panel(phase: dict | None) -> Panel | None:
+def _human_phase_panel(phase: dict | None, executor: dict) -> Panel | None:
     """What the person is being asked to do, and what will be checked afterwards.
 
     The expectations are shown because they are exactly the list the model is about to be
     asked about — being checked against a standard you were not told is the fastest way to
     make an operator distrust the whole thing.
+
+    So is how the step may be done. While recording, "I did it" is not offered (the step would
+    have no demonstration), and if the executor that must do it is not ready on this machine the
+    operator is told what it lacks, rather than left with a prompt whose only way out is giving up.
     """
     if not phase:
         return None
@@ -334,6 +346,21 @@ def _human_phase_panel(phase: dict | None) -> Panel | None:
             lines.add_row(Text(f"  · {item}", style="warn"))
     if phase.get("attempt", 1) > 1:
         lines.add_row(Text(f"attempt {phase['attempt']}", style="faint"))
+
+    if not phase.get("by_hand", True):
+        lines.add_row(Text(""))
+        if executor.get("ready"):
+            how = "the teleop rig" if executor.get("name") == "teleop" else executor.get("display_name")
+            lines.add_row(Text(f"This step is being recorded: do it through {how} (t).", style="faint"))
+        else:
+            unmet = "; ".join(executor.get("unmet") or []) or executor.get("error") or "it is not set up"
+            lines.add_row(
+                Text(
+                    f"This step is being recorded, and {executor.get('display_name') or 'its executor'} "
+                    f"is not ready here: {unmet}",
+                    style="warn",
+                )
+            )
 
     return Panel(
         lines,
@@ -378,9 +405,15 @@ def _pipeline(state: State) -> Text:
 def _footer(state: State, summary: dict) -> Text:
     keys: list[tuple[str, str]] = []
     if state is State.AWAITING_HUMAN_PHASE:
-        keys = [("d", "I did it")]
-        if summary.get("teleop_available"):
-            keys.append(("t", "take the arm"))
+        # Only the answers the phase loop will accept (HumanPhase.by_hand).
+        phase = summary.get("human_phase") or {}
+        executor = summary.get("human_executor") or {}
+        if phase.get("by_hand", True):
+            keys.append(("d", "I did it"))
+        if executor.get("ready"):
+            teleop = executor.get("name") == "teleop"
+            label = "take the arm" if teleop else f"run {executor.get('display_name')}"
+            keys.append(("t", label))
         keys += [("a", "give up on this task"), ("q", "finish")]
         return _keys_text(keys)
     if state is State.AWAITING_LABEL:

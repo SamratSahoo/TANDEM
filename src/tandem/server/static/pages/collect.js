@@ -272,6 +272,14 @@ function renderPhase(host, summary) {
     ? `${phase.description} — step ${phase.index + 1} of ${phase.total}`
     : phase.description || "Your turn";
 
+  // Only the answers the session will accept. While recording, a step done by hand has no
+  // demonstration, so "I did it" is not offered (phase.by_hand); the step goes through whoever
+  // carries out human steps (hitl.human_executor), the teleop rig unless the profile says otherwise.
+  const executor = summary.human_executor || {};
+  const byHand = phase.by_hand !== false;
+  const isTeleop = (executor.name || "teleop") === "teleop";
+  const stuck = !byHand && !executor.ready;
+
   mount(host,
     h("div.card", { style: { borderColor: "var(--violet)" } },
       h("div.card-head",
@@ -295,17 +303,28 @@ function renderPhase(host, summary) {
               ...phase.expected.map((item) => h("li", item))))
         : null,
 
+      stuck
+        ? h("div.alert", { style: { marginBottom: "14px" } },
+            h("strong", "This step is being recorded, and it cannot be done here. "),
+            `${executor.display_name || "Its executor"} is not ready on this machine: `,
+            (executor.unmet && executor.unmet.length ? executor.unmet.join("; ") : executor.error) || "it is not set up.")
+        : null,
+
       h("div.row.wrap", { style: { gap: "8px" } },
-        summary.teleop_available
+        executor.ready
           ? h("button.violet.big", {
-              title: "Take the arm through the teleop rig, then hand it back.",
-              onclick: act(() => api.teleopSwitch(id), "Could not take the arm"),
-            }, "Take the arm")
+              title: isTeleop
+                ? "Take the arm through the teleop rig, then hand it back."
+                : `Hand this step to ${executor.display_name}, then take the arm back when it is done.`,
+              onclick: act(() => api.teleopSwitch(id), "Could not hand the step over"),
+            }, isTeleop ? "Take the arm" : `Run ${executor.display_name}`)
           : null,
-        h("button.primary.big", {
-          title: "You did it by hand. The plan checks a photo before carrying on.",
-          onclick: act(() => api.humanPhaseDone(id), "Could not complete the phase"),
-        }, "✔ I did it"),
+        byHand
+          ? h("button.primary.big", {
+              title: "You did it by hand. The plan checks a photo before carrying on.",
+              onclick: act(() => api.humanPhaseDone(id), "Could not complete the phase"),
+            }, "✔ I did it")
+          : null,
         h("div.spacer"),
         h("button.ghost", {
           title: "Give up on this step, and with it this attempt at the task.",

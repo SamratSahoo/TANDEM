@@ -369,10 +369,19 @@ def test_a_teleop_handoff_with_no_phase_plan_gives_the_task_back_to_the_planner(
     monkeypatch.setattr(settings_mod, "load", lambda: cfg)
 
     session = live_session
+    # The driver runs inside the teleop executor, behind the phase loop's hand-off; whether it has
+    # started recording is on the session's message bus.
+    started: list[dict] = []
+
+    def on_message(message: dict) -> None:
+        if message.get("type") == "teleop_event" and message.get("event") == "rollout_start":
+            started.append(message)
+
+    session.subscribe(on_message)
     session.next_task()
     session.request_teleop()
     assert wait_for(lambda: session.state is State.TELEOP_HANDOFF), f"stuck in {session.state}"
-    assert wait_for(lambda: session._teleop is not None and session._teleop._recording)
+    assert wait_for(lambda: bool(started))
     session.resume_from_teleop()
 
     assert wait_for(lambda: session.state is State.AWAITING_LABEL), f"stuck in {session.state}"

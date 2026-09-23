@@ -1,9 +1,10 @@
 """The phase loop on its own, with no session around it.
 
 The loop is given everything it touches: the backend, the settings, an event sink, the person at the
-prompts, and the seam a human phase goes through. That is what lets the trial algorithm be changed,
+prompts, and what a human executor is built with. That is what lets the trial algorithm be changed,
 and tested, without a state machine or a session thread. These tests hold it to that. Nothing here
-builds a Session: each dependency is a plain object that records what the loop asked of it.
+builds a Session: each dependency is a plain object that records what the loop asked of it, and the
+human executor is a stand-in registered under the name the loop asks for (``fake_executor``).
 
 The end-to-end behaviour through a real session is covered in test_hitl.py and test_session.py.
 """
@@ -14,10 +15,12 @@ import json
 
 import pytest
 from fake_backend import FakeBackend
+from fake_executor import FakeExecutor, use_fake_executor
 from helpers import FakeGemini
 
 from tandem.core.episodes import LegDirs
 from tandem.core.phase_loop import PhaseLoop
+from tandem.executors.base import CustodyError, ExecutorContext
 from tandem.planning.config import PlanningConfig
 
 # Robot, then a person, then the robot again: the smallest plan that exercises every branch of a
@@ -119,21 +122,15 @@ class Operator:
     def rollout_saved(self, n_frames: int) -> None:
         self.rollouts[-1]["n_frames"] = n_frames
 
+    def handing_off(self) -> None:
+        return None
 
-class Hands:
-    """The human-leg seam with nobody on the other end: each call "records" one leg."""
+    def arm_lent(self):
+        # Nobody is holding the arm, so the leg may end as soon as the executor likes.
+        return lambda: True
 
-    def __init__(self, n_frames: int = 30, fail_after_recording: str | None = None) -> None:
-        self.n_frames = n_frames
-        self.fail_after_recording = fail_after_recording
-        self.calls: list = []
-
-    def __call__(self, phase, recorded) -> None:
-        self.calls.append(phase)
-        if self.n_frames:
-            recorded(self.n_frames)
-        if self.fail_after_recording:
-            raise RuntimeError(self.fail_after_recording)
+    def arm_returned(self) -> None:
+        return None
 
 
 @pytest.fixture
@@ -141,20 +138,29 @@ def build(profile, tmp_path, monkeypatch):
     """A loop wired to a stand-in backend, a canned model, and the recorders above."""
     from tandem.planning import llm
 
-    def make(*answers, verdicts=(HOLDS,), backend_kwargs=None, hands=None, handoff_requests=0, **cfg):
+    def make(
+        *answers, verdicts=(HOLDS,), backend_kwargs=None, backend_type=FakeBackend, handoff_requests=0, **cfg
+    ):
         client = FakeGemini(json.dumps(PLAN), list(verdicts))
         monkeypatch.setattr(llm, "gemini_client", lambda: client)
-        backend = FakeBackend(None, output_dir=tmp_path / "frames", **(backend_kwargs or {}))
+        backend = backend_type(None, output_dir=tmp_path / "frames", **(backend_kwargs or {}))
         sink = Sink()
         operator = Operator(*answers, handoff_requests=handoff_requests)
-        hands = hands or Hands()
+        # Every human leg, the person's step and the operator's own hand-off alike, "records" 30
+        # frames with nobody on the other end.
+        hands = FakeExecutor()
+        use_fake_executor(monkeypatch, hands)
         loop = PhaseLoop(
             backend,
             backend.capabilities(),
-            PlanningConfig(**{"enabled": True, "save_vlm_io": False, **cfg}),
+            # "done" is an answer these tests give for a step done by hand. While recording that is
+            # refused unless allowed (tests/test_executor_integration.py), so it is allowed here.
+            PlanningConfig(
+                **{"enabled": True, "save_vlm_io": False, "allow_unrecorded_human_phase": True, **cfg}
+            ),
             events=sink,
             operator=operator,
-            human_leg=hands,
+            executor_context=ExecutorContext(profile=profile, session_dir=tmp_path / "session"),
             legs=LegDirs(profile, tmp_path / "session", log=sink.log),
         )
         return loop, backend, sink, operator, hands
@@ -173,7 +179,7 @@ def test_a_whole_plan_is_walked_robot_person_robot(build):
     # Both robot phases were planned and executed, stamped with the trajectory the caller minted.
     assert [leg["leg"].phase_index for leg in backend.legs] == [0, 2]
     assert {leg["leg"].trajectory_id for leg in backend.legs} == {"t" * 16}
-    # The person was asked once, took the arm through the seam, and the step was checked.
+    # The person was asked once, took the arm through the executor, and the step was checked.
     assert operator.prompts == 1
     assert [phase.description for phase in hands.calls] == ["open the box"]
     assert "capture_frame:external" in backend.calls
@@ -201,7 +207,7 @@ def test_with_phase_planning_off_the_backends_goal_is_one_robot_leg(build):
     assert str(operator.rollouts[0]["dir"]) == backend.legs[0]["dir"]
 
 
-def test_a_handoff_the_operator_asked_for_goes_through_the_seam_with_no_phase(build):
+def test_a_handoff_the_operator_asked_for_goes_through_the_executor_with_no_phase(build):
     """Lending the arm is not a phase: nothing advances, and the task is planned again after."""
     loop, backend, sink, operator, hands = build(enabled=False, handoff_requests=1)
     outcome = run(loop)
@@ -244,16 +250,20 @@ def test_a_phase_that_cannot_be_planned_ends_the_attempt_at_tamp_planning(build)
     assert ("phase_plan_failed", {"reason": "no grasp", "policy": "abort"}) in sink.events
 
 
+class CannotTakeItBack(FakeBackend):
+    def reacquire_hardware(self) -> None:
+        self.calls.append("reacquire_hardware")
+        raise RuntimeError("the robot client timed out")
+
+
 def test_a_leg_on_disk_is_counted_even_when_the_arm_cannot_be_taken_back(build):
     """Taking the arm back can fail and end the session, after the person's leg reached disk.
 
-    That leg still has to be labeled and merged on the way out, so the seam reports it BEFORE it
-    takes the arm back. The loop has to have counted it by the time the failure reaches the caller.
+    That leg still has to be labeled and merged on the way out, so the loop counts it BEFORE it
+    takes the arm back. It has to have counted it by the time the failure reaches the caller.
     """
-    loop, backend, sink, operator, hands = build(
-        "teleop", hands=Hands(fail_after_recording="the planner could not take the robot back")
-    )
-    with pytest.raises(RuntimeError, match="take the robot back"):
+    loop, backend, sink, operator, hands = build("teleop", backend_type=CannotTakeItBack)
+    with pytest.raises(CustodyError, match="could not take the robot back: the robot client timed out"):
         run(loop)
 
     assert loop.outcome.legs_recorded == 2, "the robot's leg and the person's"

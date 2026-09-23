@@ -21,6 +21,7 @@ from unittest import mock
 
 import pytest
 from fake_backend import FakeBackend
+from fake_executor import FakeExecutor, use_fake_executor
 from helpers import FakeRuntime, use_fake_backend, wait_for
 
 from tandem.core import events as events_mod
@@ -28,6 +29,7 @@ from tandem.core import secrets
 from tandem.core.episodes import LegDirs
 from tandem.core.phase_loop import PhaseLoop
 from tandem.core.session import Session, State
+from tandem.executors.base import ExecutorContext
 from tandem.planning.config import PlanningConfig
 
 # What the camera is asked about, in the words it is asked in.
@@ -188,16 +190,14 @@ class Operator:
     def rollout_saved(self, n_frames: int) -> None:
         return None
 
+    def handing_off(self) -> None:
+        return None
 
-class Hands:
-    """The human-leg seam with nobody on the other end."""
+    def arm_lent(self):
+        return lambda: True
 
-    def __init__(self) -> None:
-        self.calls: list = []
-
-    def __call__(self, phase, recorded) -> None:
-        self.calls.append(phase)
-        recorded(30)
+    def arm_returned(self) -> None:
+        return None
 
 
 @pytest.fixture
@@ -209,14 +209,20 @@ def rig(profile, tmp_path, monkeypatch):
         camera = Camera(plan, answers, fail=fail)
         monkeypatch.setattr(llm, "gemini_client", lambda: camera)
         backend = FakeBackend(None, output_dir=tmp_path / "frames")
-        sink, operator, hands = Sink(), Operator(*operator_answers), Hands()
+        # The human executor with nobody on the other end: every leg "records" 30 frames.
+        sink, operator, hands = Sink(), Operator(*operator_answers), FakeExecutor()
+        use_fake_executor(monkeypatch, hands)
         loop = PhaseLoop(
             backend,
             backend.capabilities(),
-            PlanningConfig(**{"enabled": True, "save_vlm_io": False, **cfg}),
+            # The operator answers "done" for a step done by hand, which while recording is refused
+            # unless allowed (tests/test_executor_integration.py); these tests are about the checks.
+            PlanningConfig(
+                **{"enabled": True, "save_vlm_io": False, "allow_unrecorded_human_phase": True, **cfg}
+            ),
             events=sink,
             operator=operator,
-            human_leg=hands,
+            executor_context=ExecutorContext(profile=profile, session_dir=tmp_path / "session"),
             legs=LegDirs(profile, tmp_path / "session", log=sink.log),
         )
 
@@ -548,6 +554,9 @@ def session_for(profile, tmp_path, monkeypatch):
 
     def build(answers, *, plan=PLAN, **hitl):
         profile.hitl.enabled = True
+        # These tests answer a human phase "done", for a step done by hand. While recording that is
+        # refused unless allowed (tests/test_executor_integration.py).
+        profile.hitl.allow_unrecorded_human_phase = True
         for key, value in hitl.items():
             setattr(profile.hitl, key, value)
         monkeypatch.setattr(secrets, "gemini_api_key", lambda: "test-key")

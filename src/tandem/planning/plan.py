@@ -634,20 +634,25 @@ def handoff_message(plan: PhasePlan, phase: Phase) -> str:
     return "\n".join(lines)
 
 
-def retry_message(missing: Sequence[str], attempts_left: int, *, by: str = "teleop") -> str:
+def retry_message(
+    missing: Sequence[str], attempts_left: int, *, by: str = "teleop", by_hand: bool = True
+) -> str:
     """What the operator is shown when the check says the phase is not done.
 
     ``by`` is the human executor that carried the phase out (``hitl.human_executor``). It changes only
     the last line, which is an instruction to whoever gets another go: a person at the arm
     (``teleop``) is asked to take it again, and any other executor is simply said to be run again --
     "take the arm" printed into a log while a policy drives would be an instruction to nobody.
+    ``by_hand`` is whether the person may instead just say the step is done; while recording they may
+    not (``allow_unrecorded_human_phase``), and the line must not offer it.
     """
     lines = ["The workspace does not look like that step was completed.", "Still expected:"]
     lines += [f"  - {text}" for text in missing]
     if attempts_left > 0:
         lines.append("")
+        again = "Take the arm again and finish it" + (", or say it IS done." if by_hand else ".")
         lines.append(
-            "Take the arm again and finish it, or say it IS done."
+            again
             if by == "teleop"
             else f"Running the {by} executor on this phase again ({attempts_left} attempt(s) left)."
         )

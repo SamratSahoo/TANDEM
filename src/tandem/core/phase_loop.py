@@ -9,9 +9,11 @@ it gives each thing explicitly:
 * the planner backend and the ``Capabilities`` it declared, for the robot's phases;
 * the resolved phase-planning settings (``tandem.planning.config.PlanningConfig``);
 * an event sink (`EventSink`), for the session's events file and its log;
-* the operator (`OperatorIO`), for the prompts a phase raises and the progress it shows;
-* the human-leg seam (`HumanLeg`), which carries out a person's step. Today that is a teleop
-  hand-off through ``tandem.teleop.child``;
+* the operator (`OperatorIO`), for the prompts a phase raises, the progress it shows, and the
+  states a hand-off passes through;
+* what a human executor is built with (``tandem.executors.ExecutorContext``). The loop builds the
+  executor ``hitl.human_executor`` names from it, once, the first time a human phase needs it
+  (`_executor`), and the teleop executor for a hand-off the operator asks for;
 * where legs are allocated on disk (``tandem.core.episodes.LegDirs``).
 
 How it maps onto the paper (TANDEM, Sec. IV-D "Task Plan Generation and Execution" and Sec. IV-E
@@ -35,7 +37,11 @@ How it maps onto the paper (TANDEM, Sec. IV-D "Task Plan Generation and Executio
   (``replan``).
 * **Human execution.** The operator is shown a natural-language version of the subgoal, takes
   control through teleoperation, and ends the phase. This is `_run_human_phase`, through the
-  operator's prompt and the human-leg seam.
+  operator's prompt and the human executor (pi_omega_Delta, ``tandem.executors``). The loop, not the
+  executor, holds the arm's custody across it (`_lend_arm`): the planner lets go of the robot and
+  the cameras first, the leg is counted as soon as it is on disk, and the planner takes them back
+  last. A step "done" by hand, with no executor run, has no leg, so while recording it is refused
+  unless ``allow_unrecorded_human_phase`` says otherwise.
 * **Re-perception and verification.** The scene is perceived afresh before every robot leg, and
   never before a person's: a human phase is judged on a fresh frame from the verification camera,
   and nothing about it is planned. After a human phase, the VLM classifiers g_psi check the phase's
@@ -49,7 +55,9 @@ How it maps onto the paper (TANDEM, Sec. IV-D "Task Plan Generation and Executio
   ``check_tamp_effects``), which the paper does not do; that is observational unless configured
   otherwise.
 * **Demonstration generation**, tau = ((tau_1, phi_1), .., (tau_N, phi_N)). Every leg this loop
-  runs is stamped with the one trajectory id the session minted (``LegSpec.trajectory_id``).
+  runs is stamped with the one trajectory id the session minted (``LegSpec.trajectory_id``), and a
+  phase's leg with that phase (``phase_index``), a person's included, so every stretch of the merged
+  episode maps back to the phase it carried out.
   `TrialOutcome.legs_recorded` tells the session whether there is anything to label or file, and
   `TrialOutcome.outcome` whether to ask for a label at all. ``tandem.core.episodes`` then merges the
   legs into one episode, excluded trials included, so their raw legs survive for inspection.
@@ -75,6 +83,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from tandem.core.episodes import LegDirs
+    from tandem.executors.base import ExecutorContext, HumanExecutor, HumanPhaseRequest, HumanPhaseResult
     from tandem.planners.base import Capabilities, SceneView, TampBackend
     from tandem.planning.config import PlanningConfig
     from tandem.planning.grounding import Verdict
@@ -83,12 +92,23 @@ if TYPE_CHECKING:
     from tandem.planning.symbols import Atom
 
 
+# The executor that lends the arm for a hand-off the operator asks for between phases, whatever
+# ``hitl.human_executor`` names.
+TELEOP = "teleop"
+
+
 @dataclass
 class HumanPhase:
     """A step of the task the plan says only a person can do.
 
     `instructions` is what the operator is shown; `expected` is what the VLM will be asked
     about afterwards — the same list, so nobody is checked against a hidden standard.
+
+    `executor` is who carries the step out when the operator hands it over (``hitl.human_executor``).
+    `by_hand` is whether the operator may instead say it is done without that executor running. The
+    prompt offers exactly the answers the loop will accept: while recording, a step done by hand has
+    no leg, so the loop refuses it (``allow_unrecorded_human_phase``), and a "done" button that is
+    then refused is a control that lies.
     """
 
     description: str
@@ -101,6 +121,8 @@ class HumanPhase:
     # step was accepted without being judged (the check is off for it, or could not run).
     verified: bool | None = None
     missing: list[str] = field(default_factory=list)
+    executor: str = "teleop"
+    by_hand: bool = True
 
     def to_dict(self) -> dict:
         return {
@@ -112,6 +134,8 @@ class HumanPhase:
             "attempt": self.attempt,
             "verified": self.verified,
             "missing": self.missing,
+            "executor": self.executor,
+            "by_hand": self.by_hand,
         }
 
 
@@ -175,8 +199,9 @@ class OperatorIO(Protocol):
     """The person running the trial, as the loop sees them. The session implements it.
 
     Each method either puts a question to a person or shows them something. The loop never touches
-    the session's state machine directly. `rolling` and `await_human_phase` are the only two
-    transitions it causes, and which states those are is for the session to decide.
+    the session's state machine directly. `rolling`, `await_human_phase` and the three hand-off
+    methods are the only transitions it causes, and which states those are is for the session to
+    decide.
     """
 
     def check_preempt(self) -> None:
@@ -198,7 +223,11 @@ class OperatorIO(Protocol):
         """The step a person is being asked to do, or None once it is over."""
 
     def await_human_phase(self) -> str:
-        """Wait at the step last shown. Returns "done", "abort" or "teleop"."""
+        """Wait at the step last shown. Returns "done" (done by hand), "abort" or "teleop".
+
+        "teleop" means: carry the step out through the human executor. The name is the answer's
+        history, from when teleop was the only executor; it runs whichever one is configured.
+        """
 
     def rollout_started(self, save_dir: Path) -> None:
         """A robot leg is about to be planned and recorded into ``save_dir``."""
@@ -206,21 +235,19 @@ class OperatorIO(Protocol):
     def rollout_saved(self, n_frames: int) -> None:
         """The robot leg in progress recorded ``n_frames`` frames."""
 
+    def handing_off(self) -> None:
+        """The arm is about to be released for a human leg. Nothing else may be asked of it now."""
 
-class HumanLeg(Protocol):
-    """The human-leg seam: how a person's part of the task is carried out.
+    def arm_lent(self) -> Callable[[], bool]:
+        """The planner has let go and the human leg is starting.
 
-    It is called with the phase the person is asked to do. For a hand-off the operator asked for at
-    a phase boundary it is called with None, which lends them the arm with no phase attached. It
-    gives the arm to a person, waits until they give it back, and then takes it back. Today the
-    session implements it as a teleop hand-off (``tandem.teleop.child``).
+        Returns the leg's ``should_stop``: true once the leg must end, because the operator handed
+        the arm back, the session is stopping, or nobody has for too long. It is what an executor
+        polls (``HumanExecutor.run``), so it must be cheap and must not block.
+        """
 
-    It calls ``recorded(n_frames)`` as soon as a leg is safely on disk, and before it takes the arm
-    back. Taking the arm back can fail and end the session, and a leg that reached disk must still
-    be labeled and merged on the way out. It is not called at all when nothing was recorded.
-    """
-
-    def __call__(self, phase: Phase | None, recorded: Callable[[int], None]) -> None: ...
+    def arm_returned(self) -> None:
+        """The human leg is over and the planner holds the arm again."""
 
 
 class PhaseLoop:
@@ -229,6 +256,10 @@ class PhaseLoop:
     `run` resets every piece of per-attempt state, so one loop can run attempt after attempt against
     the same warm backend. `outcome` always describes the most recent `run`, and is meant to be read
     after it has returned or raised.
+
+    The human executors are not per-attempt state. Each is built the first time it is needed and kept
+    for the loop's life, because building one may start a process or load a policy, and a session
+    runs attempt after attempt through one loop.
     """
 
     def __init__(
@@ -239,7 +270,7 @@ class PhaseLoop:
         *,
         events: EventSink,
         operator: OperatorIO,
-        human_leg: HumanLeg,
+        executor_context: ExecutorContext,
         legs: LegDirs,
         record: bool = True,
     ) -> None:
@@ -248,9 +279,13 @@ class PhaseLoop:
         self.cfg = cfg
         self.events = events
         self.operator = operator
-        self.human_leg = human_leg
+        self.executor_context = executor_context
         self.legs = legs
         self.record = record
+        # Every executor built so far, by registered name, and the one whose leg is in flight, which
+        # is what `kill` reaches from another thread.
+        self._executors: dict[str, HumanExecutor] = {}
+        self._running: HumanExecutor | None = None
 
         self.outcome = TrialOutcome(trajectory_id="")
         # One attempt's working state, reset by `run`.
@@ -381,6 +416,17 @@ class PhaseLoop:
         if n_frames:
             self.outcome.legs_recorded += 1
 
+    def kill(self) -> None:
+        """End the human leg in flight at once, if there is one. Called from another thread.
+
+        A forced stop's, for an executor that is wedged: its `run` returns ``aborted`` as soon as it
+        can, and the loop then takes the arm back as it would after any leg. Nothing else in the loop
+        can be cut short from outside; a robot leg runs to the end of its segment.
+        """
+        executor = self._running
+        if executor is not None:
+            executor.kill()
+
     # ---- one leg -----------------------------------------------------------
 
     def _take_turn(self, scene: SceneView | None, leg_dir: Path | None) -> None:
@@ -395,7 +441,9 @@ class PhaseLoop:
             # sane rather than mid-motion. Nothing advances: the same phase (or, with no plan, the
             # same task) is re-perceived and planned afterwards. That pass leaves the gripper as the
             # operator left it (`_perceive`): whatever it holds when it comes back is their choice.
-            self._human_leg(None)
+            # Always teleop, whatever `human_executor` is: the operator asked for the arm, and only
+            # an executor a person drives can lend it with no phase attached.
+            self._lend_arm(TELEOP, None)
         elif phase is not None and phase.is_human:
             self._run_human_phase(phase)
         else:
@@ -770,17 +818,35 @@ class PhaseLoop:
     def _run_human_phase(self, phase) -> None:
         """Hand the arm over, let a person do this step, and check they did.
 
+        The step is carried out by the human executor (``human_executor``) when the operator hands it
+        over, and how its leg ended decides what follows (``HumanPhaseResult.status``):
+
+        * ``done``: the effects are put to the camera, as below.
+        * ``ended_by_operator``: the operator stopped the executor on purpose to move on. The leg is
+          kept and the phase goes ahead unchecked, on the record as such -- the reference
+          implementation's rule for a policy the operator cuts short.
+        * ``aborted``: the executor did not carry the phase out. Nothing the arm did may be read as
+          the phase being done, and every later phase depends on it, so the trial ends at
+          ``human_policy``.
+
+        Answered "done" with no executor run, or through an executor that recorded nothing, the
+        step has no leg. While recording that is refused and the operator is asked again, unless
+        ``allow_unrecorded_human_phase`` is set: the episode would otherwise be missing exactly the
+        demonstration the trial exists to capture, while looking complete.
+
         A failed check is not a lost demonstration straight away: the person is told what is still
         missing and given another go, because one bad classifier call should not cost an episode.
         A check that is still failing once the retries are spent is different. Every later phase is
         planned against the belief that this one happened, so the trial stops there, and what becomes
         of it is ``on_verification_failure`` (`_verification_failed`).
         """
+        from tandem.executors.base import HumanPhaseRequest
         from tandem.planning.grounding import verify_effects
         from tandem.planning.plan import phase_summary, retry_message
 
         cfg = self.cfg
         index = self._plan.index if self._plan is not None else None
+        by_hand = self._unrecorded_allowed()
         # Whatever happens next, the next robot leg starts from a gripper a person may have closed.
         self._after_human = True
 
@@ -795,17 +861,18 @@ class PhaseLoop:
         while True:
             summary = phase_summary(self._plan, phase) if self._plan is not None else {}
             previous = self._human_phase
-            self._show_human_phase(
-                HumanPhase(
-                    description=summary.get("description", phase.description),
-                    instructions=summary.get("instructions", phase.instructions),
-                    expected=list(summary.get("expected", [])),
-                    index=int(summary.get("phase_index", 0)),
-                    total=int(summary.get("n_phases", 0)),
-                    attempt=attempt,
-                    missing=previous.missing if previous is not None and attempt > 1 else [],
-                )
+            view = HumanPhase(
+                description=summary.get("description", phase.description),
+                instructions=summary.get("instructions", phase.instructions),
+                expected=list(summary.get("expected", [])),
+                index=int(summary.get("phase_index", 0)),
+                total=int(summary.get("n_phases", 0)),
+                attempt=attempt,
+                missing=previous.missing if previous is not None and attempt > 1 else [],
+                executor=cfg.human_executor,
+                by_hand=by_hand,
             )
+            self._show_human_phase(view)
             self.events.event("awaiting_human_phase", **summary)
 
             answer = self.operator.await_human_phase()
@@ -816,14 +883,44 @@ class PhaseLoop:
                 self._task_done = True
                 self._end("aborted", None, f"the operator abandoned the human phase {phase.description!r}")
                 return
+            carried_out = None
             if answer == "teleop":
-                self._human_leg(phase)
+                # Built from the view the operator is looking at, so the executor is asked for
+                # exactly the step, attempt and misses they were shown -- and its leg is stamped with
+                # this phase, which is how the merged episode maps that stretch back to it.
+                request = HumanPhaseRequest.from_view(view, operator=phase.operator)
+                carried_out = self._lend_arm(cfg.human_executor, request)
+                if carried_out.status == "aborted":
+                    self._human_executor_failed(phase)
+                    return
+                if not carried_out.recorded and not by_hand:
+                    self._refuse_unrecorded(index, f"the {cfg.human_executor} leg recorded nothing")
+                    continue
+            elif not by_hand:
+                self._refuse_unrecorded(index, "the step was answered as done without being carried out")
+                continue
             # Busy again: checking the step, then on to whatever is next. Said here because nothing
             # else says it any more -- the perception pass that used to follow every person's step
             # did, and without it a step answered "done" and followed by another person's step would
             # never leave the prompt state, so a UI that repaints on a change of state would go on
             # showing the first step.
             self.operator.rolling()
+
+            if carried_out is not None and carried_out.status == "ended_by_operator":
+                # On the record as a phase that went through unchecked, not as one that passed: the
+                # operator decided it was over, and no camera was asked.
+                skipped = f"the operator ended the {cfg.human_executor} leg to move on"
+                self._record_unchecked(index, "effect check", f"not run: {skipped}")
+                self.events.log(f"not verifying this step: {skipped}")
+                self.events.event(
+                    "human_phase_verified",
+                    phase_index=index,
+                    attempt=attempt,
+                    ok=None,
+                    skipped=skipped,
+                    verdicts=[],
+                )
+                break
 
             skipped = self._effects_not_checked()
             if skipped is not None:
@@ -886,12 +983,48 @@ class PhaseLoop:
                 return
             attempts_left -= 1
             attempt += 1
-            self.events.log(retry_message(self._human_phase.missing, attempts_left, by=cfg.human_executor))
+            missing = self._human_phase.missing
+            self.events.log(retry_message(missing, attempts_left, by=cfg.human_executor, by_hand=by_hand))
 
         self._show_human_phase(None)
         if self._plan is not None:
             self._plan.advance()
             self.operator.show_progress((self._plan.index, len(self._plan.phases)))
+
+    def _unrecorded_allowed(self) -> bool:
+        """Whether a human phase may stand with no leg recorded for it.
+
+        Always when nothing is being recorded: there is no demonstration to be missing from. While
+        recording, only with ``allow_unrecorded_human_phase`` -- for staging part of a scene by hand
+        mid-task, knowingly.
+        """
+        return not self.record or self.cfg.allow_unrecorded_human_phase
+
+    def _refuse_unrecorded(self, index: int | None, why: str) -> None:
+        """Turn down a human phase that has no leg, while recording, and ask the operator again.
+
+        The same attempt is asked again, not the next one: nothing was checked, so no retry was spent.
+        A preempt is honoured before the prompt comes back, since this is a place the loop goes round.
+        """
+        executor = self.cfg.human_executor
+        message = (
+            f"{why}, and this trial is being recorded, so the step has to be carried out through the "
+            f"{executor} executor for the demonstration to have it (hitl.allow_unrecorded_human_phase "
+            "accepts a step done by hand)"
+        )
+        self.events.log(message)
+        self.events.event("human_phase_refused", phase_index=index, executor=executor, reason=why)
+        self.operator.check_preempt()
+
+    def _human_executor_failed(self, phase) -> None:
+        """End the trial over a human leg the executor did not carry out (status ``aborted``)."""
+        executor = self.cfg.human_executor
+        reason = f"the {executor} executor did not carry out the human phase {phase.description!r}"
+        self.events.log(f"{reason}; ending this attempt")
+        self._show_human_phase(None)
+        self._plan = None
+        self._task_done = True
+        self._end("failure", "human_policy", reason)
 
     def _effects_not_checked(self) -> str | None:
         """Why this human phase's effects are not put to the camera, or None when they are."""
@@ -1073,9 +1206,106 @@ class PhaseLoop:
             self.events.log(f"{reason}; ending this attempt, and your label decides it")
             self._end("failure", "verification", reason)
 
-    def _human_leg(self, phase) -> None:
-        """Give the arm to a person for one leg, through the human-leg seam."""
-        self.human_leg(phase, self._leg_recorded)
+    # ---- a leg the arm is lent for ------------------------------------------
+
+    def _executor(self, name: str) -> HumanExecutor:
+        """The human executor registered as ``name``, built the first time it is asked for."""
+        executor = self._executors.get(name)
+        if executor is None:
+            from tandem import executors
+
+            executor = executors.create(name, self.executor_context)
+            self._executors[name] = executor
+        return executor
+
+    def _lend_arm(self, name: str, request: HumanPhaseRequest | None) -> HumanPhaseResult:
+        """Give the arm to the executor ``name`` for one leg, and take it back. A custody transfer.
+
+        The order is the whole of it. The planner holds the robot and every camera exclusively, so
+        nothing else can open them until the release has completed, and whatever drove the arm must
+        have let go before the planner reaches for them again -- which `HumanExecutor.run` does not
+        return before.
+
+        The leg is counted as soon as the executor returns, BEFORE the arm is taken back: taking it
+        back can fail and end the session, and a leg that reached disk must still be labeled and
+        merged on the way out. The arm is taken back on every way out of the leg but one: an executor
+        that cannot let go (``CustodyError``) still holds the cameras, and reaching for them then gets
+        a failure that looks like broken hardware rather than the process that will not die.
+
+        ``request`` is the phase being carried out, or None for a hand-off the operator asked for,
+        which is stamped with no phase.
+        """
+        from tandem.executors.base import CustodyError
+        from tandem.planners.base import LegSpec
+
+        executor = self._executor(name)
+        if request is not None:
+            leg = request.leg_spec(
+                trajectory_id=self._trajectory_id,
+                instruction=self._instruction,
+                segment_source=executor.segment_source,
+                record=self.record,
+            )
+        else:
+            leg = LegSpec(
+                trajectory_id=self._trajectory_id,
+                instruction=self._instruction,
+                segment_source=executor.segment_source,
+                record=self.record,
+            )
+
+        self.operator.handing_off()
+        try:
+            self.backend.release_hardware()
+        except Exception as exc:
+            # A warning, not the end of the leg: the person may already have their hands on the arm,
+            # and only they can say whether it is safe to carry on.
+            message = f"the planner could not release the robot: {exc}"
+            self.events.log(message)
+            self.events.event("teleop_handoff_warning", message=message)
+            self.executor_context.on_problem(message)
+
+        should_stop = self.operator.arm_lent()
+        held_by_executor = False
+        try:
+            self._running = executor
+            try:
+                result = executor.run(
+                    request, leg, save_root=self.legs.profile.trajectories_dir(), should_stop=should_stop
+                )
+            finally:
+                self._running = None
+            self._leg_recorded(result.n_frames)
+        except CustodyError:
+            held_by_executor = True
+            raise
+        finally:
+            if not held_by_executor:
+                self._take_arm_back()
+
+        self.events.event(
+            "human_leg_ended",
+            executor=name,
+            status=result.status,
+            n_frames=result.n_frames,
+            dir=str(result.leg_dir) if result.leg_dir is not None else None,
+            phase_index=leg.phase_index,
+        )
+        self.operator.arm_returned()
+        return result
+
+    def _take_arm_back(self) -> None:
+        """Reacquire the robot and the cameras, or end the session saying why not.
+
+        Unrecoverable within the session: every later task would fail on hardware the planner no
+        longer owns, and the arm would never be parked.
+        """
+        from tandem.executors.base import CustodyError
+
+        try:
+            self.backend.reacquire_hardware()
+        except Exception as exc:
+            raise CustodyError(f"the planner could not take the robot back: {exc}") from exc
 
     def _show_human_phase(self, view: HumanPhase | None) -> None:
         # The loop keeps its own reference as well, because a retry carries the previous attempt's

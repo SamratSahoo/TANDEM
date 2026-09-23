@@ -123,6 +123,9 @@ def phase_session(profile, tmp_path, monkeypatch):
 
     def build(*verdicts, backend_kwargs=None, **profile_changes):
         profile.hitl.enabled = True
+        # These tests answer a human phase "done", for a step done by hand. While recording that is
+        # refused unless allowed (tests/test_executor_integration.py).
+        profile.hitl.allow_unrecorded_human_phase = True
         for key, value in profile_changes.items():
             setattr(profile.hitl, key, value)
         monkeypatch.setattr(secrets, "gemini_api_key", lambda: "test-key")
@@ -392,6 +395,27 @@ def test_a_rollout_without_phase_planning_reports_none(profile, make_trajectory)
 # --- a real hand-off, through the session -----------------------------------------------------
 
 
+class Driver:
+    """What the teleop driver has announced, as any subscriber to the session sees it.
+
+    The driver runs inside the teleop executor, behind the phase loop's hand-off, so the session no
+    longer holds it. The one thing these tests need from it -- has the person started recording? --
+    is on the session's message bus, which is where the web page reads it too.
+    """
+
+    def __init__(self, session) -> None:
+        self.started = 0
+        session.subscribe(self._on_message)
+
+    def _on_message(self, message: dict) -> None:
+        if message.get("type") == "teleop_event" and message.get("event") == "rollout_start":
+            self.started += 1
+
+    def recording(self, legs: int = 1):
+        """A wait_for predicate: the driver has started recording its ``legs``-th leg."""
+        return lambda: self.started >= legs
+
+
 @pytest.fixture
 def teleop_enabled(monkeypatch, tmp_path):
     """Point the hand-off at the stand-in driver and turn teleop on."""
@@ -420,6 +444,7 @@ def test_a_teleop_leg_counts_as_part_of_the_episode(phase_session, teleop_enable
     a recorded demonstration is stranded in eval/ while the operator is told it never happened.
     """
     session, backends, _ = phase_session()
+    driver = Driver(session)
     session.next_task()
     assert wait_for(lambda: session.state is State.AWAITING_HUMAN_PHASE), f"stuck in {session.state}"
 
@@ -432,7 +457,7 @@ def test_a_teleop_leg_counts_as_part_of_the_episode(phase_session, teleop_enable
 
     # Wait until the driver is actually recording, which is what an operator taking the arm and
     # demonstrating amounts to. Returning control before then is a leg nobody drove.
-    assert wait_for(lambda: session._teleop is not None and session._teleop._recording)
+    assert wait_for(driver.recording())
     session.resume_from_teleop()
     assert wait_for(lambda: session.state is State.AWAITING_LABEL), f"stuck in {session.state}"
 
@@ -449,11 +474,12 @@ def test_the_teleop_leg_is_stamped_with_the_same_trajectory_as_the_planners(phas
     from tandem.core import merge as merge_mod
 
     session, backends, _ = phase_session()
+    driver = Driver(session)
     session.next_task()
     assert wait_for(lambda: session.state is State.AWAITING_HUMAN_PHASE)
     session.request_teleop()
     assert wait_for(lambda: session.state is State.TELEOP_HANDOFF)
-    assert wait_for(lambda: session._teleop is not None and session._teleop._recording)
+    assert wait_for(driver.recording())
     session.resume_from_teleop()
     assert wait_for(lambda: session.state is State.AWAITING_LABEL)
 
@@ -474,11 +500,12 @@ def test_the_teleop_leg_of_a_human_phase_is_stamped_with_that_phase(phase_sessio
     from tandem.core import merge as merge_mod
 
     session, backends, _ = phase_session()
+    driver = Driver(session)
     session.next_task()
     assert wait_for(lambda: session.state is State.AWAITING_HUMAN_PHASE)
     session.request_teleop()
     assert wait_for(lambda: session.state is State.TELEOP_HANDOFF)
-    assert wait_for(lambda: session._teleop is not None and session._teleop._recording)
+    assert wait_for(driver.recording())
     session.resume_from_teleop()
     assert wait_for(lambda: session.state is State.AWAITING_LABEL)
 
@@ -534,21 +561,22 @@ def test_a_second_return_control_click_does_not_end_the_next_handoff(phase_sessi
     # The first attempt at the step does not verify, so the person is offered it again — which is
     # what gives us a second hand-off to check.
     session, backends, _ = phase_session(DOES_NOT_HOLD, HOLDS, verify_retries=1)
+    driver = Driver(session)
     session.next_task()
     assert wait_for(lambda: session.state is State.AWAITING_HUMAN_PHASE)
 
     session.request_teleop()
     assert wait_for(lambda: session.state is State.TELEOP_HANDOFF)
-    assert wait_for(lambda: session._teleop is not None and session._teleop._recording)
+    assert wait_for(driver.recording())
 
     # Hold the teardown open, which is what makes the second click land where it did in practice.
     # An instantaneous fake closes the window entirely and the bug cannot reproduce at all.
-    release = threading.Event()
+    release, taking_back = threading.Event(), threading.Event()
     original = backends[-1].reacquire_hardware
-    backends[-1].reacquire_hardware = lambda: (release.wait(timeout=10.0), original())[1]
+    backends[-1].reacquire_hardware = lambda: (taking_back.set(), release.wait(timeout=10.0), original())[2]
 
     session.resume_from_teleop()
-    assert wait_for(lambda: session._teleop is None), "the teardown never started"
+    assert wait_for(taking_back.is_set), "the teardown never started"
     with contextlib.suppress(SessionConflict):
         session.resume_from_teleop()  # the second click, mid-teardown
     release.set()
@@ -558,9 +586,7 @@ def test_a_second_return_control_click_does_not_end_the_next_handoff(phase_sessi
     assert wait_for(lambda: session.human_phase is not None and session.human_phase.attempt == 2)
     session.request_teleop()
     assert wait_for(lambda: session.state is State.TELEOP_HANDOFF), f"stuck in {session.state}"
-    assert wait_for(
-        lambda: session._teleop is not None and session._teleop._recording
-    ), "the second hand-off ended before the person could record anything"
+    assert wait_for(driver.recording(2)), "the second hand-off ended before the person could record anything"
 
 
 def test_a_preempt_does_not_answer_the_next_human_phase_on_the_persons_behalf(phase_session):

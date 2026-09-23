@@ -6,7 +6,8 @@ which is why a session is kept alive across a bad episode rather than restarted.
 
 **tandem drives the task; the planner only plans motion.** A task is broken into an ordered list of
 phases (``tandem.planning``), and this engine walks them: a robot phase becomes one call to the
-planner backend, a human phase becomes a teleop leg, and every leg of one task shares a trajectory
+planner backend, a human phase becomes a leg of the human executor (``hitl.human_executor``, a
+person at the teleop rig by default), and every leg of one task shares a trajectory
 id so they merge into a single episode. The planner is reached through ``tandem.planners`` and is
 never modified — it is asked for one thing, "achieve this goal in this scene, and record it".
 
@@ -15,9 +16,11 @@ planner's own process. tandem could see a rollout start and had to guess which p
 it could not reorder a phase, retry one, or hand a person a step the planner turned out not to be
 able to do. Now it holds the plan.
 
-The walk itself is ``tandem.core.phase_loop``. This module is everything around it: the state
-machine, the prompts a person answers, the custody transfer of a hand-off, and the label. Filing
-and merging the finished legs is ``tandem.core.episodes``.
+The walk itself is ``tandem.core.phase_loop``, and so is the custody transfer of a hand-off: the
+loop releases the arm, lets the human executor (``tandem.executors``) carry out the leg, and takes
+the arm back. This module is everything around it: the state machine, the prompts a person
+answers, what the executor is built with, and the label. Filing and merging the finished legs is
+``tandem.core.episodes``.
 
 Threads and a callback bus, no asyncio out here, so the identical object drives both
 `tandem collect` (synchronous, Rich Live) and `tandem ui` (FastAPI, bridged to SSE). The state
@@ -41,8 +44,10 @@ Three behaviours are load-bearing and were each learned expensively:
   park before closing it. The gripper is deliberately NOT opened — nothing here can know the arm is
   not holding something.
 * **A hand-off is a custody transfer.** The planner holds the robot and the cameras exclusively, so
-  every teleop leg is bracketed by `release_hardware()` / `reacquire_hardware()`, and the teleop
-  child is not started until the release has actually completed.
+  every human leg is bracketed by `release_hardware()` / `reacquire_hardware()`, and the executor
+  (the teleop driver, by default) is not started until the release has actually completed. That
+  bracket is the phase loop's (``PhaseLoop._lend_arm``); the session supplies the states it passes
+  through and the "return control" that ends it (`_SessionIO.arm_lent`).
 """
 
 from __future__ import annotations
@@ -58,13 +63,14 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
+from tandem import executors
 from tandem.core import episodes, paths, render, secrets
 from tandem.core import settings as settings_mod
 from tandem.core.errors import SessionConflict, TandemError
-from tandem.core.phase_loop import HumanPhase, PhaseLoop, TrialOutcome
+from tandem.core.phase_loop import TELEOP, HumanPhase, PhaseLoop, TrialOutcome
 from tandem.core.profiles import Profile
 from tandem.core.runtime import Runtime
-from tandem.teleop.child import TeleopChild
+from tandem.executors.base import CustodyError, ExecutorContext
 
 LOG_BUFFER = 4000
 # How long a caller should wait for `stop()` to finish. It has to cover the session thread
@@ -72,11 +78,8 @@ LOG_BUFFER = 4000
 # bounds those at HARDWARE_TIMEOUT and the channel at EXIT_GRACE, so this is deliberately longer
 # than their sum rather than a guess.
 STOP_GRACE = 300.0
-# Closing the cameras blocks for the SDK teardown — measured at ~14 s for two — and the teleop
-# driver only exits after that, so the wait for it to release the hardware has to be generous.
-TELEOP_EXIT_GRACE = 60.0
-# How long a human phase waits for the person before the session is considered abandoned. Long:
-# the whole point is that somebody is doing something with their hands.
+# How long a human phase, or a lent arm, waits for the person before the session is considered
+# abandoned. Long: the whole point is that somebody is doing something with their hands.
 HUMAN_PHASE_TIMEOUT = 3600.0
 
 
@@ -99,16 +102,6 @@ class State(str, Enum):
 
 class _Preempted(Exception):
     """Raised inside the session loop to abandon one task attempt and keep everything warm."""
-
-
-class _CustodyLost(Exception):
-    """Raised when the robot or the cameras cannot be got back. Ends the session.
-
-    Deliberately not caught by the per-task handler: a session that has lost custody is not warm
-    and cannot run the next task, so reporting it as one bad attempt and returning to the prompt
-    would leave an operator staring at a ready-looking session that fails at every rollout — and an
-    arm nothing will ever park.
-    """
 
 
 TERMINAL = frozenset({State.STOPPED, State.FAILED})
@@ -210,7 +203,9 @@ class Session:
         self._files: dict = {}
         self._stopping = False
         self._park_on_exit = True
-        self._teleop: TeleopChild | None = None
+        # The trial algorithm, built at the first task and kept: it holds the human executors it has
+        # built, and building one may start a process. `force_stop` reaches a leg in flight through it.
+        self._loop: PhaseLoop | None = None
         self._legs_recorded = 0
 
         # The planner, and what it says it can be asked for.
@@ -265,6 +260,12 @@ class Session:
                 hint="Add them with `tandem profile edit`, or import a rig with "
                 "`tandem profile create <name> --import-from <checkout>`.",
             )
+
+        if self.hitl_enabled:
+            # Resolved now, before anything is warmed: a plugin that will not import, or a name two
+            # installed packages claim, is otherwise found at the first human phase, with the robot
+            # already part-way through the task. Only described here, not built; the loop builds it.
+            executors.info(self.profile.hitl.human_executor)
 
         self._files = self._session_files()
         self._backend = self._build_backend()
@@ -339,7 +340,12 @@ class Session:
                 except _Preempted:
                     self._log("tandem", "the task attempt was preempted; the planner is still warm")
                     self._event("rollout_aborted")
-                except _CustodyLost:
+                except CustodyError:
+                    # The robot or the cameras could not be got back (the phase loop's hand-off).
+                    # Deliberately not caught as one bad attempt: a session that has lost custody is
+                    # not warm and cannot run the next task, so returning to the prompt would leave
+                    # an operator staring at a ready-looking session that fails at every rollout --
+                    # and an arm nothing will ever park.
                     raise
                 except Exception as exc:  # a bad task must not end a warm session
                     self._log("tandem", f"the task attempt failed: {type(exc).__name__}: {exc}")
@@ -402,7 +408,9 @@ class Session:
         if self.hitl_enabled and self._planning_config().save_vlm_io:
             self._vlm_dir = self._files["session_dir"] / "vlm" / self._trajectory_id
 
-        loop = self._phase_loop()
+        if self._loop is None:
+            self._loop = self._phase_loop()
+        loop = self._loop
         try:
             loop.run(
                 task=self.task,
@@ -442,123 +450,37 @@ class Session:
             self._planning_config(),
             events=io,
             operator=io,
-            human_leg=self._hand_off,
+            executor_context=self._executor_context(),
             legs=episodes.LegDirs(self.profile, self._files["session_dir"], log=io.log),
             record=self.record,
         )
 
     # ---- a leg for a person ------------------------------------------------
 
-    def _hand_off(self, phase, recorded: Callable[[int], None]) -> None:
-        """Give the arm to a person, wait for it back, and take it again.
+    def _executor_context(self) -> ExecutorContext:
+        """What a human executor is built with: this session's profile, scratch space, log and UI.
 
-        The order is the whole of it: the planner holds the robot and every camera exclusively, so
-        nothing else can open them until the release has actually completed — and the teleop child
-        must be gone before the planner reaches for them again.
-
-        This is the phase loop's human-leg seam (``phase_loop.HumanLeg``). For a phase, the driver
-        is told which one it is, so the leg says so in its _meta.json and the merged segments[] map
-        it to that phase; its position comes off the view the loop showed the operator just before
-        handing over (the phase alone does not know where it sits in the plan). `phase` is None for
-        a hand-off the operator asked for at a phase boundary, and that leg is stamped with no phase.
-        `recorded` hears about a leg as soon as it is on disk, before the arm is taken back, because
-        taking it back can fail.
+        ``settings`` is left unset, so the machine's settings are read afresh at every leg: a
+        ``tandem config set teleop.*`` between two hand-offs takes effect at the next one, as it did
+        when the session launched the driver itself.
         """
-        self._set_state(State.HANDING_OFF)
-        self.teleop_pending = False
-        self._event("teleop_handoff_start")
-        try:
-            self._backend.release_hardware()
-        except Exception as exc:
-            self.handoff_error = f"the planner could not release the robot: {exc}"
-            self._log("tandem", self.handoff_error)
-            self._event("teleop_handoff_warning", message=self.handoff_error)
+        return ExecutorContext(
+            profile=self.profile,
+            session_dir=self._files["session_dir"],
+            on_log=self._log,
+            on_emit=self._emit,
+            on_problem=self._handoff_problem,
+        )
 
-        self._event("awaiting_teleop_resume", trajectory_id=self._trajectory_id)
-        # Cleared before the wait, not after it. The state stays TELEOP_HANDOFF for the whole exit
-        # sequence, so a second "return control" -- which the UI keeps offering throughout -- used
-        # to leave this set with nobody waiting, and the NEXT hand-off then ended instantly while
-        # the person was still being told the arm was theirs.
-        self._resume_ready.clear()
-        self._set_state(State.TELEOP_HANDOFF)
-        self._start_teleop(self.human_phase if phase is not None else None)
+    def _handoff_problem(self, message: str) -> None:
+        """A problem with the leg in flight that the person holding the arm has to see now.
 
-        if not self._resume_ready.wait(timeout=HUMAN_PHASE_TIMEOUT) and not self._stopping:
-            # Nobody handed the arm back. Taking it anyway would drive a robot somebody may still
-            # have their hands on, so the attempt ends instead and says why.
-            self._log(
-                "tandem",
-                f"nobody returned control within {HUMAN_PHASE_TIMEOUT / 60:.0f} minutes; ending this "
-                "attempt rather than taking an arm someone may still be holding",
-            )
-            self.handoff_error = "The hand-off timed out. Return control to take the arm back."
-        self._resume_ready.clear()
-
-        teleop, self._teleop = self._teleop, None
-        if teleop is not None:
-            teleop.finish()
-            if not teleop.wait(timeout=TELEOP_EXIT_GRACE):
-                self._log("tandem", "the teleop driver has not exited; killing it so the arm can be taken back")
-                teleop.kill()
-                if not teleop.wait(timeout=10.0):
-                    # It still holds the cameras. Reaching for them now gets a serial-0 device and
-                    # a failure that looks like broken hardware rather than a process that will not
-                    # die, so say what is actually true and end the session.
-                    raise _CustodyLost(
-                        "the teleop driver will not exit, so it still holds the robot and cameras"
-                    )
-            # Counted AFTER the wait, not before it. `finish()` only writes a line to the child's
-            # stdin; the frame count arrives on the tailer thread when the driver emits
-            # `rollout_saved`, which it does only after muxing two or three videos — and `wait()`
-            # is what drains that event. Asking before it is asking too early every time, and the
-            # answer is "nothing was recorded", which strands the demonstration the person just
-            # gave and tells them it never happened.
-            if teleop.n_frames:
-                recorded(teleop.n_frames)
-                self._log("tandem", f"the teleop leg is part of this episode ({teleop.n_frames} frames)")
-
-        try:
-            self._backend.reacquire_hardware()
-        except Exception as exc:
-            # Unrecoverable within the session: every later task would fail on hardware the backend
-            # no longer owns, and the arm would never be parked. Ending here is the honest outcome.
-            raise _CustodyLost(f"the planner could not take the robot back: {exc}") from exc
-        self.handoff_error = None
-        self._event("teleop_handoff_done")
-        self._set_state(State.ROLLING)
-
-    def _start_teleop(self, view: HumanPhase | None = None) -> None:
-        """Launch the teleop driver, now that the planner has actually let go.
-
-        `view` is the human phase this leg records, if it records one. Its position is stamped
-        0-based, the way the planner's legs are, and only for a plan that has a length: a view with
-        no plan behind it would stamp "phase 0 of 0", which reads as knowledge nobody has.
-
-        Failure here is not fatal: the session stays parked at its hand-off wait with
-        `handoff_error` set, which the operator can recover from by driving the arm themselves,
-        rather than the planner grabbing an arm they may already be holding.
+        Shown until the arm is taken back (`_SessionIO.arm_returned`): a driver that would not start
+        leaves the arm released and the session parked at the hand-off, which the operator recovers
+        from by driving the arm themselves -- rather than the planner grabbing an arm they may already
+        be holding.
         """
-        cfg = settings_mod.load()
-        if not cfg.teleop.enabled:
-            self.handoff_error = (
-                "Teleop is not configured, so nothing is driving the arm. Drive it by hand if you "
-                "like, then return control."
-            )
-            self._log("tandem", self.handoff_error)
-            return
-        try:
-            stamp = {}
-            if view is not None and view.total > 0:
-                stamp = {
-                    "phase_index": view.index,
-                    "n_phases": view.total,
-                    "phase_description": view.description,
-                }
-            self._teleop = TeleopChild(self, cfg, **stamp).start()
-            self._log("tandem", "teleop driver started; the arm is yours")
-        except Exception as exc:
-            self.handoff_error = f"Could not start the teleop driver: {exc}"
-            self._log("tandem", self.handoff_error)
+        self.handoff_error = message
 
     # ---- waiting for a person ----------------------------------------------
 
@@ -757,10 +679,24 @@ class Session:
         This is the "I did it by hand" answer. Taking the arm through the teleop rig instead is
         `request_teleop()`, which is honoured immediately at this prompt rather than waiting for a
         plan-step boundary that will never come.
+
+        Refused while recording, unless ``hitl.allow_unrecorded_human_phase`` is set: a step done by
+        hand has no leg, and the episode would be missing exactly the demonstration the trial exists
+        to capture while looking complete. The phase loop refuses it too; refusing it here as well
+        tells the person why at the moment they ask, rather than as a prompt that silently comes back.
         """
-        self._require(State.AWAITING_HUMAN_PHASE, "complete a human phase")
-        self._human_answer = "done"
-        self._human_ready.set()
+        with self._lock:
+            self._require(State.AWAITING_HUMAN_PHASE, "complete a human phase")
+            phase = self.human_phase
+            if phase is not None and not phase.by_hand:
+                raise SessionConflict(
+                    "This step is being recorded, so it has to be done through "
+                    f"{_executor_title(phase.executor)} for the episode to have it.",
+                    hint="Take the arm and do it there, or give up on the task. To accept steps done by "
+                    "hand while recording, set hitl.allow_unrecorded_human_phase: true.",
+                )
+            self._human_answer = "done"
+            self._human_ready.set()
 
     def abort_human_phase(self) -> None:
         """Give up on this phase, abandoning the task attempt.
@@ -833,6 +769,14 @@ class Session:
 
     def force_stop(self) -> None:
         """Hard stop, for when the session is wedged. Not the same as preempt."""
+        # Whatever is driving the arm in a hand-off -- the teleop driver, or a policy -- is ended at
+        # once rather than asked to finish, and the leg comes back as aborted. Killed FIRST: every flag
+        # below also ends the leg, but as a graceful hand-back, and an executor that sees one of them
+        # before the kill may already have returned "done" -- a forced stop recorded as a step carried
+        # out, and checked as one.
+        loop = self._loop
+        if loop is not None:
+            loop.kill()
         with self._lock:
             self._stopping = True
             self.end_reason = "force-stop"
@@ -841,9 +785,6 @@ class Session:
         self._preempt.set()
         for flag in (self._task_ready, self._label_ready, self._human_ready, self._resume_ready):
             flag.set()
-        teleop = self._teleop
-        if teleop is not None:
-            teleop.kill()
         backend = self._backend
         if backend is not None:
             threading.Thread(target=backend.close, name=f"kill:{self.id}", daemon=True).start()
@@ -951,7 +892,10 @@ class Session:
                 "current": self.current.to_dict() if self.current else None,
                 "rollouts": [r.to_dict() for r in self.rollouts],
                 "teleop_pending": self.teleop_pending,
-                "teleop_available": settings_mod.load().teleop.enabled,
+                # Whether a person can take the arm between phases: the teleop executor is ready on
+                # this machine. `human_executor` is the same for whoever carries out a human phase.
+                "teleop_available": _executor_status(TELEOP)["ready"],
+                "human_executor": _executor_status(self.profile.hitl.human_executor),
                 "handoff_error": self.handoff_error,
                 "can_preempt": self.state not in TERMINAL and self.state not in NO_PREEMPT,
                 "events_file": str(self._files.get("events_file", "")),
@@ -1027,6 +971,76 @@ class _SessionIO:
     def rollout_saved(self, n_frames: int) -> None:
         if self._session.current is not None:
             self._session.current.n_frames = n_frames
+
+    def handing_off(self) -> None:
+        session = self._session
+        session._set_state(State.HANDING_OFF)
+        # Honoured now, whichever way it was asked for: the switch between phases, or the answer at
+        # a human phase's prompt.
+        session.teleop_pending = False
+        session._event("teleop_handoff_start")
+
+    def arm_lent(self) -> Callable[[], bool]:
+        session = self._session
+        session._event("awaiting_teleop_resume", trajectory_id=session._trajectory_id)
+        # Cleared before the leg, not after it. The state stays TELEOP_HANDOFF for the whole exit
+        # sequence, so a second "return control" -- which the UI keeps offering throughout -- used
+        # to leave this set with nobody waiting, and the NEXT hand-off then ended instantly while
+        # the person was still being told the arm was theirs.
+        session._resume_ready.clear()
+        session._set_state(State.TELEOP_HANDOFF)
+        deadline = time.monotonic() + HUMAN_PHASE_TIMEOUT
+        timed_out: list[bool] = []
+
+        def should_stop() -> bool:
+            if session._resume_ready.is_set() or session._stopping:
+                return True
+            if time.monotonic() < deadline:
+                return False
+            if not timed_out:
+                timed_out.append(True)
+                session._log(
+                    "tandem",
+                    f"nobody returned control within {HUMAN_PHASE_TIMEOUT / 60:.0f} minutes; ending the "
+                    "leg and taking the arm back",
+                )
+            return True
+
+        return should_stop
+
+    def arm_returned(self) -> None:
+        session = self._session
+        # A "return control" that arrived after the leg had already ended must not end the next one.
+        session._resume_ready.clear()
+        session.handoff_error = None
+        session._event("teleop_handoff_done")
+        session._set_state(State.ROLLING)
+
+
+def _executor_status(name: str) -> dict:
+    """Whether the human executor ``name`` can run on this machine, for the prompts that offer it.
+
+    Never raises. The summary is read on every change of state, and an executor that cannot even be
+    described -- a plugin that will not import -- is simply one the operator cannot be offered, which
+    is what ``ready: False`` with the ``error`` says.
+    """
+    try:
+        info = executors.info(name)
+    except Exception as exc:
+        message = exc.message if isinstance(exc, TandemError) else f"{type(exc).__name__}: {exc}"
+        return {"name": name, "display_name": name, "ready": False, "unmet": [], "error": message}
+    return {
+        "name": name,
+        "display_name": info.display_name,
+        "ready": info.ready,
+        "unmet": list(info.unmet),
+        "error": None,
+    }
+
+
+def _executor_title(name: str) -> str:
+    """How a sentence addressed to the operator names the executor that does a human step."""
+    return "the teleop rig" if name == TELEOP else f"the {name!r} executor"
 
 
 class SessionManager:
