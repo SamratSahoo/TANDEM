@@ -425,19 +425,32 @@ class PlannerSpec(BaseModel):
     is, is a setting. `backend` names one of ``tandem.planners.registry.available()``; an unknown
     name is an error rather than a fallback, because a session that silently planned with a
     different planner from the one asked for produces a dataset nobody can interpret afterwards.
+
+    `options` is the named planner's own settings block, passed to its factory verbatim. Its keys are
+    the planner's to define and to check, so they are not validated here -- only when the planner is
+    built for a session, by the planner, which refuses a key it does not read.
     """
 
     model_config = {"extra": "forbid"}
 
     backend: str = "tiptop"
+    options: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("backend")
     @classmethod
     def _known_backend(cls, v: str) -> str:
+        import difflib
+
         from tandem.planners import registry
 
-        if v not in registry.available():
-            raise ValueError(f"must be one of {', '.join(registry.available())}")
+        # By name only: a planner installed as a package is known from its entry point without being
+        # imported. One that is installed but broken therefore still validates, so the profile can be
+        # loaded and edited -- and the session that tries to build it says what is wrong with it.
+        known = registry.available()
+        if v not in known:
+            close = difflib.get_close_matches(v, known, n=1, cutoff=0.6)
+            suffix = f" (did you mean {close[0]!r}?)" if close else ""
+            raise ValueError(f"must be one of {', '.join(known)}{suffix}")
         return v
 
 

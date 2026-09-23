@@ -162,24 +162,13 @@ def test_the_planner_is_always_closed_even_when_the_session_fails(profile, tmp_p
     not, so releasing it belongs on every exit path, including the ones nobody planned for."""
     from fake_backend import FakeBackend
 
-    from tandem.planners import registry
-
     monkeypatch.setattr(secrets, "gemini_api_key", lambda: "test-key")
-    built = []
 
     class Exploding(FakeBackend):
         def perceive(self, **kwargs):
             raise RuntimeError("the camera fell off")
 
-    def backend_class(_name):
-        def build(runtime, **kwargs):
-            instance = Exploding(runtime, **kwargs)
-            built.append(instance)
-            return instance
-
-        return build
-
-    monkeypatch.setattr(registry, "backend_class", backend_class)
+    built = use_fake_backend(monkeypatch, backend_type=Exploding)
     session = Session(profile, FakeRuntime(tmp_path / "runtime"), task="x")
     session.start()
     assert wait_for(lambda: session.state is State.AWAITING_TASK)
