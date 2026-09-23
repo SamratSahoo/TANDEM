@@ -8,10 +8,13 @@ On-disk layout (unchanged from the source system, so data moves between the two)
 
     <profile>/trajectories/{eval,success,failure}/<timestamp>/
         external_cam.mp4  external_cam_2.mp4  hand_cam.mp4
-        tiptop_plan.json          serialized TAMP plan
         robot_state.npz           per-frame measured + commanded arrays
         _meta.json                instruction, fps, n_frames, timestamps, lineage
+        tiptop_plan.json          the TipTop backend's serialized plan (backend-specific, optional)
         segments/<NN>_<source>_<ts>/   raw legs of a merged hand-off trajectory
+
+The first three lines are the RECORDING CONTRACT every leg must meet, whichever backend or human
+executor wrote it (see `is_complete`). Anything else in the directory is that recorder's own.
 """
 
 from __future__ import annotations
@@ -157,6 +160,34 @@ def _dir_size(path: Path) -> int:
     return total
 
 
+def is_complete(traj_dir: Path, meta: dict | None = None) -> bool:
+    """Whether a leg or episode holds what the recording contract promises.
+
+    That is ``_meta.json``, ``robot_state.npz``, and its camera clips: every clip ``_meta.json``
+    names (``cameras`` maps a dataset key to a file in the directory), or, when it names none, at
+    least one of CAMERA_FILES. It deliberately does not ask for the backend's plan — a teleop leg
+    has none, and neither does a leg from a planner that is not TipTop — which is what the old
+    ``tiptop_plan.json`` rule got wrong. Nor does it ask for the phase or lineage keys: a plain
+    rollout is complete without them.
+
+    Old data is still accepted: an episode written before ``_meta.json`` existed passes on its
+    ``tiptop_plan.json`` instead, which is what made it complete under the rule this replaces.
+    """
+    if meta is None:
+        meta = read_meta(traj_dir)
+    if not (traj_dir / STATE_FILE).is_file():
+        return False
+    if not meta and not (traj_dir / PLAN_FILE).is_file():
+        return False
+
+    named = meta.get("cameras") if isinstance(meta.get("cameras"), dict) else {}
+    # A bare file name only: the map comes off disk, and `traj_dir / name` must not wander.
+    clips = [name for name in named.values() if isinstance(name, str) and name and Path(name).name == name]
+    if clips:
+        return all((traj_dir / name).is_file() for name in clips)
+    return any((traj_dir / name).is_file() for name in CAMERA_FILES)
+
+
 def read(traj_dir: Path, *, profile_name: str = "", status: str = "", with_size: bool = False) -> Trajectory:
     meta = read_meta(traj_dir)
     n_frames, fps = _frames_and_fps(traj_dir, meta)
@@ -182,8 +213,7 @@ def read(traj_dir: Path, *, profile_name: str = "", status: str = "", with_size:
         cameras=cameras,
         has_state=has_state,
         has_plan=has_plan,
-        # tamp rollouts need both; a teleop leg has no plan of its own.
-        complete=has_state and (has_plan or meta.get("segment_source") == "teleop"),
+        complete=is_complete(traj_dir, meta),
         trajectory_id=meta.get("trajectory_id"),
         segment_source=meta.get("segment_source"),
         segments=segments if isinstance(segments, list) else None,
