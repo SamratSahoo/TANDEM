@@ -224,7 +224,9 @@ def test_a_step_that_does_not_verify_is_retried_before_it_is_given_up_on(phase_s
 
 
 def test_a_step_that_never_verifies_ends_the_attempt(phase_session):
-    session, _, _ = phase_session(DOES_NOT_HOLD, verify_retries=0)
+    # `label` keeps the operator in the loop for a trial the check stopped; the default, `exclude`,
+    # files it without asking (tests/test_trial_outcomes.py).
+    session, _, _ = phase_session(DOES_NOT_HOLD, verify_retries=0, on_verification_failure="label")
     session.next_task()
     assert wait_for(lambda: session.state is State.AWAITING_HUMAN_PHASE)
     session.complete_human_phase()

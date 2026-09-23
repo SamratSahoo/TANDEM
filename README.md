@@ -86,7 +86,10 @@ needs the human last, "open the box, then put the toy in" needs the robot last, 
 need an intermediate state no final-state goal can express at all.
 
 If the check says it did not happen you are told what is still missing and given another go,
-rather than losing the demonstration to one bad classifier call. Every rollout drops a
+rather than losing the demonstration to one bad classifier call. If it still says so once the
+retries are spent, the trial is **excluded**, as the paper does: it is filed under `failure/`
+with `excluded: true`, its failing verdicts and raw legs kept, and you are not asked for a label
+(`hitl.on_verification_failure: label` asks you instead). Every rollout drops a
 `hitl.json` — the phases, the invented predicates, which clauses of the instruction each phase
 covered, and every verdict — plus a `vlm/` folder holding each image sent to the model and a
 rendered PNG of what it said, rejected attempts included. When a run goes wrong the question is
@@ -298,6 +301,7 @@ hitl:
   enabled: true
   verify_retries: 1        # extra goes at a step the check says did not happen
   verify_enforced: true    # false records the verdict and carries on
+  on_verification_failure: exclude   # or `label`: ask the operator about a trial the check stopped
 ```
 
 ```console

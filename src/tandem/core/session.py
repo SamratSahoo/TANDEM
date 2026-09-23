@@ -24,7 +24,8 @@ Threads and a callback bus, no asyncio out here, so the identical object drives 
 machine exists once.
 
     spawning → warming → rolling → awaiting_label → labeling → awaiting_task → rolling …
-                            │
+                            │  │
+                            │  └── excluded: filed with no label ──→ awaiting_task
                             ├── a phase only a person can do
                             ↓
                      awaiting_human_phase → handing_off → teleop_handoff ──"resume"──→ rolling
@@ -63,7 +64,7 @@ from tandem.core.errors import SessionConflict, TandemError
 
 # MAX_REPLANS is the phase loop's, and is re-exported for the callers that import it from here.
 from tandem.core.phase_loop import MAX_REPLANS as MAX_REPLANS
-from tandem.core.phase_loop import HumanPhase, PhaseLoop
+from tandem.core.phase_loop import HumanPhase, PhaseLoop, TrialOutcome
 from tandem.core.profiles import Profile
 from tandem.core.runtime import Runtime
 from tandem.teleop.child import TeleopChild
@@ -186,6 +187,13 @@ class Session:
         self.current: RolloutRecord | None = None
         self.labeled_count = 0
         self.success_count = 0
+        # Trials the phase loop excluded (a human phase that never verified): filed under failure/
+        # with their legs, never labeled, and never counted towards `max_episodes`, since they are
+        # not part of the dataset the target counts.
+        self.excluded_count = 0
+        # How the last trial ended, for the operator: set as soon as the attempt ends (so the label
+        # prompt can say why the loop stopped it) and settled by the label. None while one runs.
+        self.last_trial: dict | None = None
         # A hand-off is armed but not yet honoured; the driver takes it at its next plan-step
         # boundary, so the arm parks at a sane place rather than mid-motion.
         self.teleop_pending = False
@@ -219,6 +227,9 @@ class Session:
         # plan, kept after the attempt drops it, so the audit record can still be written for a task
         # that was abandoned part-way -- which is exactly the episode whose provenance you want.
         self._last_plan = None
+        # How the phase loop said the last attempt ended (`phase_loop.TrialOutcome`), read after it
+        # returns or raises. Its `outcome` decides whether the operator is asked for a label at all.
+        self._last_outcome: TrialOutcome | None = None
         self._trajectory_id: str = ""
         self._vlm_dir: Path | None = None
 
@@ -383,6 +394,8 @@ class Session:
         self._trajectory_id = uuid.uuid4().hex[:16]
         self._legs_recorded = 0
         self._last_plan = None
+        self._last_outcome = None
+        self.last_trial = None
         # Every image sent to a model this attempt, and what it answered, gathered in one place and
         # filed with the finished episode. Per ATTEMPT rather than per leg: the proposal happens on
         # the first leg and the verifications on later ones, and split across leg directories --
@@ -403,17 +416,25 @@ class Session:
         finally:
             # Read off the loop's outcome, which it keeps current as it goes, so it is right on
             # every exit path, including the ones that unwind out of the loop as an exception.
-            self._legs_recorded = loop.outcome.legs_recorded
-            self._last_plan = loop.outcome.plan
-            # Every exit path lands here -- finished, abandoned, rebound onto a scene that no
-            # longer matches, or preempted. The rule is the same for all of them: frames on disk
-            # need a verdict, because the label is what ends a trajectory and merges its legs.
+            outcome = loop.outcome
+            self._legs_recorded = outcome.legs_recorded
+            self._last_plan = outcome.plan
+            self._last_outcome = outcome
+            self.last_trial = self._trial_summary(None)
+            # Every exit path lands here -- finished, abandoned, excluded, rebound onto a scene that
+            # no longer matches, or preempted. The rule is the same for all of them: frames on disk
+            # have to be filed, because filing is what ends a trajectory and merges its legs.
             # Anything else leaves legs nothing will ever join, filing as episodes of their own.
-            if self._legs_recorded:
+            # Filing normally waits for the operator's label. An EXCLUDED trial does not: the method
+            # has already decided it is not part of the dataset, and a label prompt the operator
+            # could answer "success" would put it straight back in.
+            if self._legs_recorded and outcome.outcome == "excluded":
+                self._file_excluded(outcome)
+            elif self._legs_recorded:
                 self._await_label()
             else:
                 self._log("tandem", "nothing was recorded, so there is nothing to label")
-                self._event("rollout_discarded")
+                self._event("rollout_discarded", **self.last_trial)
 
     def _phase_loop(self) -> PhaseLoop:
         """The trial algorithm, wired to this session's planner, settings and operator."""
@@ -589,18 +610,67 @@ class Session:
         self.current = None
         self.labeled_count += 1
         self.success_count += int(success)
-        self._event("labeled", dir=record.dir, success=success, trajectory_id=self._trajectory_id)
+        # The label settles the trial's outcome, unless the loop had already decided it (an aborted
+        # trial stays aborted); the stage the loop stopped at, if it stopped one, goes with it.
+        self.last_trial = self._trial_summary(record.status)
+        self._event("labeled", dir=record.dir, success=success, **self.last_trial)
+        self._file_episode(record.status)
 
+    def _file_excluded(self, outcome: TrialOutcome) -> None:
+        """File a trial the phase loop excluded: under failure/, marked excluded, with no label.
+
+        The paper's rule for a human phase that never verified (``on_verification_failure:
+        exclude``). The trial is not part of the dataset, but it is not thrown away either: its legs
+        are merged exactly as a labeled trial's are, and ``hitl.json`` beside them says it was
+        excluded, at which stage, and carries the failing verdicts -- the raw material for working
+        out whether the person or the classifier got it wrong.
+        """
+        directory = str(self.current.dir) if self.current else ""
+        record = self.current or RolloutRecord(dir=directory, started_at=time.time())
+        # Not labeled, so neither success nor failure as far as the operator's tally goes.
+        record.status = "excluded"
+        record.success = None
+        self.rollouts.append(record)
+        self.current = None
+        self.excluded_count += 1
+        self.last_trial = self._trial_summary("failure")
+        self._log(
+            "tandem",
+            f"this trial is excluded from the dataset ({outcome.failure_stage}): {outcome.reason}. It is "
+            "not labeled; its legs are kept under failure/ with excluded: true",
+        )
+        self._event("trial_excluded", dir=record.dir, **self.last_trial)
+        self._file_episode("failure")
+
+    def _trial_summary(self, status: str | None) -> dict:
+        """How the attempt just walked ended, as the events, the summary and ``hitl.json`` say it.
+
+        ``status`` is where the episode is filed (``success``/``failure``), or None before it is.
+        The outcome is resolved the one way ``hitl.json`` resolves it (``episodes.trial_outcome``), so
+        the events file and the record on disk can never disagree about a trial.
+        """
+        outcome = self._last_outcome
+        loop_outcome = outcome.outcome if outcome is not None else None
+        return {
+            "trajectory_id": self._trajectory_id,
+            **episodes.trial_outcome(loop_outcome, status),
+            "failure_stage": outcome.failure_stage if outcome is not None else None,
+            "reason": outcome.reason if outcome is not None else None,
+        }
+
+    def _file_episode(self, status: str) -> None:
+        """Move the attempt's legs under ``status``, merge them, and write the record beside them."""
         # Fire and forget: a merge of several GB of video must not hold up the next task.
         trajectory_id = self._trajectory_id
         # The LAST plan, not the one the loop was still walking: an attempt that was abandoned drops
         # its plan, and those are precisely the episodes whose provenance -- which phases ran, what
         # could not be verified, which clauses the run knowingly skipped -- is worth having.
         plan = self._last_plan
+        outcome = self._last_outcome
         if trajectory_id:
             threading.Thread(
                 target=episodes.merge_trajectory,
-                args=(self.profile, trajectory_id, record.status, plan),
+                args=(self.profile, trajectory_id, status, plan),
                 kwargs={
                     "runtime_dir": self.runtime.root,
                     # This attempt's audit trail, taken now rather than when the merge finishes. A
@@ -609,6 +679,7 @@ class Session:
                     "vlm_dir": self._vlm_dir,
                     "log": functools.partial(self._log, "tandem"),
                     "emit": self._emit,
+                    "reason": outcome.reason if outcome is not None else None,
                 },
                 name=f"merge:{self.id}",
                 daemon=True,
@@ -877,6 +948,8 @@ class Session:
                 "end_reason": self.end_reason,
                 "labeled": self.labeled_count,
                 "success": self.success_count,
+                "excluded": self.excluded_count,
+                "last_trial": self.last_trial,
                 "target": self.max_episodes or self.profile.task.target_episodes,
                 "current": self.current.to_dict() if self.current else None,
                 "rollouts": [r.to_dict() for r in self.rollouts],

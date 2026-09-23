@@ -147,16 +147,43 @@ def _run_dashboard(session, profile) -> None:
             # not the only cue that it is waiting on a human.
             if session.state is not last_state:
                 last_state = session.state
+                trial = session.last_trial or {}
                 if session.state is State.AWAITING_LABEL:
-                    note("[accent]Did that work?  s = success   f = failure[/accent]")
+                    note(_stopped_note(trial) + "[accent]Did that work?  s = success   f = failure[/accent]")
                 elif session.state is State.AWAITING_TASK:
-                    note("[accent]Enter repeats the task   n = new task   q = finish[/accent]")
+                    keys_hint = "[accent]Enter repeats the task   n = new task   q = finish[/accent]"
+                    note(_excluded_note(trial) + keys_hint)
                 elif session.state is State.TELEOP_HANDOFF:
                     note("[violet]The arm is yours. Press r to return control to TAMP.[/violet]")
                 elif session.state is State.AWAITING_HUMAN_PHASE:
                     note("[violet]The plan needs you for this step — see below.[/violet]")
 
         live.update(_render(session, profile, logs, status_note))
+
+
+def _excluded_note(trial: dict) -> str:
+    """Why the session came back to the task prompt without asking for a label, if that is why.
+
+    An excluded trial skips the label prompt entirely, so without this the operator sees the
+    session return to the task prompt and has no idea the demonstration they just gave is not in
+    the dataset.
+    """
+    if not trial.get("excluded"):
+        return ""
+    reason = _escape(str(trial.get("reason") or "a human phase did not verify"))
+    return f"[warn]Excluded, not labeled: {reason}[/warn]\n"
+
+
+def _stopped_note(trial: dict) -> str:
+    """What stopped the trial early, for the label prompt after it.
+
+    A planner that failed after a leg was recorded, or a check whose verdict the label is left to
+    settle (``on_verification_failure: label``): the operator should know which before answering.
+    """
+    if not trial.get("failure_stage"):
+        return ""
+    reason = _escape(str(trial.get("reason") or trial["failure_stage"]))
+    return f"[warn]Stopped at {trial['failure_stage']}: {reason}[/warn]\n"
 
 
 def _handle_key(key: str, session, keys: KeyReader, note, live) -> bool:
@@ -231,6 +258,10 @@ def _render(session, profile, logs: deque[str], status_note: dict) -> Panel:
     counts.append(f"{summary['labeled'] - summary['success']} failure", style="err")
     counts.append("  ·  ", style="faint")
     counts.append(f"{summary['labeled']}/{summary['target']} labeled", style="faint")
+    if summary.get("excluded"):
+        # Not labeled and not in the dataset, so kept out of both counts above.
+        counts.append("  ·  ", style="faint")
+        counts.append(f"{summary['excluded']} excluded", style="warn")
     counts.append(f"   elapsed {_hms(elapsed)}", style="faint")
     header.add_row("", counts)
 
@@ -407,7 +438,11 @@ def _final_summary(session, profile, log_path) -> None:
     theme.rule("session finished")
     theme.kv(
         [
-            ("collected", f"{summary['success']} success, {summary['labeled'] - summary['success']} failure"),
+            (
+                "collected",
+                f"{summary['success']} success, {summary['labeled'] - summary['success']} failure"
+                + (f", {summary['excluded']} excluded" if summary.get("excluded") else ""),
+            ),
             ("duration", _hms((summary.get("ended_at") or time.time()) - summary["started_at"])),
             ("trajectories", profile.trajectories_dir()),
             ("session log", log_path),
