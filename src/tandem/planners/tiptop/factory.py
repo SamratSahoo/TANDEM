@@ -6,8 +6,9 @@ cost overrides rendered from the profile, and the checks that catch a broken ass
 twenty-second warm-up does. The session only hands over a ``BackendContext`` and gets a backend back.
 
 This module is imported to list planners and to read TiPToP's capabilities, both of which happen on a
-laptop. So it imports the declaration and the protocol types and nothing else at module level; the
-runtime, the renderer and the backend itself are imported inside the calls that need them.
+laptop. So it imports the declarations -- capabilities, runtime recipe -- and the protocol types and
+nothing else at module level; the renderer and the backend itself are imported inside the calls that
+need them.
 """
 
 from __future__ import annotations
@@ -20,20 +21,16 @@ from tandem.planners.base import (
     BackendContext,
     Capabilities,
     PlannerInfo,
-    RuntimeStatus,
     SourcePin,
 )
+from tandem.planners.runtime import RecipeRuntime
 from tandem.planners.tiptop.capabilities import CAPABILITIES
+from tandem.planners.tiptop.recipe import RECIPE
 
-# What an install builds the runtime from. Today that is the tree vendored into the wheel, and these
-# are the commits _vendor/VENDOR.toml records for it -- a test holds the two together, because a
-# catalog that names a commit the install does not deliver is a false statement about every dataset
-# collected with it. When the runtime is fetched instead of copied, these become the pins it fetches.
-SOURCES: tuple[SourcePin, ...] = (
-    SourcePin("tiptop", "https://github.com/SamratSahoo/tiptop.git", "4db8f92671b431de4e5a456523dc84b5246401ee"),
-    SourcePin("cuTAMP", "https://github.com/SamratSahoo/cuTAMP.git", "7b0aeaea452f13a4ee73d95f2aacbb3af720ad0f"),
-    SourcePin("curobo", "https://github.com/SamratSahoo/curobo.git", "3a90ff49eee169d9636b2a679d98457a2592fb52"),
-)
+# What an install builds the runtime from: the commits the recipe fetches. Read from the recipe rather
+# than restated, because a catalog that names a commit the install does not deliver is a false
+# statement about every dataset collected with it.
+SOURCES: tuple[SourcePin, ...] = RECIPE.pins
 
 INFO = PlannerInfo(
     name="tiptop",
@@ -64,9 +61,7 @@ class TiptopFactory:
         return CAPABILITIES
 
     def runtime(self, settings: Any = None) -> TiptopRuntime:
-        from tandem.core.runtime import Runtime
-
-        return TiptopRuntime(Runtime(_settings(settings).resolved_runtime_dir()))
+        return TiptopRuntime(_settings(settings).resolved_runtime_dir())
 
     def create(self, ctx: BackendContext):
         """A TiptopBackend for this session, with its config rendered and its assets checked.
@@ -130,96 +125,16 @@ class TiptopFactory:
         )
 
 
-class TiptopRuntime:
-    """TiPToP's runtime as a catalog sees it: status, install, uninstall.
+class TiptopRuntime(RecipeRuntime):
+    """TiPToP's runtime: the generic recipe runtime, bound to TiPToP's recipe.
 
-    A thin adapter over ``tandem.core.runtime.Runtime``, which still does the work -- copy the vendored
-    sources, solve the pixi environment, compile cuRobo's kernels. Kept thin on purpose: fetching
-    pinned commits instead of copying a vendored tree replaces what is behind these three methods,
-    and nothing that calls them should have to change when it does.
+    Its root is the ``runtime_dir`` setting rather than a directory of its own under the runtimes
+    root, because TiPToP's runtime lived there before tandem drove more than one planner, and a built
+    pixi environment cannot be moved: its own absolute path is baked into it.
     """
 
-    def __init__(self, runtime) -> None:
-        self._runtime = runtime
-
-    @property
-    def root(self) -> Path:
-        return self._runtime.root
-
-    def status(self) -> RuntimeStatus:
-        st = self._runtime.status()
-        detail = []
-        if st.exists:
-            detail.append("sources present" if st.sources_present else "sources missing")
-            detail.append("pixi env built" if st.env_built else "pixi env not built")
-            detail.append("cuRobo kernels compiled" if st.kernels_built else "cuRobo kernels not compiled")
-            if st.built_at:
-                detail.append(f"built {st.built_at}")
-        else:
-            detail.append("not created")
-        return RuntimeStatus(
-            installed=bool(st.ready),
-            path=str(self._runtime.root),
-            pins=_pins(st.vendor),
-            detail=" · ".join(detail),
-            problems=tuple(st.problems or ()),
-        )
-
-    def install(self, *, on_progress=None, sources_dir: Path | None = None, force: bool = False) -> None:
-        """Copy the sources in, solve the environment, compile the kernels. 5-20 minutes the first time.
-
-        Every step skips what is already done, so an interrupted install resumes. ``sources_dir`` is
-        a directory holding ``tiptop/``, ``cuTAMP/`` and ``curobo/`` -- the vendored tree by default.
-        """
-        from tandem.core import paths
-
-        say = on_progress or (lambda _line: None)
-        source_root = Path(sources_dir) if sources_dir is not None else paths.vendor_dir()
-        say(f"sources: {source_root}")
-        self._runtime.materialize(source_root, force=force, log=say)
-        say("pixi env: solving")
-        self._runtime.build_env(log=say)
-        say("planners: compiling cuRobo's CUDA kernels and installing cuTAMP")
-        self._runtime.build_planners(log=say)
-        st = self._runtime.status()
-        if not st.ready:
-            raise TandemError(
-                "The build finished but the runtime still looks incomplete: " + "; ".join(st.problems or []),
-                hint="Run the install again; every finished step is skipped.",
-            )
-
-    def uninstall(self) -> None:
-        import shutil
-
-        root = self._runtime.root
-        if not root.exists():
-            return
-        if not _looks_like_a_runtime(root):
-            # The runtime directory is a setting. Pointed at the wrong place by mistake, an
-            # unconditional rmtree would delete whatever is there.
-            raise TandemError(
-                f"{root} does not look like a TiPToP runtime, so it was not deleted.",
-                hint="Check runtime_dir in `tandem config`, and delete it by hand if it really is one.",
-            )
-        shutil.rmtree(root)
-
-
-def _looks_like_a_runtime(root: Path) -> bool:
-    from tandem.core import runtime as runtime_mod
-
-    if not any(root.iterdir()):
-        return True
-    markers = (runtime_mod.STAMP_FILE, runtime_mod.TIPTOP, runtime_mod.CUTAMP, runtime_mod.CUROBO)
-    return any((root / marker).exists() for marker in markers)
-
-
-def _pins(vendor: dict | None) -> tuple[SourcePin, ...]:
-    """The sources a runtime's stamp says it was built from, in the order it records them."""
-    pins = []
-    for name, meta in (vendor or {}).items():
-        if isinstance(meta, dict) and meta.get("commit"):
-            pins.append(SourcePin(str(name), str(meta.get("url") or ""), str(meta["commit"])))
-    return tuple(pins)
+    def __init__(self, root: Path) -> None:
+        super().__init__(RECIPE, root)
 
 
 def _settings(settings: Any):

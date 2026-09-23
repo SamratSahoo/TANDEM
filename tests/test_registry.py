@@ -437,18 +437,11 @@ def test_tiptop_describes_itself_for_a_catalog():
 
 
 def test_tiptops_catalog_pins_are_the_commits_its_install_delivers():
-    """Today an install copies the vendored tree, so that is what the catalog must say it installs."""
-    manifest_path = REPO / "src" / "tandem" / "_vendor" / "VENDOR.toml"
-    if not manifest_path.is_file():
-        pytest.skip("no vendored sources in this checkout")
-    import tomlkit
+    """An install fetches what TiPToP's runtime recipe pins, so that is what the catalog must say."""
+    from tandem.planners.tiptop.recipe import RECIPE
 
-    manifest = tomlkit.parse(manifest_path.read_text())
-    shipped = {name: (str(manifest[name]["url"]), str(manifest[name]["commit"])) for name in ("tiptop", "cuTAMP", "curobo")}
-    declared = {pin.name: (pin.url, pin.commit) for pin in SOURCES}
-    assert declared == shipped, (
-        "planners/tiptop/factory.py SOURCES and _vendor/VENDOR.toml disagree; bump them together"
-    )
+    assert SOURCES == RECIPE.pins
+    assert TIPTOP.runtime().recipe is RECIPE
 
 
 def _context(profile, tmp_path, **overrides) -> BackendContext:
@@ -569,40 +562,50 @@ def test_a_half_built_tiptop_runtime_reports_its_pins_and_what_is_missing(tmp_pa
     assert rt.status().mismatched(SOURCES) == ("tiptop",)
 
 
-def test_installing_tiptop_runs_the_existing_build_in_order(tmp_path, monkeypatch):
+def test_installing_tiptop_fetches_then_builds_in_order(tmp_path, monkeypatch):
+    from tandem.planners import runtime as recipe_runtime
+
     calls: list[tuple] = []
     ready = {"value": True}
+    cls = recipe_runtime.RecipeRuntime
 
-    def materialize(self, vendor_root, *, force=False, log=None):
-        calls.append(("materialize", vendor_root, force))
-        log("tiptop: copying")
+    def fetch(self, *, sources_dir=None, force=False, log=None):
+        calls.append(("fetch", sources_dir, force))
+        log("tiptop: fetching")
+        return []
 
-    def build_env(self, *, log=None, extra_env=None):
-        calls.append(("build_env",))
-
-    def build_planners(self, *, log=None, extra_env=None):
-        calls.append(("build_planners",))
-
-    def status(self):
-        return runtime_mod.RuntimeStatus(exists=True, ready=ready["value"], problems=[] if ready["value"] else ["x"])
-
-    monkeypatch.setattr(runtime_mod.Runtime, "materialize", materialize)
-    monkeypatch.setattr(runtime_mod.Runtime, "build_env", build_env)
-    monkeypatch.setattr(runtime_mod.Runtime, "build_planners", build_planners)
-    monkeypatch.setattr(runtime_mod.Runtime, "status", status)
+    monkeypatch.setattr(recipe_runtime, "_find_pixi", lambda: Path("/opt/pixi"))
+    monkeypatch.setattr(cls, "fetch", fetch)
+    monkeypatch.setattr(cls, "place_assets", lambda self, *, log=None: calls.append(("assets",)))
+    monkeypatch.setattr(cls, "build_environment", lambda self, *, log=None, extra_env=None: calls.append(("env",)))
+    monkeypatch.setattr(cls, "run_step", lambda self, step, *, log=None, extra_env=None: calls.append(("step", step.task)))
+    monkeypatch.setattr(cls, "record_built", lambda self: calls.append(("built",)))
+    monkeypatch.setattr(
+        cls,
+        "inspect",
+        lambda self: recipe_runtime.RecipeStatus(
+            root=self.root, exists=True, problems=() if ready["value"] else ("x is missing",)
+        ),
+    )
 
     rt = _tiptop_runtime(tmp_path, monkeypatch)
     lines: list[str] = []
     rt.install(on_progress=lines.append, sources_dir=tmp_path / "bundle", force=True)
-    assert calls == [("materialize", tmp_path / "bundle", True), ("build_env",), ("build_planners",)]
-    assert "tiptop: copying" in lines
+    assert calls == [
+        ("fetch", tmp_path / "bundle", True),
+        ("assets",),
+        ("env",),
+        ("step", "setup-planners"),
+        ("built",),
+    ]
+    assert "tiptop: fetching" in lines
 
     calls.clear()
     rt.install()
-    assert calls[0] == ("materialize", paths.vendor_dir(), False), "the vendored tree by default"
+    assert calls[0] == ("fetch", None, False), "fetched from the pins, unless a sources directory is named"
 
     ready["value"] = False
-    with pytest.raises(TandemError, match="still looks incomplete"):
+    with pytest.raises(TandemError, match="still looks incomplete: x is missing"):
         rt.install()
 
 

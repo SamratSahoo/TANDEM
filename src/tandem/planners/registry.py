@@ -16,7 +16,7 @@ A name comes from one of three places, and the first that has it wins:
 3. the ``tandem.planners`` entry-point group, which is how a planner in its own package plugs in::
 
        [project.entry-points."tandem.planners"]
-       myplanner = "my_package.planner:FACTORY"
+       myplanner = "my_package.planner:MyPlanner"     # a tandem.planners.Planner subclass, or a factory
 
    after which ``planner: {backend: myplanner}`` in a profile is all it takes. Nothing in tandem
    changes, and nothing in tandem has to know the package exists.
@@ -91,11 +91,12 @@ _FACTORY_MEMBERS = ("info", "capabilities", "create", "runtime")
 def register_backend(name: str, factory: BackendFactory | type | str, *, replace: bool = False) -> None:
     """Make a planner available under ``name``.
 
-    ``factory`` is a ``BackendFactory``, a class whose no-argument instance is one, or the
-    ``"module:attribute"`` path of either -- the last is resolved only when the planner is used, so
-    registering costs no import. Registering a name that is already taken, by anything, is an error
-    unless ``replace=True``: two planners answering to one name is exactly the ambiguity this module
-    exists to refuse.
+    ``factory`` is a ``BackendFactory``, a class whose no-argument instance is one, a
+    ``tandem.planners.Planner`` subclass (which is its own factory, and is used as the class, never
+    instantiated here), or the ``"module:attribute"`` path of any of those -- the last is resolved
+    only when the planner is used, so registering costs no import. Registering a name that is already
+    taken, by anything, is an error unless ``replace=True``: two planners answering to one name is
+    exactly the ambiguity this module exists to refuse.
     """
     _check_name(name)
     if isinstance(factory, str):
@@ -311,7 +312,19 @@ def _materialise(name: str, origin: str, source: Any) -> BackendFactory:
             hint=_load_hint(origin, target),
         ) from exc
 
-    if isinstance(loaded, type):
+    if isinstance(loaded, type) and _is_planner_class(loaded):
+        # A Planner subclass is its own factory: info, capabilities(), create() and runtime() are all
+        # class-level. Instantiating it here would build a BACKEND -- once, with no context -- and hand
+        # that out as the factory of every session.
+        if loaded._planner_base:
+            unimplemented = sorted(getattr(loaded, "__abstractmethods__", ()))
+            why = f"it leaves {', '.join(unimplemented)} unimplemented" if unimplemented else "it is declared abstract"
+            raise TandemError(
+                f"The planner backend {name!r} is registered as {target}, which is a base for planners, "
+                f"not a planner: {why}.",
+                hint="Register the concrete Planner subclass that implements perceive, plan and execute.",
+            )
+    elif isinstance(loaded, type):
         try:
             loaded = loaded()
         except Exception as exc:
@@ -339,6 +352,14 @@ def _materialise(name: str, origin: str, source: Any) -> BackendFactory:
 
     _loaded[name] = (identity, loaded)
     return loaded
+
+
+def _is_planner_class(candidate: type) -> bool:
+    # Imported here, not at the top: the SDK imports this module, and listing planners must not pay
+    # for the SDK when no planner written with it is registered.
+    from tandem.planners.sdk import Planner
+
+    return issubclass(candidate, Planner)
 
 
 def _entry_points(*, strict: bool = False) -> list[importlib.metadata.EntryPoint]:

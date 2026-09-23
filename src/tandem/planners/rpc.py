@@ -11,14 +11,18 @@ what did it say", and a line-delimited transcript answers that from a log file. 
 concurrency to reason about because there is none to have -- a planner with one arm answers one
 question at a time.
 
-Three kinds of line come back:
+The child speaks first, once, to say it is up -- ``{"ready": true, "pid": ..., "verbs": [...]}``, or
+``{"ready": false, "error": "..."}`` -- and after that four kinds of line come back:
 
     {"id": 3, "ok": true, "result": {...}}      the answer to request 3
     {"id": 3, "ok": false, "error": "..."}      request 3 failed, with a message for an operator
     {"log": "...", "level": "info"}             out-of-band progress, forwarded to the session log
+    {"event": "name", ...}                      a session event, handed to ``on_event`` (no "id")
 
 An unparseable line is forwarded as a log line rather than dropped: the child's own stdout noise (a
 CUDA warning, a library banner) is worth seeing and is never worth failing on.
+
+The child half of this protocol, for any planner, is ``tandem/planners/sidecar_kit/tandem_sidecar.py``.
 """
 
 from __future__ import annotations
@@ -47,6 +51,10 @@ DEFAULT_TIMEOUT = 900.0
 # Grace for a child asked to quit before it is signalled. It releases cameras on the way out, and the
 # SDK teardown for two of them measures ~14s.
 EXIT_GRACE = 60.0
+# How often a caller waiting on a reply is given the chance to act (``request(poll=...)``): often
+# enough that a stop asked for mid-execution reaches the child within a step, rarely enough to cost
+# nothing.
+POLL_INTERVAL = 0.1
 
 
 class HostedBackendChannel:
@@ -59,11 +67,16 @@ class HostedBackendChannel:
         cwd: Path | None = None,
         env: dict[str, str] | None = None,
         on_log: Callable[[str, str], None] | None = None,
+        on_event: Callable[[dict], None] | None = None,
     ) -> None:
         self._argv = list(argv)
         self._cwd = str(cwd) if cwd else None
         self._env = env
         self._on_log = on_log or (lambda stream, text: _log.info("%s: %s", stream, text))
+        self._on_event = on_event or (lambda event: self._on_log("backend", f"event: {json.dumps(event)}"))
+        # What the child said when it started: at least {"ready": true}, and the verbs it answers
+        # when it says so. Empty until start() returns.
+        self.hello: dict = {}
         self._proc: subprocess.Popen | None = None
         self._pgid: int | None = None
         self._next_id = 0
@@ -118,6 +131,7 @@ class HostedBackendChannel:
         if not hello.get("ready"):
             self.stop()
             raise BackendError(f"the planner backend did not start: {hello.get('error') or hello}")
+        self.hello = hello
         return self
 
     def stop(self) -> None:
@@ -140,13 +154,29 @@ class HostedBackendChannel:
 
     def call(self, verb: str, timeout: float = DEFAULT_TIMEOUT, **args: Any) -> Any:
         """Ask the child for one thing and return its result, or raise ``BackendError``."""
+        return self.request(verb, args, timeout=timeout)
+
+    def request(
+        self,
+        verb: str,
+        args: dict[str, Any] | None = None,
+        *,
+        timeout: float = DEFAULT_TIMEOUT,
+        poll: Callable[[], None] | None = None,
+    ) -> Any:
+        """``call``, with the arguments as a dict and a ``poll`` run every POLL_INTERVAL while waiting.
+
+        ``poll`` is how the parent acts on something while the child is busy -- a stop asked for in
+        the middle of an execution -- without a second request in flight, which the protocol does not
+        have. Its keyword cannot collide with a verb's arguments, which ``call``'s ``**args`` could.
+        """
         with self._lock:
             if not self.alive:
                 raise BackendError("the planner backend is not running")
             self._next_id += 1
             request_id = self._next_id
-            self._send({"id": request_id, "verb": verb, "args": args})
-            reply = self._await_reply(request_id, timeout=timeout)
+            self._send({"id": request_id, "verb": verb, "args": dict(args or {})})
+            reply = self._await_reply(request_id, timeout=timeout, poll=poll)
         if not reply.get("ok"):
             raise BackendError(str(reply.get("error") or f"the backend refused {verb!r}"))
         return reply.get("result")
@@ -184,6 +214,13 @@ class HostedBackendChannel:
                         "backend", str(payload.get("log", line)) if isinstance(payload, dict) else line
                     )
                     continue
+                if "event" in payload and "id" not in payload:
+                    # Out of band, like a log line: never a reply, whatever request is in flight.
+                    try:
+                        self._on_event(payload)
+                    except Exception as exc:  # a broken sink must not stop replies being read
+                        self._on_log("backend", f"could not record an event from the backend: {exc}")
+                    continue
                 self._replies.put(payload)
         except (ValueError, OSError):
             pass
@@ -191,7 +228,14 @@ class HostedBackendChannel:
             # Wake anyone waiting: the child is gone and no reply is ever coming.
             self._replies.put(None)
 
-    def _await_reply(self, request_id: int | None, *, timeout: float, expect_hello: bool = False) -> dict:
+    def _await_reply(
+        self,
+        request_id: int | None,
+        *,
+        timeout: float,
+        expect_hello: bool = False,
+        poll: Callable[[], None] | None = None,
+    ) -> dict:
         """Wait for the reply to ``request_id``, discarding anything stale.
 
         A timeout here means the child is wedged holding a robot, so it says so in those terms rather
@@ -199,6 +243,8 @@ class HostedBackendChannel:
         """
         deadline = time.monotonic() + timeout
         while True:
+            if poll is not None:
+                poll()
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise BackendError(
@@ -206,22 +252,40 @@ class HostedBackendChannel:
                     "holding the robot"
                 )
             try:
-                payload = self._replies.get(timeout=remaining)
+                payload = self._replies.get(timeout=min(remaining, POLL_INTERVAL) if poll else remaining)
             except queue.Empty:
                 continue
             if payload is None:
-                code = self._proc.poll() if self._proc is not None else None
+                code = self._exit_code()
                 raise BackendError(
                     f"the planner backend exited (code {code}) without answering. Its stderr is "
                     "in the session log."
                 )
-            if expect_hello and "ready" in payload:
-                return payload
+            if expect_hello:
+                if "ready" in payload:
+                    return payload
+                # Only the announcement can end the handshake. A stray object with no "id" used to
+                # match the handshake's own id of None and be taken for it.
+                self._on_log(
+                    "backend", f"ignoring a message sent before the backend announced itself: {payload}"
+                )
+                continue
             if payload.get("id") == request_id:
                 return payload
             # A reply to a request nobody is waiting for any more: only possible after a timeout, and
             # keeping it would desynchronise every later call.
             self._on_log("backend", f"discarding a late reply to request {payload.get('id')}")
+
+    def _exit_code(self) -> int | None:
+        """The exit status of a child whose stdout just closed. It has usually not been reaped yet at
+        that instant, and "exited (code None)" tells the person reading it nothing about a crash."""
+        proc = self._proc
+        if proc is None:
+            return None
+        try:
+            return proc.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            return None
 
     def _pump(self, stream, name: str) -> None:
         def run() -> None:

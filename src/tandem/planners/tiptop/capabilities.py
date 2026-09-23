@@ -4,7 +4,7 @@ Every constant here used to be an import from ``cutamp`` inside the phase planne
 what tied the orchestration layer to one planner, and it could not survive tandem's promise that
 ``pip install tandem-tamp`` works on a laptop: the parent process has no cuTAMP on its path and never
 will. So the facts are stated, and ``tests/test_planners.py`` pins them against the real cuTAMP
-whenever the vendored tree happens to be importable -- declared here, verified there.
+whenever its pinned sources are to hand -- declared here, verified there.
 
 The facts themselves come from ``cutamp/tamp_domain.py``: six operators (MoveFree, MoveHolding, Pick,
 Place, Push, PushStick) over nineteen fluents, of which ``create_tamp_environment`` reads exactly two

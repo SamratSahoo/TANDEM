@@ -3,13 +3,19 @@
 Three roots, each overridable by an environment variable so a whole install can be
 relocated (CI, a shared workstation account, a scratch disk):
 
-    config   ~/.config/tandem              $TANDEM_CONFIG_DIR    config.toml, credentials.toml
-    state    ~/.local/state/tandem         $TANDEM_STATE_DIR     logs, session scratch
-    data     ~/tandem-data                 $TANDEM_DATA_ROOT     profiles/ and their trajectories
-    runtime  ~/.local/share/tandem/runtime $TANDEM_RUNTIME_DIR   the pixi env + vendored sources
+    config    ~/.config/tandem                $TANDEM_CONFIG_DIR    config.toml, credentials.toml
+    state     ~/.local/state/tandem           $TANDEM_STATE_DIR     logs, session scratch
+    data      ~/tandem-data                   $TANDEM_DATA_ROOT     profiles/ and their trajectories
+    runtime   ~/.local/share/tandem/runtime   $TANDEM_RUNTIME_DIR   TiPToP's runtime: its sources + pixi env
+    runtimes  ~/.local/share/tandem/runtimes  $TANDEM_RUNTIMES_DIR  every other planner's, one directory each
 
 The data root is also settable in config.toml (the env var wins) because it is the one a
-user actually wants somewhere else -- trajectories are large.
+user actually wants somewhere else -- trajectories are large. So is the runtime, for the same
+reason: it is ~25 GB.
+
+TiPToP's runtime keeps the name and the setting it had before tandem drove more than one planner.
+A built pixi environment has its own absolute path baked into it, so moving an existing one would
+break it; every workstation that has built one keeps it where it is.
 """
 
 from __future__ import annotations
@@ -65,15 +71,20 @@ def default_runtime_dir() -> Path:
     return share_dir() / "runtime"
 
 
-def vendor_dir() -> Path:
-    """The vendored tiptop / cuTAMP / cuRobo sources shipped inside the wheel.
+def runtimes_dir() -> Path:
+    """Where a planner's runtime lives by default: one directory per planner, named for it."""
+    return _env_path("TANDEM_RUNTIMES_DIR") or share_dir() / "runtimes"
 
-    $TANDEM_VENDOR_DIR points this at a live checkout during development.
+
+def planner_sources_override() -> Path | None:
+    """A directory of planner sources to install from instead of fetching them, or None.
+
+    $TANDEM_PLANNER_SOURCES holds one checkout or export per source, named as the planner's recipe
+    names them (``tiptop/``, ``cuTAMP/``, ``curobo/``). It is how an air-gapped workstation installs
+    a planner, from a bundle ``tools/bundle.py`` made elsewhere. $TANDEM_VENDOR_DIR is its old name,
+    from when the sources shipped inside the wheel; a directory set up for that has the same shape.
     """
-    override = _env_path("TANDEM_VENDOR_DIR")
-    if override:
-        return override
-    return Path(__file__).resolve().parent.parent / "_vendor"
+    return _env_path("TANDEM_PLANNER_SOURCES") or _env_path("TANDEM_VENDOR_DIR")
 
 
 def ensure_dir(path: Path, *, mode: int | None = None) -> Path:

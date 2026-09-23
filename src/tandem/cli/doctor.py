@@ -9,7 +9,6 @@ import typer
 
 from tandem.cli import theme
 from tandem.core import probe, profiles, render
-from tandem.core import runtime as runtime_mod
 from tandem.core import settings as settings_mod
 from tandem.core.errors import ProfileError, TandemError
 
@@ -27,27 +26,11 @@ def collect_checks(*, profile_name: str | None = None, probe_hardware: bool = Tr
     cfg = settings_mod.load()
     checks: list[probe.Check] = [probe.check_python(), probe.check_platform()]
 
-    runtime = runtime_mod.Runtime(cfg.resolved_runtime_dir())
-    status = runtime.status()
-    checks.append(probe.check_disk(cfg.resolved_runtime_dir()))
+    runtime_check, runtime_ready, runtime_root = _runtime_check(profile_name, cfg)
+    checks.append(probe.check_disk(runtime_root or cfg.resolved_runtime_dir()))
     checks.append(probe.check_pixi())
     checks.append(probe.check_ffmpeg())
-
-    if status.ready:
-        detail = f"ready at {runtime.root}"
-        if status.built_at:
-            detail += f"  · built {status.built_at}"
-        checks.append(probe.Check("gpu runtime", probe.OK, detail, group="runtime"))
-    else:
-        checks.append(
-            probe.Check(
-                "gpu runtime",
-                probe.WARN,
-                "; ".join(status.problems or ["not built"]),
-                "Run `tandem init` (or `tandem runtime build`). Not needed to visualize trajectories.",
-                group="runtime",
-            )
-        )
+    checks.append(runtime_check)
 
     checks.append(probe.check_nvidia_driver())
     checks.append(probe.check_cuda_runtime())
@@ -56,7 +39,7 @@ def collect_checks(*, profile_name: str | None = None, probe_hardware: bool = Tr
     # A missing key blocks collection, but on a machine that cannot collect anyway it is only
     # worth a note — a visualization-only install should not report a failure it cannot act on.
     gemini = probe.check_gemini_key()
-    if gemini.state == probe.FAIL and not status.ready:
+    if gemini.state == probe.FAIL and not runtime_ready:
         gemini.state = probe.WARN
         gemini.detail = "not set (only needed to collect)"
     checks.append(gemini)
@@ -128,6 +111,45 @@ def collect_checks(*, profile_name: str | None = None, probe_hardware: bool = Tr
         checks.append(probe.check_m2t2(profile.perception.m2t2.url))
 
     return checks
+
+
+def _runtime_check(profile_name: str | None, cfg) -> tuple[probe.Check, bool, Path | None]:
+    """The runtime of the planner the profile uses: (the check, whether it is ready, where it is)."""
+    from tandem.cli.runtime import planner_runtime
+    from tandem.planners.runtime import RecipeRuntime
+
+    try:
+        planner, runtime = planner_runtime(profile_name=profile_name, settings=cfg)
+    except TandemError as exc:
+        # The profile row below says what is wrong with the profile; this one only says that without
+        # it, there is no telling whose runtime to look at.
+        return (
+            probe.Check("gpu runtime", probe.WARN, "unknown: " + exc.message.split("\n")[0], group="runtime"),
+            False,
+            None,
+        )
+    if runtime is None:
+        return probe.Check("gpu runtime", probe.OK, f"{planner} is pure Python", group="runtime"), True, None
+
+    status = runtime.status()
+    root = Path(status.path) if status.path else None
+    if status.installed:
+        detail = f"{planner} ready at {status.path}"
+        built = runtime.inspect().built_at if isinstance(runtime, RecipeRuntime) else None
+        if built:
+            detail += f"  · built {built}"
+        return probe.Check("gpu runtime", probe.OK, detail, group="runtime"), True, root
+    return (
+        probe.Check(
+            "gpu runtime",
+            probe.WARN,
+            "; ".join(status.problems or ["not built"]),
+            "Run `tandem init` (or `tandem runtime build`). Not needed to visualize trajectories.",
+            group="runtime",
+        ),
+        False,
+        root,
+    )
 
 
 def _phase_planning_check(profile) -> probe.Check:

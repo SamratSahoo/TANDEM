@@ -66,7 +66,9 @@ app.add_typer(_profile.app, name="profile", help="Create and manage collection p
 app.add_typer(_config.app, name="config", help="Global settings and credentials.")
 app.add_typer(_traj.app, name="traj", help="Inspect collected trajectories.")
 app.add_typer(_export.app, name="export", help="Export trajectories to other dataset formats.")
-app.add_typer(_runtime.app, name="runtime", help="The GPU runtime that `tandem init` builds.")
+app.add_typer(
+    _runtime.app, name="runtime", help="The runtime of the active profile's planner, which `tandem init` builds."
+)
 
 
 def main() -> None:

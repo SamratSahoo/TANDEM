@@ -15,14 +15,20 @@ motion planner means writing another one of these -- not patching the planner.
       TiptopBackend.plan(goal) ──JSON──►            create_tamp_environment(goal)
                                ◄──JSON──            run_planning(...)
 
+The protocol itself -- the handshake, the request loop, a stdout kept clean of library noise, log
+lines -- is ``tandem_sidecar``'s: the standard-library-only helper every tandem sidecar is written
+with (``tandem/planners/sidecar_kit/tandem_sidecar.py``), which the launch puts on this process's
+path. What is in this file is TiPToP.
+
 It imports nothing from ``tandem``. It is passed to the interpreter by path, so there is no tandem on
 this process's sys.path and adding it would mean installing tandem's dependencies into the planner's
 environment for no reason. The cost is that the verb list is repeated here; ``tests/test_planners.py``
 pins the two copies together so they cannot drift.
 
-Run it by hand to debug a backend:
+Run it by hand to debug a backend, with the kit on the path the way the launch puts it:
 
-    pixi run --manifest-path <runtime>/tiptop/pixi.toml python .../sidecar.py
+    PYTHONPATH=<tandem>/planners/sidecar_kit \\
+        pixi run --manifest-path <runtime>/tiptop/pixi.toml python .../sidecar.py
     {"id": 1, "verb": "capabilities", "args": {}}
 """
 
@@ -31,18 +37,15 @@ from __future__ import annotations
 import json
 import os
 import sys
-import traceback
 import uuid
 
-# ---------------------------------------------------------------------------------------- stdout
-# Everything below imports libraries that print: CUDA banners, warp's version line, SAM-2's
-# progress, a stray print() in a vendored tree. Any one of them on fd 1 would land in the middle of
-# a JSON reply and desynchronise the channel for good. So the real stdout is taken away first and
-# kept private, and fd 1 is pointed at stderr -- where the parent pumps it into the session log,
-# which is where that output was always wanted anyway.
-_PROTOCOL_OUT = os.fdopen(os.dup(1), "w", buffering=1)
-os.dup2(2, 1)
-sys.stdout = sys.stderr
+# Before anything that might print: importing the kit takes the real stdout for the protocol and
+# points fd 1 at stderr. Everything below imports libraries that print -- CUDA banners, warp's
+# version line, SAM-2's progress, a stray print() in a planner's tree -- and any one of them on fd 1
+# would land in the middle of a JSON reply and desynchronise the channel for good. On stderr it is
+# pumped into the session log, which is where that output was always wanted anyway.
+from tandem_sidecar import log as _log
+from tandem_sidecar import serve
 
 # The verbs this sidecar answers. Mirrors tandem.planners.base.VERBS, which it cannot import.
 VERBS = (
@@ -62,15 +65,6 @@ VERBS = (
 # already blocks (~14s for two ZEDs, measured) and the device is claimable about a second later, so
 # this is slack rather than a readiness check.
 CAMERA_RELEASE_SETTLE_S = 2.0
-
-
-def _emit(payload: dict) -> None:
-    _PROTOCOL_OUT.write(json.dumps(payload) + "\n")
-    _PROTOCOL_OUT.flush()
-
-
-def _log(message: str) -> None:
-    _emit({"log": message})
 
 
 # ---------------------------------------------------------------------------------- leg semantics
@@ -1014,41 +1008,10 @@ class Sidecar:
 
 
 def main() -> int:
-    sidecar = Sidecar()
-    _emit({"ready": True, "pid": os.getpid(), "verbs": list(VERBS)})
-
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            request = json.loads(line)
-        except ValueError:
-            _log(f"ignoring an unparseable request: {line[:200]}")
-            continue
-
-        verb = request.get("verb")
-        request_id = request.get("id")
-        args = request.get("args") or {}
-        if verb == "quit":
-            break
-        if verb not in VERBS:
-            _emit({"id": request_id, "ok": False, "error": f"unknown verb {verb!r}"})
-            continue
-        try:
-            result = getattr(sidecar, verb)(**args)
-            _emit({"id": request_id, "ok": True, "result": result})
-        except Exception as exc:
-            # The parent turns this into a BackendError an operator reads, so it says what failed in
-            # words, with the traceback beside it in the session log rather than inside the message.
-            _log(traceback.format_exc())
-            _emit({"id": request_id, "ok": False, "error": f"{verb} failed -- {type(exc).__name__}: {exc}"})
-
-    try:
-        sidecar.close()
-    except Exception:
-        _log(traceback.format_exc())
-    return 0
+    # The kit announces VERBS, answers each request with the Sidecar method of the same name, reports
+    # a failure as "<verb> failed -- <error>" with the traceback beside it in the session log, and
+    # runs Sidecar.close() on the way out -- whether tandem asked it to quit or simply went away.
+    return serve(Sidecar(), verbs=VERBS)
 
 
 if __name__ == "__main__":

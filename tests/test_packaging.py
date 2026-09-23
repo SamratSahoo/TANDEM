@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 from pathlib import Path
-
-import pytest
 
 # Anything here would drag CUDA, a camera SDK or a robot client into the base install and
 # break `pip install tandem-tamp && tandem ui` on a laptop.
@@ -62,6 +61,17 @@ LIGHT_MODULES = [
     "tandem.planners.tiptop",
     "tandem.planners.tiptop.backend",
     "tandem.planners.tiptop.factory",
+    # A planner's runtime recipe is read to list planners, so fetching and building stay behind calls.
+    "tandem.planners.runtime",
+    "tandem.planners.tiptop.recipe",
+    # The planner SDK: a planner class is imported to list planners, and a plugin's test suite imports
+    # the conformance kit on a laptop. (Not tandem_sidecar: it is not a tandem module, and importing
+    # it takes over stdout -- it runs only inside a planner's sidecar.)
+    "tandem.planners.sdk",
+    "tandem.planners.sidecar",
+    "tandem.planners.sidecar_kit",
+    "tandem.planners.testing",
+    "tandem.cli.runtime",
     "tandem.cli.plan",
 ]
 
@@ -118,44 +128,99 @@ def test_the_ui_has_no_external_asset_references():
             assert marker not in text, f"{path.name} references an external asset: {marker}"
 
 
-@pytest.mark.skipif(
-    not (Path(__file__).parent.parent / "src" / "tandem" / "_vendor" / "VENDOR.toml").is_file(),
-    reason="vendored sources are not present in this checkout",
-)
-def test_vendored_sources_are_pinned_and_trimmed():
-    """Provenance is not optional here: two of the three vendored trees are under a licence
-    that governs redistribution, and the wheel has to stay a reasonable size."""
+SRC = Path(__file__).resolve().parents[1] / "src" / "tandem"
+
+
+def _package_data_globs() -> list[str]:
     import tomlkit
 
-    vendor = Path(__file__).parent.parent / "src" / "tandem" / "_vendor"
-    manifest = tomlkit.parse((vendor / "VENDOR.toml").read_text())
-
-    for component in ("tiptop", "cuTAMP", "curobo"):
-        assert component in manifest, f"{component} is missing from VENDOR.toml"
-        assert len(manifest[component]["commit"]) == 40, f"{component} is not pinned to a full commit"
-        assert (vendor / component).is_dir()
-        # Each tree keeps its own licence — the NVIDIA License requires it, and MIT does too.
-        assert (vendor / component / "LICENSE").is_file(), f"{component} lost its LICENSE"
-
-    total = sum(f.stat().st_size for f in vendor.rglob("*") if f.is_file())
-    assert total < 90e6, (
-        f"the vendor tree is {total / 1e6:.0f} MB; the trim list in tools/vendor.py has stopped working"
-    )
+    pyproject = tomlkit.parse((SRC.parents[1] / "pyproject.toml").read_text())
+    return [str(g) for g in pyproject["tool"]["setuptools"]["package-data"]["tandem"]]
 
 
-@pytest.mark.skipif(
-    not (Path(__file__).parent.parent / "src" / "tandem" / "_vendor" / "tiptop").is_dir(),
-    reason="vendored sources are not present in this checkout",
-)
-def test_tiptop_patches_are_applied():
-    """Without these, a profile cannot supply its own config and every session would read
-    whatever tiptop.yml happens to sit in the shared runtime."""
-    config = (
-        Path(__file__).parent.parent
-        / "src" / "tandem" / "_vendor" / "tiptop" / "tiptop" / "config" / "__init__.py"
-    ).read_text()
-    assert "TIPTOP_CONFIG" in config
-    assert "TIPTOP_CALIBRATION" in config
+def test_no_planner_source_ships_inside_the_package():
+    """The wheel is pure Python and small: a planner's sources are fetched by its runtime recipe.
+
+    Two of the three trees tandem drives are under NVIDIA's licence; not redistributing them is half
+    the point, and a stray glob or a stray copy would quietly undo it.
+    """
+    assert not (SRC / "_vendor").exists(), "src/tandem/_vendor is back"
+    for marker in ("tiptop_run.py", "tamp_domain.py", "curobolib"):
+        found = [str(p.relative_to(SRC)) for p in SRC.rglob(marker)]
+        assert not found, f"planner sources inside the package: {found}"
+    assert not any("_vendor" in glob for glob in _package_data_globs())
+
+
+def test_tiptops_patches_and_checkpoints_ship_as_package_data():
+    """What a planner package ships is its own: the patches its recipe applies, and the two DATAFARM
+    checkpoints no public repository has. A wheel that dropped them installs a runtime that cannot be
+    patched, or a VAE cost that fails at the first plan."""
+    from fnmatch import fnmatch
+
+    from tandem.planners.tiptop.recipe import RECIPE
+
+    shipped = [p for s in RECIPE.sources for p in s.patches] + [a.source for a in RECIPE.assets]
+    assert len(shipped) == 4
+    globs = _package_data_globs()
+    for path in shipped:
+        assert path.is_file(), f"{path} is missing"
+        relative = path.relative_to(SRC).as_posix()
+        assert any(fnmatch(relative, glob.replace("**/", "")) or fnmatch(relative, glob) for glob in globs), (
+            f"{relative} matches no package-data glob, so the wheel would not carry it"
+        )
+    sizes = {a.source.name: a.source.stat().st_size for a in RECIPE.assets}
+    assert 1e6 < sizes["vae_full_v2.pt"] < 2e6 and 2e6 < sizes["rnd_droid.pt"] < 4e6
+
+
+def test_the_sidecar_kit_ships_as_a_file_a_planners_environment_can_import():
+    """Every sidecar imports tandem_sidecar from the directory tandem puts on its path, so it has to be
+    in the wheel as a plain file -- and must import nothing a planner's environment might not have."""
+    import ast
+
+    from tandem.planners import sidecar_kit
+
+    kit = sidecar_kit.path()
+    assert kit.is_file() and kit.parent == SRC / "planners" / "sidecar_kit"
+    # A module of a package that setuptools finds, so the wheel carries it without a package-data glob.
+    assert (kit.parent / "__init__.py").is_file()
+    roots = set()
+    for node in ast.walk(ast.parse(kit.read_text())):
+        if isinstance(node, ast.Import):
+            roots.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            roots.add(node.module.split(".")[0])
+    assert roots <= set(sys.stdlib_module_names) | {"__future__"}, sorted(roots)
+
+
+def test_tiptops_patches_are_plain_diffs():
+    """Run from inside a repository, `git apply` filters a `diff --git` patch by the current prefix and
+    reports success while applying nothing. tandem guards against that; the patches avoid it too."""
+    from tandem.planners.tiptop.recipe import RECIPE
+
+    for patch in (p for s in RECIPE.sources for p in s.patches):
+        text = patch.read_text()
+        assert "\ndiff --git " not in text and not text.startswith("diff --git ")
+        assert "\n--- a/" in text and "\n+++ b/" in text
+
+
+def test_tiptops_patches_apply_to_the_pinned_tiptop(tmp_path):
+    """Without them a profile cannot supply its own calibration, and every session would read whatever
+    sits in the shared runtime. Checked against the real tree wherever one is to hand."""
+    from planner_sources import planner_sources
+
+    from tandem.planners import runtime as rt_mod
+    from tandem.planners.tiptop.recipe import RECIPE, TIPTOP
+
+    root = planner_sources("tiptop/tiptop/config/__init__.py")
+    if "TIPTOP_CALIBRATION" in (root / "tiptop" / "tiptop" / "config" / "__init__.py").read_text():
+        # An installed runtime, whose tree is patched already: that it is IS the check.
+        return
+    tree = tmp_path / "tiptop"
+    shutil.copytree(root / "tiptop", tree, symlinks=True, ignore=shutil.ignore_patterns(".git", ".pixi"))
+    applied = rt_mod.apply_patches(tree, TIPTOP.patches, name="tiptop")
+    assert [a["name"] for a in applied] == [p.name for p in RECIPE.source("tiptop").patches]
+    config = (tree / "tiptop" / "config" / "__init__.py").read_text()
+    assert "TIPTOP_CONFIG" in config and "TIPTOP_CALIBRATION" in config
 
 
 def test_every_module_attribute_the_cli_and_server_reach_for_actually_exists():
@@ -189,8 +254,6 @@ def test_every_module_attribute_the_cli_and_server_reach_for_actually_exists():
 
     missing: list[str] = []
     for path in sorted(root.rglob("*.py")):
-        if "_vendor" in path.parts:
-            continue
         source = path.read_text()
         # Only check a file that actually imports the alias, so a local variable of the same name
         # in an unrelated module is not mistaken for it.
@@ -211,81 +274,3 @@ def test_every_module_attribute_the_cli_and_server_reach_for_actually_exists():
                 missing.append(f"{path.relative_to(root.parent.parent)}:{node.lineno} {alias}.{node.attr}")
 
     assert not missing, "references to names that no longer exist:\n  " + "\n  ".join(missing)
-
-
-def test_a_runtime_is_re_copied_when_the_vendored_planner_changes(tmp_path):
-    """"Already present" is only safe when the sources are the SAME sources.
-
-    Skipping the copy while stamping the new commits anyway is the worst of both: the runtime is
-    built from the old planner and claims to be the new one. That surfaces as an ImportError
-    partway into a warm-up, with an operator standing next to the arm — the sidecar calls functions
-    that exist only in the newer tree.
-    """
-    import json
-
-    from tandem.core.runtime import Runtime
-
-    def vendor_tree(root, commit: str):
-        for name in ("tiptop", "cuTAMP", "curobo"):
-            (root / name).mkdir(parents=True, exist_ok=True)
-            (root / name / "marker.txt").write_text(commit)
-        (root / "VENDOR.toml").write_text(
-            "\n".join(
-                f'[{name}]\ncommit = "{commit}"\nurl = ""\nversion = "{commit[:7]}"'
-                for name in ("tiptop", "cuTAMP", "curobo")
-            )
-        )
-        return root
-
-    first = vendor_tree(tmp_path / "vendor-a", "1111111111111111")
-    runtime = Runtime(tmp_path / "runtime")
-    runtime.materialize(first)
-    assert (runtime.root / "tiptop" / "marker.txt").read_text() == "1111111111111111"
-
-    # Re-vendored: same paths, different commits.
-    second = vendor_tree(tmp_path / "vendor-b", "2222222222222222")
-    runtime.materialize(second)
-    assert (runtime.root / "tiptop" / "marker.txt").read_text() == "2222222222222222", (
-        "the runtime kept the old planner while the stamp claimed the new one"
-    )
-    stamp = json.loads(runtime.stamp_file.read_text())
-    assert stamp["vendor"]["tiptop"]["commit"] == "2222222222222222"
-    # A source change invalidates the compiled kernels and the installed packages with it.
-    assert stamp["built_at"] is None
-
-    # Unchanged sources are still left alone — this must not turn every init into a full re-copy.
-    marker = runtime.root / "tiptop" / "untouched"
-    marker.write_text("x")
-    runtime.materialize(second)
-    assert marker.is_file(), "an unchanged component should not be re-copied"
-
-
-def test_the_planner_build_pins_curobos_version(tmp_path, monkeypatch):
-    """cuRobo takes its version from setuptools_scm and a vendored tree has no SCM metadata.
-
-    Vendoring extracts with `git archive` precisely so no VCS state rides along, so the editable
-    install fails with "unable to detect version" before the 5-20 minute CUDA kernel build even
-    starts — and `tandem init` ends with "the build finished but the runtime still looks
-    incomplete", which names neither the cause nor the fix.
-    """
-    import json
-
-    from tandem.core.runtime import Runtime
-
-    runtime = Runtime(tmp_path / "runtime")
-    runtime.root.mkdir(parents=True)
-    runtime.stamp_file.write_text(
-        json.dumps({"vendor": {"curobo": {"commit": "abc123", "version": "3a90ff4"}}, "built_at": None})
-    )
-
-    captured: dict = {}
-    monkeypatch.setattr(
-        Runtime, "_pixi", lambda self, args, log=None, extra_env=None, what="": captured.update(extra_env or {})
-    )
-    monkeypatch.setattr(Runtime, "_touch_built", lambda self: None)
-    runtime.build_planners()
-
-    version = captured.get("SETUPTOOLS_SCM_PRETEND_VERSION_FOR_NVIDIA_CUROBO")
-    assert version, "cuRobo's version is not pinned, so its editable install cannot resolve one"
-    # Carries the vendored commit, so the installed package says which sources it is.
-    assert "3a90ff4" in version
