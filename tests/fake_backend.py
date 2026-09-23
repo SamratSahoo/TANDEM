@@ -9,6 +9,11 @@ else can touch it.
 It records every call in ``calls``, so a test can assert on the ORDER things happened in. That
 ordering is the part that bites: release before the teleop child starts, reacquire only after it has
 gone, and never a perception pass that parks an arm a person is still holding something with.
+
+What a leg was ASKED for is kept separately, one dict per call, in ``perceive_requests`` and
+``plan_requests``: whether the gripper was to be opened, which objects the plan could pick, whether it
+was to end at home. Those are questions about a single call's arguments rather than about order, and
+keeping them out of ``calls`` leaves every assertion already written against that list as it was.
 """
 
 from __future__ import annotations
@@ -41,6 +46,8 @@ class FakeBackend:
     drifted_labels: tuple[str, ...] | None = None
     n_frames: int = 24
     calls: list[str] = field(default_factory=list)
+    perceive_requests: list[dict] = field(default_factory=list)
+    plan_requests: list[dict] = field(default_factory=list)
     legs: list[dict] = field(default_factory=list)
     warmed: bool = False
     closed: bool = False
@@ -56,6 +63,8 @@ class FakeBackend:
         self.drifted_labels = kwargs.pop("drifted_labels", None)
         self.n_frames = kwargs.pop("n_frames", 24)
         self.calls = []
+        self.perceive_requests = []
+        self.plan_requests = []
         self.legs = []
         self.warmed = False
         self.closed = False
@@ -103,8 +112,13 @@ class FakeBackend:
 
     # ---- the sub-goal cycle ------------------------------------------------
 
-    def perceive(self, *, task_hint: str, save_dir: Path, reset_arm: bool = True) -> SceneView:
+    def perceive(
+        self, *, task_hint: str, save_dir: Path, reset_arm: bool = True, open_gripper: bool = False
+    ) -> SceneView:
         self.calls.append(f"perceive:{'reset' if reset_arm else 'keep'}")
+        self.perceive_requests.append(
+            {"task_hint": task_hint, "reset_arm": reset_arm, "open_gripper": open_gripper}
+        )
         assert self.holds_hardware, "perception ran while the cameras were handed away"
         self.perceptions += 1
         labels = self.labels
@@ -122,12 +136,69 @@ class FakeBackend:
             detected_goal=(GoalAtom("on", (labels[0], self.table)),),
         )
 
-    def plan(self, scene_id, goal, *, surfaces=frozenset(), save_dir, reuse_skeleton=None) -> PlanResult:
+    def plan(
+        self,
+        scene_id,
+        goal,
+        *,
+        surfaces=frozenset(),
+        movables=None,
+        return_home=True,
+        save_dir,
+        reuse_skeleton=None,
+    ) -> PlanResult:
         rendered = [a.to_dict() for a in goal]
         self.calls.append(f"plan:{json.dumps(rendered)}")
+        self.plan_requests.append(
+            {
+                "scene_id": scene_id,
+                "goal": rendered,
+                "surfaces": frozenset(surfaces),
+                "movables": None if movables is None else frozenset(movables),
+                "return_home": return_home,
+            }
+        )
         if self.plan_failure:
             return PlanResult(ok=False, failure_reason=self.plan_failure)
-        return PlanResult(ok=True, planning_seconds=0.5, plan_handle=f"plan-{len(self.calls)}")
+        # The real sidecar's refusal, so a phase loop that restricts a leg to the wrong objects fails
+        # here exactly as it would on the robot rather than passing because the fake did not look.
+        moved = self._moved_objects(goal)
+        if movables is not None and not moved <= set(movables):
+            outside = ", ".join(sorted(moved - set(movables)))
+            return PlanResult(
+                ok=False,
+                failure_reason=f"the goal moves {outside}, but this leg may only pick {sorted(movables)}",
+            )
+        return PlanResult(
+            ok=True,
+            planning_seconds=0.5,
+            plan_handle=f"plan-{len(self.calls)}",
+            task_plan=self._task_plan(goal),
+        )
+
+    def _moved_object(self, atom) -> str | None:
+        """What one goal atom moves, read through the declaration rather than known to be On/Holding."""
+        caps = self.capabilities()
+        by_wire = {wire: name for name, wire in caps.goal_predicate_wire_names.items()}
+        position = caps.moved_arguments.get(by_wire.get(atom.predicate, ""))
+        if position is None or position >= len(atom.args):
+            return None
+        return atom.args[position]
+
+    def _moved_objects(self, goal) -> set[str]:
+        return {obj for obj in (self._moved_object(atom) for atom in goal) if obj is not None}
+
+    def _task_plan(self, goal) -> tuple[str, ...]:
+        """A pick for every moved object and a place for every one put somewhere: a plausible record."""
+        labels: list[str] = []
+        for atom in goal:
+            obj = self._moved_object(atom)
+            if obj is None:
+                continue
+            labels.append(f"Pick({obj})")
+            if len(atom.args) > 1:
+                labels.append(f"Place({', '.join(atom.args)})")
+        return tuple(labels)
 
     def execute(self, plan_handle, leg: LegSpec, *, save_dir: Path, should_stop=None) -> ExecuteResult:
         self.calls.append(f"execute:{leg.phase_index}")

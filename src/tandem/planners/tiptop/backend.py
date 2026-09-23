@@ -129,13 +129,21 @@ class TiptopBackend:
 
     # ---- the sub-goal cycle ------------------------------------------------
 
-    def perceive(self, *, task_hint: str, save_dir: Path, reset_arm: bool = True) -> SceneView:
+    def perceive(
+        self,
+        *,
+        task_hint: str,
+        save_dir: Path,
+        reset_arm: bool = True,
+        open_gripper: bool = False,
+    ) -> SceneView:
         data = self._call(
             "perceive",
             timeout=PERCEIVE_TIMEOUT,
             task_hint=task_hint,
             save_dir=str(save_dir),
             reset_arm=reset_arm,
+            open_gripper=open_gripper,
         )
         return SceneView.from_dict(data)
 
@@ -145,15 +153,22 @@ class TiptopBackend:
         goal: Sequence[GoalAtom],
         *,
         surfaces: frozenset[str] = frozenset(),
+        movables: frozenset[str] | None = None,
+        return_home: bool = True,
         save_dir: Path,
         reuse_skeleton: Any = None,
     ) -> PlanResult:
+        # Both are honoured in the sidecar (see Sidecar.plan), which is what CAPABILITIES declares.
+        # None and an empty set are different requests -- "anything may be picked" against "nothing
+        # may" -- so the None survives the wire as null rather than becoming [].
         data = self._call(
             "plan",
             timeout=PLAN_TIMEOUT,
             scene_id=scene_id,
             goal=[a.to_dict() for a in goal],
             surfaces=sorted(surfaces),
+            movables=sorted(movables) if movables is not None else None,
+            return_home=bool(return_home),
             save_dir=str(save_dir),
         )
         return PlanResult.from_dict(data)
