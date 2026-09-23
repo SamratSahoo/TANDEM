@@ -21,6 +21,7 @@ from ruamel.yaml import YAML
 
 from tandem import resources
 from tandem.core.profiles import HitlSpec, Profile
+from tandem.executors import base as executors
 from tandem.planners.base import Capabilities
 from tandem.planners.tiptop.capabilities import CAPABILITIES as TIPTOP
 from tandem.planning.config import ON_FAILURE_CHOICES, PlanningConfig
@@ -102,9 +103,22 @@ def test_the_profile_and_the_planner_agree_on_every_default():
     assert HitlSpec().to_planning_config() == PlanningConfig()
 
 
-def test_every_key_survives_the_trip_to_the_planner():
+def _installed_executors(monkeypatch, *names: str) -> None:
+    """Make `names` executors this process knows, for as long as the test runs.
+
+    A profile only accepts an executor the registry knows, and none but teleop ships.
+    """
+
+    class StandIn:
+        segment_source = "policy"
+
+    monkeypatch.setattr(executors, "_registered", {**executors._registered, **dict.fromkeys(names, StandIn)})
+
+
+def test_every_key_survives_the_trip_to_the_planner(monkeypatch):
     # Every value flipped from its default, so a key to_planning_config dropped would come back as
     # the default and fail here instead of silently in a session.
+    _installed_executors(monkeypatch, "diffusion-policy")
     changed = {
         "enabled": True,
         "proposal_model": "some-other-model",
@@ -182,11 +196,18 @@ def test_a_human_executor_that_is_not_a_name_is_refused_in_both_places(name):
 
 
 @pytest.mark.parametrize("name", ["teleop", "diffusion-policy", "act_v2", "ACT"])
-def test_an_executor_is_checked_for_shape_not_for_being_installed(name):
-    # Whether anything is registered under the name is the executor registry's question. A profile
-    # naming a third-party executor must still load on a machine that has not installed it -- the
-    # laptop reading its trajectories, say.
+def test_an_executor_the_registry_knows_is_accepted_whatever_its_spelling(name, monkeypatch):
+    # The shape check lets through any name a registry could hold; the registry then decides whether
+    # one is installed (tests/test_executors.py covers the refusal and its suggestion).
+    _installed_executors(monkeypatch, "diffusion-policy", "act_v2", "ACT")
     assert HitlSpec(human_executor=name).to_planning_config().human_executor == name
+
+
+def test_an_executor_nobody_installed_is_refused():
+    # Like planner.backend: a misspelling found when the profile loads costs nothing, and found at the
+    # first human phase it costs a trial.
+    with pytest.raises(ValidationError, match="Unknown human executor 'diffusion-policy'"):
+        HitlSpec(human_executor="diffusion-policy")
 
 
 def test_a_misspelled_new_key_is_still_an_error():
