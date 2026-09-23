@@ -321,11 +321,21 @@ async def propose_plan(
     table_name: str,
     cfg: PlanningConfig,
     caps: Capabilities,
+    *,
+    feedback: str | None = None,
 ) -> TaskSpecification:
-    """The instruction becomes an ordered plan of robot and human phases."""
+    """The instruction becomes an ordered plan of robot and human phases.
+
+    ``feedback`` is a section appended to the prompt verbatim, the way a repair is: why an earlier
+    plan for this task could not be carried out (``plan.build_plan`` writes it). A proposal with
+    feedback never touches the cache. It is by definition a request for a DIFFERENT answer, and the
+    same failure fed back the same way would otherwise replay the plan that just failed.
+    """
     from tandem.planning.llm import query_json
 
     prompt = plan_prompt(instruction, list(objects), caps=caps)
+    if feedback:
+        prompt = f"{prompt}\n\n{feedback}"
 
     def parse(data: Any) -> TaskSpecification:
         return parse_plan_response(data, instruction, objects, table_name, caps)
@@ -338,7 +348,7 @@ async def propose_plan(
         image=image,
         max_attempts=cfg.max_attempts,
         label="task plan",
-        cache=proposal_cache(cfg),
+        cache=None if feedback else proposal_cache(cfg),
     )
     _log.info(f"plan for {instruction!r}: {len(spec.phases)} phase(s)")
     for i, phase in enumerate(spec.phases):

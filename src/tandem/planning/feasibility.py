@@ -17,6 +17,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from tandem.planners.base import Capabilities
+from tandem.planning.contracts import phase_moves
 from tandem.planning.structs import Phase, TaskSpecification
 from tandem.planning.symbols import Atom
 
@@ -40,7 +41,7 @@ def check_robot_phases(spec: TaskSpecification, caps: Capabilities) -> str | Non
     return None
 
 
-def conjoinable_run(phases: Sequence[Phase], movables: frozenset[str], caps: Capabilities) -> int:
+def conjoinable_run(phases: Sequence[Phase], caps: Capabilities) -> int:
     """How many of ``phases``, from the front, can be planned as ONE goal.
 
     A phase only ever says what must be TRUE at its end, and where the backend declares
@@ -56,6 +57,17 @@ def conjoinable_run(phases: Sequence[Phase], movables: frozenset[str], caps: Cap
     ``On(toy, shelf)`` at once is unsatisfiable rather than merely slow. Phases like that are
     genuinely sequential -- "take the toy off the box … put the toy back in" -- and stay separate
     legs, which is what the robot-to-robot continuation carries.
+
+    What a phase MOVES is read off the backend's ``moved_arguments`` (``contracts.phase_moves``), not
+    off every object the phase names. The two agree for cuTAMP's On, whose surface is typed apart
+    from its movables, and nowhere else: in a goal language where the thing placed onto is itself a
+    movable -- ``Stacked(a, base)`` then ``Stacked(b, base)`` -- naming ``base`` twice would split a
+    run that picks nothing twice, and a surface the plan moves would never count as picked at all.
+
+    A backend that declares no ``moved_arguments`` has not said what its phases move, so every object
+    a phase names is taken to be one it may pick. That splits more runs than it needs to, which costs
+    a perception pass and never a plan; reading the missing declaration as "moves nothing" would
+    conjoin exactly the goals ``one_pick_per_object`` makes unsatisfiable.
     """
     if not caps.initial_state_is_clean:
         # Ordering between phases may be symbolically meaningful, so conjoining could silently drop
@@ -67,7 +79,7 @@ def conjoinable_run(phases: Sequence[Phase], movables: frozenset[str], caps: Cap
     for phase in phases:
         if phase.is_human:
             break
-        moved = phase.objects & movables
+        moved = phase_moves(phase, caps=caps) if caps.moved_arguments else frozenset(phase.objects)
         if count and caps.one_pick_per_object and moved & claimed:
             break
         count += 1
