@@ -325,12 +325,7 @@ async def propose_plan(
     """The instruction becomes an ordered plan of robot and human phases."""
     from tandem.planning.llm import query_json
 
-    prompt = plan_prompt(
-        instruction,
-        list(objects),
-        predicate_menu=caps.predicate_menu(),
-        robot_description=caps.robot_description,
-    )
+    prompt = plan_prompt(instruction, list(objects), caps=caps)
 
     def parse(data: Any) -> TaskSpecification:
         return parse_plan_response(data, instruction, objects, table_name, caps)

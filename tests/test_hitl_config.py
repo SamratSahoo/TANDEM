@@ -219,8 +219,6 @@ def test_tiptop_declares_what_its_planner_does():
     assert TIPTOP.robot_operators == ("Pick(?obj: movable)", "Place(?obj: movable, ?surface: surface)")
     assert TIPTOP.supports_movable_restriction is True
     assert TIPTOP.supports_return_home is True
-    # Filled together with the prompt it belongs to, not before.
-    assert TIPTOP.prompt_fragments == {}
 
 
 def _argument_is_a(caps: Capabilities, predicate: str, index: int, type_: str) -> bool:
