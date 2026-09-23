@@ -61,9 +61,6 @@ from pathlib import Path
 from tandem.core import episodes, paths, render, secrets
 from tandem.core import settings as settings_mod
 from tandem.core.errors import SessionConflict, TandemError
-
-# MAX_REPLANS is the phase loop's, and is re-exported for the callers that import it from here.
-from tandem.core.phase_loop import MAX_REPLANS as MAX_REPLANS
 from tandem.core.phase_loop import HumanPhase, PhaseLoop, TrialOutcome
 from tandem.core.profiles import Profile
 from tandem.core.runtime import Runtime

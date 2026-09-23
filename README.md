@@ -109,11 +109,12 @@ last one matters: the usual cause is an object the instruction names that percep
 detect, and the remedy (put it on the table, or reword the task) is only available *before* you
 start collecting.
 
-**A phase the planner cannot plan becomes yours.** tandem decides who does what, so when the
-planner fails to find a plan for a robot phase the sub-goal is described to you, you do it by
-hand, and the same check verifies it — the task carries on instead of ending. Set
-`hitl.on_robot_phase_failure` to `abort` for the older behaviour, or `replan` to hand the
-failure back to the model.
+**A phase the planner cannot plan ends the trial, unless you say otherwise.** That is how the
+paper counts it, so it is the default (`hitl.on_robot_phase_failure: abort`). tandem decides who
+does what, so with `teleop` the sub-goal is described to you instead: you do it by hand, the same
+check verifies it, and the task carries on. `replan` proposes the task again and tells the model
+why the planner could not plan that phase. A leg that was planned but failed to *execute* always
+ends the trial: the arm is somewhere no plan put it.
 
 Off by default, and disabled nothing in it runs.
 

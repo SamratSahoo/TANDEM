@@ -287,7 +287,8 @@ class HitlSpec(BaseModel):
     # query a run pays for repeatedly. Flash is enough.
     vlm_model: str = "gemini-2.5-flash"
     # Reprompts allowed when a proposal comes back unparseable. The error is fed back to the
-    # model, which is what makes a second attempt worth making.
+    # model, which is what makes a second attempt worth making. Also the most re-plans one trial
+    # gets under `on_robot_phase_failure: replan`.
     max_attempts: int = 3
     # Classify the invented predicates on the first image, before anything runs. Off by
     # default: a human is asked precisely because the predicate is false. Worth turning on for

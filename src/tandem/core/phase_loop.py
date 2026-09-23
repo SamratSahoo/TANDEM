@@ -24,18 +24,27 @@ How it maps onto the paper (TANDEM, Sec. IV-D "Task Plan Generation and Executio
 * **Autonomous execution.** A robot phase's subgoal goes to the TAMP system with the current scene,
   and the system plans and executes it. This is `_run_robot_phase`, through ``TampBackend.plan`` and
   ``TampBackend.execute``: "an interface for specifying subgoals and executing the resulting plans",
-  and nothing more. `_on_plan_failure` decides what happens when no plan is found
-  (``on_robot_phase_failure``).
+  and nothing more. Two things the leg is for go with the subgoal, where the planner declares it
+  honours them: which objects it may pick (``movables``, so the person's tool is an obstacle and
+  never a thing to pick up) and whether to end at home (``return_home``, only on the task's last
+  leg). A leg that was planned but did not EXECUTE ends the trial (failure stage
+  ``tamp_execution``): the arm is somewhere no plan put it, and every later phase was planned
+  against a scene that no longer exists. `_on_plan_failure` decides what happens when no plan is
+  found (``on_robot_phase_failure``): the trial ends (``abort``), the phase is handed to a person
+  (``teleop``), or the task is proposed again with the planner's failure fed back to the model
+  (``replan``).
 * **Human execution.** The operator is shown a natural-language version of the subgoal, takes
   control through teleoperation, and ends the phase. This is `_run_human_phase`, through the
   operator's prompt and the human-leg seam.
-* **Re-perception and verification.** A fresh image is taken after every phase. After a human
-  phase, the VLM classifiers g_psi check the phase's operator: its add effects must now hold and its
-  delete effects must not (``grounding.verify_effects``). Its preconditions can be checked before
-  the hand-off as well (``check_human_preconditions``, ``grounding.verify_preconditions``). A check
-  that still fails once its retries are spent terminates the trial, and the trial is EXCLUDED from
-  the dataset (``on_verification_failure``). In this module that is the perception pass at the top
-  of every leg, `_rebind` for object names that drift between passes, and the camera checks around
+* **Re-perception and verification.** The scene is perceived afresh before every robot leg, and
+  never before a person's: a human phase is judged on a fresh frame from the verification camera,
+  and nothing about it is planned. After a human phase, the VLM classifiers g_psi check the phase's
+  operator: its add effects must now hold and its delete effects must not
+  (``grounding.verify_effects``). Its preconditions can be checked before the hand-off as well
+  (``check_human_preconditions``, ``grounding.verify_preconditions``). A check that still fails
+  once its retries are spent terminates the trial, and the trial is EXCLUDED from the dataset
+  (``on_verification_failure``). In this module that is the perception pass that opens each robot
+  leg, `_rebind` for object names that drift between passes, and the camera checks around
   `_run_human_phase`. The same classifiers can watch a robot leg too (``check_tamp_preconditions``,
   ``check_tamp_effects``), which the paper does not do; that is observational unless configured
   otherwise.
@@ -49,11 +58,12 @@ How a trial ended is the paper's Fig. 4 taxonomy: ``TrialOutcome.outcome`` and `
 kept on the plan as well (``PhasePlan.set_outcome``) so that ``hitl.json`` says it, and announced
 as a ``trial_outcome`` event whenever the loop ends a trial itself.
 
-Where this does not match the paper yet:
+Where this departs from the paper, on purpose:
 
-* A leg that was planned but failed to EXECUTE still advances the plan.
-* Perception also runs before a human leg, not only before robot legs.
-* `replan` proposes again from scratch. The planner's failure is not fed back to the proposer.
+* Consecutive robot phases are handed to the planner as ONE goal where that is sound
+  (``conjoin_robot_phases``, ``PhasePlan.robot_run``), so there is one perception pass for the run
+  rather than one per phase. The paper re-perceives after every phase; turning the setting off does
+  exactly that.
 """
 
 from __future__ import annotations
@@ -71,12 +81,6 @@ if TYPE_CHECKING:
     from tandem.planning.plan import PhasePlan
     from tandem.planning.structs import Phase
     from tandem.planning.symbols import Atom
-
-# How many times one task attempt may be decomposed again after the planner failed to plan a phase
-# (`on_robot_phase_failure: replan`). Bounded, because a goal the planner genuinely cannot reach
-# fails identically every time, and an unbounded retry would perceive and re-propose forever with
-# an operator watching an arm that never moves.
-MAX_REPLANS = 2
 
 
 @dataclass
@@ -182,7 +186,7 @@ class OperatorIO(Protocol):
         """Whether the operator asked for the arm since the last boundary. Consumes the request."""
 
     def rolling(self) -> None:
-        """The loop is busy: perceiving, decomposing, planning or executing."""
+        """The loop is busy: perceiving, decomposing, planning, executing, or checking a step."""
 
     def show_progress(self, progress: tuple[int, int] | None) -> None:
         """How far through the plan the attempt is, as (phase index, number of phases)."""
@@ -257,7 +261,14 @@ class PhaseLoop:
         self._plan: PhasePlan | None = None
         self._detected_goal: tuple = ()
         self._task_done = False
-        self._replans_left = MAX_REPLANS
+        # `on_robot_phase_failure: replan`: how many times this attempt has been proposed again, and
+        # why each earlier plan could not be carried out -- all of them, not only the last, so a model
+        # told about the second failure is not free to walk straight back into the first.
+        self._replans = 0
+        self._replan_feedback: list[str] = []
+        # Whether a person had the arm last, through a human phase. The next perception pass opens
+        # the gripper first (`_perceive`).
+        self._after_human = False
         self._human_phase: HumanPhase | None = None
 
     # ---- the attempt -------------------------------------------------------
@@ -288,7 +299,9 @@ class PhaseLoop:
         self._plan = None
         self._detected_goal = ()
         self._task_done = False
-        self._replans_left = MAX_REPLANS
+        self._replans = 0
+        self._replan_feedback = []
+        self._after_human = False
         self._show_human_phase(None)
         self.operator.show_progress(None)
         self.operator.show_unrepresented([])
@@ -296,35 +309,37 @@ class PhaseLoop:
 
         while not self._task_done:
             self.operator.check_preempt()
-            # One directory per leg, allocated ONCE and handed to every call that writes into
-            # it. Perception debug output, the plan and the recording all belong to one leg.
-            leg_dir = self.legs.new()
-            try:
-                scene = self._perceive(leg_dir, first_leg=leg == 0)
-                if self._plan is None:
-                    # Also re-run with phase planning OFF, where it refreshes the planner's own
-                    # goal from THIS pass's object labels -- the previous pass's labels may not
-                    # even exist any more.
-                    if not self._prepare_plan(scene):
+            # Before anything else, so a finished plan costs nothing more: the task is over, and a
+            # perception pass here would only park the arm in the last frame of the demonstration.
+            if self._plan is not None and self._plan.finished:
+                break
+
+            if self._plan is not None and self._plan.next_is_human():
+                # A person's step has no perception pass. Nothing about it is planned, it is judged
+                # on a fresh frame from the verification camera, and the scene is looked at again
+                # before the next robot leg -- which is the pass that has to see what the person
+                # left, not this one. A pass here also re-read every object label mid-task for
+                # nothing, and each re-read is one more chance for the names to drift.
+                self._take_turn(None, None)
+            else:
+                # One directory per leg, allocated ONCE and handed to every call that writes into
+                # it. Perception debug output, the plan and the recording all belong to one leg.
+                leg_dir = self.legs.new()
+                try:
+                    scene = self._perceive(leg_dir, first_leg=leg == 0)
+                    if self._plan is None:
+                        # Also re-run with phase planning OFF, where it refreshes the planner's own
+                        # goal from THIS pass's object labels -- the previous pass's labels may not
+                        # even exist any more.
+                        if not self._prepare_plan(scene):
+                            break
+                    elif not self._rebind(scene):
                         break
-                elif not self._rebind(scene):
-                    break
-
-                if self._plan is not None and self._plan.finished:
-                    break
-                phase = self._plan.current if self._plan is not None else None
-
-                if self.operator.take_handoff_request():
-                    # An operator-asked hand-off, honoured at a phase boundary so the arm parks
-                    # somewhere sane rather than mid-motion. Nothing advances: the same phase
-                    # (or, with no plan, the same task) is re-perceived and planned afterwards.
-                    self._human_leg(None)
-                elif phase is not None and phase.is_human:
-                    self._run_human_phase(phase)
-                else:
-                    self._run_robot_phase(scene, leg_dir)
-            finally:
-                self.legs.retire(leg_dir)
+                    # A plan just proposed may open with a person's step. It is taken here, from
+                    # the pass the proposal needed anyway.
+                    self._take_turn(scene, leg_dir)
+                finally:
+                    self.legs.retire(leg_dir)
 
             leg += 1
             if self._plan is not None and not self._plan.finished:
@@ -368,17 +383,49 @@ class PhaseLoop:
 
     # ---- one leg -----------------------------------------------------------
 
+    def _take_turn(self, scene: SceneView | None, leg_dir: Path | None) -> None:
+        """Carry out whatever is due now: a hand-off the operator asked for, a person's step, or a leg.
+
+        ``scene`` and ``leg_dir`` are None exactly when the step due is a person's, which is never
+        preceded by a perception pass.
+        """
+        phase = self._plan.current if self._plan is not None else None
+        if self.operator.take_handoff_request():
+            # An operator-asked hand-off, honoured at a phase boundary so the arm parks somewhere
+            # sane rather than mid-motion. Nothing advances: the same phase (or, with no plan, the
+            # same task) is re-perceived and planned afterwards. That pass leaves the gripper as the
+            # operator left it (`_perceive`): whatever it holds when it comes back is their choice.
+            self._human_leg(None)
+        elif phase is not None and phase.is_human:
+            self._run_human_phase(phase)
+        else:
+            self._run_robot_phase(scene, leg_dir)
+
     def _perceive(self, leg_dir: Path, *, first_leg: bool) -> SceneView:
         """Look at the workspace. The arm is only parked first when nothing is mid-task.
 
         Resetting between phases would undo the step before it — and after a hand-off it could
         drive an arm a person just handed us, holding something, back to home.
+
+        The first pass after a human phase opens the gripper first, and moves nothing else. Nothing
+        about a person driving the arm guarantees the fingers were left open, and a planner that
+        plans every goal from an empty hand (cuTAMP's HandEmpty) would otherwise plan its first
+        grasp through fingers that are closed. Only then: an open on any other pass could drop
+        something a leg is still meant to be holding, and after a hand-off the operator asked for,
+        what the arm holds is theirs to decide. It is passed only when wanted, so a backend that
+        never follows a person is never handed it.
         """
         self.operator.rolling()
+        options: dict[str, Any] = {}
+        if self._after_human:
+            options["open_gripper"] = True
+            self.events.log("a person had the arm last, so the gripper is opened before looking")
+        self._after_human = False
         scene = self.backend.perceive(
             task_hint=self._task,
             save_dir=leg_dir,
             reset_arm=first_leg,
+            **options,
         )
         self.events.log(f"perceived: {', '.join(scene.object_labels) or 'nothing'}")
         return scene
@@ -389,6 +436,10 @@ class PhaseLoop:
         With phase planning off there is nothing for a model to decompose, so the goal is the one
         the planner's own translator produced from the instruction during perception — exactly the
         behaviour a session had before any of this existed.
+
+        After a ``replan``, the model is told why every earlier plan this attempt could not be
+        carried out (`_replan_feedback`). Asked the same question of the same scene without it, it
+        gives the same answer, and the re-plan budget is spent reproducing the failure.
         """
         if not self.cfg.enabled:
             self._detected_goal = scene.detected_goal
@@ -398,19 +449,30 @@ class PhaseLoop:
         from tandem.planning.record import recording_to
 
         if not scene.rgb_path or not Path(scene.rgb_path).is_file():
-            self.events.log("perception saved no image, so the task cannot be decomposed")
+            reason = "perception saved no image, so the task cannot be decomposed"
+            self.events.log(reason)
+            self._end("failure", "invention", reason)
             return False
 
         try:
             image = _open_image(scene.rgb_path)
         except Exception as exc:
-            self.events.log(f"could not read the perception image: {exc}")
+            reason = f"could not read the perception image, so the task cannot be decomposed: {exc}"
+            self.events.log(reason)
+            self._end("failure", "invention", reason)
             return False
 
         import asyncio
 
+        feedback = "\n".join(self._replan_feedback) or None
         self.operator.rolling()
-        self.events.log(f"decomposing the task with {self.cfg.proposal_model}")
+        if feedback:
+            self.events.log(
+                f"decomposing the task again with {self.cfg.proposal_model}, told why the last plan "
+                "could not be carried out"
+            )
+        else:
+            self.events.log(f"decomposing the task with {self.cfg.proposal_model}")
         try:
             with recording_to(self._vlm_dir):
                 plan, failure = asyncio.run(
@@ -422,6 +484,7 @@ class PhaseLoop:
                         self.cfg,
                         self.caps,
                         self._trajectory_id,
+                        feedback=feedback,
                     )
                 )
         except Exception as exc:
@@ -461,6 +524,9 @@ class PhaseLoop:
         unhandled: the plan refers to objects this pass did not produce, so it would be thrown away
         and the task re-planned from a scene already half rearranged — asking the person to redo the
         step they just finished.
+
+        Only ever before a robot leg, since only a robot leg is preceded by a perception pass: what
+        a leg needs is the names the planner will be handed, and a person needs none of them.
         """
         if self._plan is None:
             return True
@@ -478,9 +544,12 @@ class PhaseLoop:
         candidates = sorted(detected - self._plan.spec.scene_types.all_names)
         mapping = match_drifted_names(missing, candidates)
         if mapping is None:
-            self.events.log(f"perception no longer detects {', '.join(missing)}; abandoning the attempt")
+            # A leg the planner cannot be given: its goal names objects this scene does not have.
+            reason = f"perception no longer detects {', '.join(missing)}, which the next robot leg needs"
+            self.events.log(f"{reason}; abandoning the attempt")
             self._plan = None
             self._task_done = True
+            self._end("failure", "tamp_planning", reason)
             return False
         self._plan.rebind(mapping)
         return True
@@ -500,8 +569,7 @@ class PhaseLoop:
             description, index, total = self._task, None, None
 
         if not goal:
-            self.events.log("nothing to plan for: the goal is empty")
-            self._plan = None
+            self._nothing_to_plan(run, description)
             return
 
         # Before the leg starts, not after rollout_start: a leg its preconditions stop is not a leg,
@@ -510,16 +578,35 @@ class PhaseLoop:
         if checks_leg and not self._leg_preconditions_hold(scene, run):
             return
 
-        self.events.event("rollout_start", dir=str(save_dir), phase_index=index, n_phases=total)
+        options = self._leg_options()
+        self.events.event(
+            "rollout_start",
+            dir=str(save_dir),
+            phase_index=index,
+            n_phases=total,
+            **{k: sorted(v) if isinstance(v, frozenset) else v for k, v in options.items()},
+        )
         self.operator.rollout_started(save_dir)
         self.events.log(f"planning: {[a.to_dict() for a in goal]}")
-        result = self.backend.plan(scene.scene_id, goal, surfaces=surfaces, save_dir=save_dir)
+        if "movables" in options:
+            self.events.log(
+                f"the planner may pick up only: {', '.join(sorted(options['movables'])) or 'nothing'}"
+            )
+        if options.get("return_home") is False:
+            self.events.log(
+                "more of the task follows this leg, so it ends where it stops rather than at home"
+            )
+        result = self.backend.plan(scene.scene_id, goal, surfaces=surfaces, save_dir=save_dir, **options)
 
         if not result.ok:
-            self._on_plan_failure(result.failure_reason or "no plan found")
+            self._on_plan_failure(result.failure_reason or "no plan found", run)
             return
 
         self.operator.check_preempt()
+        if self._plan is not None:
+            # On the record before the arm moves, not once the leg has run: a leg that then fails to
+            # execute is audited by exactly this -- which plan it was carrying out.
+            self._plan.record_plan(self._plan.index, result)
         execution = self.backend.execute(
             result.plan_handle,
             LegSpec(
@@ -536,15 +623,15 @@ class PhaseLoop:
         self._leg_recorded(execution.n_frames)
         self.events.event("rollout_saved", dir=str(save_dir), n_frames=execution.n_frames)
         if not execution.ok:
-            self.events.log(f"execution failed: {execution.failure_reason}")
-        elif self._plan is not None and self.cfg.check_tamp_effects:
+            self._execution_failed(execution.failure_reason, description)
+            return
+        if self._plan is not None and self.cfg.check_tamp_effects:
             # Before advance(), so the plan's index is still the leg that just ran. Only after a leg
             # that executed: after one that did not, the camera would be asked about motion nobody
             # finished, and its "no" is already known.
             self._check_leg_effects(run)
 
         if self._plan is not None:
-            self._plan.record_plan(self._plan.index, result)
             self._plan.advance()
             self.operator.show_progress((self._plan.index, len(self._plan.phases)))
         else:
@@ -552,7 +639,72 @@ class PhaseLoop:
             self._detected_goal = ()
             self._task_done = True
 
-    def _on_plan_failure(self, reason: str) -> None:
+    def _leg_options(self) -> dict[str, Any]:
+        """What this leg is for, beyond its goal, as far as the planner declares it can be told.
+
+        ``movables``: only the objects some robot phase moves may be picked (``robot_movables``).
+        Every other detection -- the person's tool, say -- stays in the scene as an obstacle.
+
+        ``return_home``: only the task's last leg ends at home (``is_last_leg``). Any other is
+        continued from where it stops, by a person or by the next leg, and a trip home recorded in
+        the middle of a demonstration is motion nobody asked for.
+
+        Each is passed only where ``Capabilities`` declares support for it. A planner that does not
+        may leave the keyword out of its signature altogether, and one handed it anyway would either
+        fail or quietly plan without it. With phase planning off there is no plan to read either
+        from, and the leg is an ordinary rollout: neither is passed.
+        """
+        if self._plan is None:
+            return {}
+        options: dict[str, Any] = {}
+        if self.caps.supports_movable_restriction:
+            options["movables"] = self._plan.robot_movables()
+        if self.caps.supports_return_home:
+            options["return_home"] = self._plan.is_last_leg()
+        return options
+
+    def _nothing_to_plan(self, run: Sequence[Phase], description: str) -> None:
+        """End the trial over a leg whose goal says nothing the planner can be given.
+
+        It used to drop the plan and go round again. That is a loop, not a retry: the next pass
+        perceives, proposes (or, with phase planning off, reads the planner's own goal) and arrives
+        at the same empty goal, until someone preempts it -- with the operator watching an arm that
+        never moves, and nothing on the record to say why.
+        """
+        if self._plan is not None:
+            # Every atom of the leg is one the planner supplies for itself (HandEmpty, for TipTop),
+            # so no goal survives rendering into its language. The plan asked for the leg; the
+            # planner was never going to be able to take it.
+            atoms = ", ".join(sorted(str(a) for p in run for a in p.atoms)) or "no atoms"
+            stage = "invention"
+            reason = (
+                f"the robot phase {description!r} asks the {self.caps.name} planner for nothing it can "
+                f"plan: none of {atoms} is in its goal language"
+            )
+        else:
+            stage = "tamp_planning"
+            reason = f"the {self.caps.name} planner found no goal in the instruction {self._task!r}"
+        self.events.log(f"nothing to plan for: {reason}; ending this attempt")
+        self._plan = None
+        self._task_done = True
+        self._end("failure", stage, reason)
+
+    def _execution_failed(self, failure: str | None, description: str) -> None:
+        """End the trial over a leg that was planned and did not execute. The plan never advances.
+
+        There is no policy for this, unlike a leg that cannot be planned. The arm is somewhere no
+        plan put it, possibly holding something, and every later phase was planned against a scene
+        that no longer exists. Advancing would ask the next phase of a world the robot did not
+        produce, and record a demonstration of it. The legs already on disk still reach the
+        operator's label, with the stage beside it.
+        """
+        reason = f"the robot could not carry out {description!r}: {failure or 'the planner gave no reason'}"
+        self.events.log(f"execution failed: {reason}; ending this attempt")
+        self._plan = None
+        self._task_done = True
+        self._end("failure", "tamp_execution", reason)
+
+    def _on_plan_failure(self, reason: str, run: Sequence[Phase]) -> None:
         """What happens when the planner cannot plan a phase.
 
         `teleop` is the option the old design could not express at all: who does what was decided
@@ -569,27 +721,49 @@ class PhaseLoop:
             self._end("failure", "tamp_planning", f"the planner could not plan this phase: {reason}")
             return
         if policy == "replan":
-            # Drop the plan and go round again: the next pass perceives afresh and decomposes the
-            # task against the scene as it now stands. Bounded, because a goal the planner cannot
-            # reach fails the same way every time -- and `_task_done` stays False, which is the
-            # whole difference from `abort`. Without that this policy was abort under another name.
-            if self._replans_left <= 0:
-                self.events.log("out of re-planning attempts; giving up on this task")
-                self._plan = None
-                self._task_done = True
-                self._end(
-                    "failure",
-                    "tamp_planning",
-                    f"the planner could not plan this phase after {MAX_REPLANS} re-plan(s): {reason}",
-                )
-                return
-            self._replans_left -= 1
-            self.events.log("re-planning the task from the scene as it now stands")
-            self._plan = None
+            self._replan(reason, run)
             return
         self.events.log("offering this phase to you as teleop instead")
         phase = self._plan.hand_current_to_human()
         self._run_human_phase(phase)
+
+    def _replan(self, reason: str, run: Sequence[Phase]) -> None:
+        """Drop the plan and propose the task again, telling the model why this one failed.
+
+        The next pass perceives afresh, and the task is decomposed against the scene as it now
+        stands, with the planner's failure in the prompt (`_prepare_plan`). `_task_done` stays False,
+        which is the whole difference from `abort`.
+
+        Bounded by ``max_attempts``, the proposer's own repair budget: a re-plan is one more repair
+        of the plan, with the planner rather than the validator saying what was wrong with it. A goal
+        the planner genuinely cannot reach fails the same way every time, and an unbounded retry
+        would perceive and re-propose forever with an operator watching an arm that never moves.
+        """
+        index = self._plan.index
+        if self._replans >= self.cfg.max_attempts:
+            self.events.log("out of re-planning attempts; giving up on this task")
+            self._plan = None
+            self._task_done = True
+            self._end(
+                "failure",
+                "tamp_planning",
+                f"phase {index} could not be planned after {self._replans} re-plan(s): {reason}",
+            )
+            return
+        self._replans += 1
+        # The model proposing again never sees the plan it is replacing, so "phase 2" alone would
+        # mean nothing to it: the phase is said in its own words and atoms as well.
+        asked = "; ".join(p.description for p in run) or "(no description)"
+        atoms = ", ".join(sorted(str(a) for p in run for a in p.atoms))
+        goal = f", with the goal {atoms}" if atoms else ""
+        self._replan_feedback.append(
+            f"phase {index} could not be planned: {reason} (the robot was asked to {asked}{goal})"
+        )
+        self.events.log(
+            f"re-planning the task from the scene as it now stands "
+            f"({self._replans} of at most {self.cfg.max_attempts})"
+        )
+        self._plan = None
 
     # ---- a phase for a person ----------------------------------------------
 
@@ -607,6 +781,8 @@ class PhaseLoop:
 
         cfg = self.cfg
         index = self._plan.index if self._plan is not None else None
+        # Whatever happens next, the next robot leg starts from a gripper a person may have closed.
+        self._after_human = True
 
         # Is the workspace in a state this phase can be carried out from? Once, before the first
         # attempt: a retry runs the same phase in a world its own failed attempt may have changed, and
@@ -642,6 +818,12 @@ class PhaseLoop:
                 return
             if answer == "teleop":
                 self._human_leg(phase)
+            # Busy again: checking the step, then on to whatever is next. Said here because nothing
+            # else says it any more -- the perception pass that used to follow every person's step
+            # did, and without it a step answered "done" and followed by another person's step would
+            # never leave the prompt state, so a UI that repaints on a change of state would go on
+            # showing the first step.
+            self.operator.rolling()
 
             skipped = self._effects_not_checked()
             if skipped is not None:

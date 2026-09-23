@@ -494,17 +494,16 @@ def test_replan_actually_re_plans_rather_than_quietly_aborting(phase_session):
     """`replan` is a documented policy, and it has to differ from `abort`.
 
     It drops the plan and goes round again, so the next pass perceives afresh and decomposes the
-    task against the scene as it now stands. Bounded, because a goal the planner genuinely cannot
-    reach fails the same way every time and an unbounded retry would perceive and re-propose
-    forever with an operator watching an arm that never moves.
+    task against the scene as it now stands. Bounded by max_attempts, because a goal the planner
+    genuinely cannot reach fails the same way every time and an unbounded retry would perceive and
+    re-propose forever with an operator watching an arm that never moves.
     """
-    from tandem.core.session import MAX_REPLANS
-
     # One proposal per attempt: the original plus every re-plan.
     session, backends, client = phase_session(
         backend_kwargs={"plan_failure": "no collision-free grasp"},
         on_robot_phase_failure="replan",
     )
+    replans = session.profile.hitl.max_attempts
     session.next_task()
     # Wait on the LOG, not the state: the session is already at the prompt when next_task is
     # called, so a state check would pass before the attempt had even started.
@@ -514,9 +513,10 @@ def test_replan_actually_re_plans_rather_than_quietly_aborting(phase_session):
 
     # It tried again rather than giving up on the first failure — one perception pass per attempt,
     # plus the re-planned ones.
-    assert backends[-1].perceptions == MAX_REPLANS + 1, (
-        f"expected {MAX_REPLANS + 1} perception passes, got {backends[-1].perceptions}"
+    assert backends[-1].perceptions == replans + 1, (
+        f"expected {replans + 1} perception passes, got {backends[-1].perceptions}"
     )
+    assert client.plan_calls == replans + 1
     assert any("re-planning the task" in line["text"] for line in session.logs())
     assert any("out of re-planning attempts" in line["text"] for line in session.logs())
 
