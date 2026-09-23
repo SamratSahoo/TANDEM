@@ -161,7 +161,7 @@ def shell() -> None:
     pixi = find_pixi()
     theme.info(f"Entering the runtime at {runtime.root}. Type `exit` to leave.")
     subprocess.call(
-        [str(pixi), "--manifest-path", str(runtime.tiptop_dir / "pixi.toml"), "shell"],
+        [str(pixi), "shell", "--manifest-path", str(runtime.tiptop_dir / "pixi.toml")],
         cwd=str(runtime.tiptop_dir),
     )
 
