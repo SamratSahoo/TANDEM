@@ -255,6 +255,13 @@ class PlanResult:
     skeleton_reused: bool = False
     # What the planner wrote for this sub-goal, by role ("plan", "scene", ...).
     artifacts: dict[str, str] = field(default_factory=dict)
+    # The operator sequence the plan runs, one label per operator in execution order, with its
+    # motion-level arguments dropped: ("Pick(bread)", "Place(bread, plate)"), which is the task plan
+    # the paper's figures show for a robot phase. Plain strings, so it is JSON-safe as it stands and
+    # goes into a rollout's record next to the human operators the proposer invented. Provenance
+    # only: nothing in tandem parses it or decides anything by it. Empty when the planner does not
+    # say, which is not the same as a plan with nothing in it.
+    task_plan: tuple[str, ...] = ()
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> PlanResult:
@@ -266,6 +273,7 @@ class PlanResult:
             skeleton=data.get("skeleton"),
             skeleton_reused=bool(data.get("skeleton_reused")),
             artifacts=dict(data.get("artifacts") or {}),
+            task_plan=tuple(str(label) for label in (data.get("task_plan") or ())),
         )
 
 
@@ -377,7 +385,14 @@ class TampBackend(Protocol):
         """Park the arm. Deliberately does not open the gripper — it may be holding something."""
 
     # -- the sub-goal cycle --------------------------------------------------
-    def perceive(self, *, task_hint: str, save_dir: Path, reset_arm: bool = True) -> SceneView:
+    def perceive(
+        self,
+        *,
+        task_hint: str,
+        save_dir: Path,
+        reset_arm: bool = True,
+        open_gripper: bool = False,
+    ) -> SceneView:
         """Look at the workspace and report what is in it.
 
         ``task_hint`` steers DETECTION only, never the goal: the full instruction is what makes a
@@ -386,6 +401,13 @@ class TampBackend(Protocol):
         ``reset_arm`` parks the arm first, which is what an ordinary planner rollout does. Turn it
         OFF for a phase resumed after a hand-off: the arm is where a person left it, quite possibly
         holding something, and driving it home would undo the step they just did.
+
+        ``open_gripper`` opens the gripper before looking, and moves nothing else. It is for the first
+        robot leg after a human phase: nothing about a person driving the arm guarantees the fingers
+        were left open, and a planner that starts every goal from an empty hand (cuTAMP's HandEmpty)
+        would plan its first grasp as though they were. Off by default, and never implied by
+        ``reset_arm``, because opening the hand of an arm that is holding something drops it -- the
+        caller, which knows what the phase before was for, is the one to decide.
         """
 
     def plan(
@@ -394,6 +416,8 @@ class TampBackend(Protocol):
         goal: Sequence[GoalAtom],
         *,
         surfaces: frozenset[str] = frozenset(),
+        movables: frozenset[str] | None = None,
+        return_home: bool = True,
         save_dir: Path,
         reuse_skeleton: Any = None,
     ) -> PlanResult:
@@ -403,6 +427,20 @@ class TampBackend(Protocol):
         object's type decides its geometry: a box that is a surface in the phase that puts a toy
         into it and a movable in the phase that does not would change the world between two phases
         of one task.
+
+        ``movables``, when given, are the only objects the plan may pick up. Every other detected
+        object stays in the world as an obstacle: perceived, avoided, never grasped. None means no
+        restriction, which is an ordinary rollout. A goal that itself moves an object outside the set
+        is not planned with the restriction quietly widened -- the result is ``ok=False``, with the
+        object named, because the phase planner and the backend disagree about what this leg is for.
+
+        ``return_home=False`` ends the plan where its last operation leaves the arm instead of
+        driving it home. Only the leg that ends the task should go home; any other is continued from
+        where it stops, by a person or by the next leg.
+
+        tandem passes ``movables`` only when ``capabilities().supports_movable_restriction`` and
+        ``return_home`` only when ``capabilities().supports_return_home``. A backend declaring
+        neither is never handed either, and may leave both out of its signature.
         """
 
     def execute(
