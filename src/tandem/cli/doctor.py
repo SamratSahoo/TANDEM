@@ -104,6 +104,9 @@ def collect_checks(*, profile_name: str | None = None, probe_hardware: bool = Tr
         )
 
     checks.append(_phase_planning_check(profile))
+    executor_check = _human_executor_check(profile)
+    if executor_check is not None:
+        checks.append(executor_check)
 
     if probe_hardware:
         checks.append(probe.check_zed_sdk())
@@ -270,6 +273,44 @@ def _phase_planning_check(profile) -> probe.Check:
     if profile.hitl.on_robot_phase_failure == "teleop":
         hint = "A phase the planner cannot plan is offered to you as teleop."
     return probe.Check("phase planning", probe.OK, detail, hint, group="profile")
+
+
+def _human_executor_check(profile) -> probe.Check | None:
+    """Whether the human steps of a phase-planned session can be carried out here, and recorded.
+
+    Worth its own row because the answer changes what a session can do, not only whether it starts.
+    While recording, a human step is completed only by a leg of ``hitl.human_executor``: "I did it"
+    alone is refused unless ``hitl.allow_unrecorded_human_phase`` is set. So an executor this machine
+    is not set up for leaves every human step with one answer -- give up -- and the operator would
+    otherwise learn that at the first human phase, with the robot part-way through the task.
+
+    None when phase planning is off: there are no human phases to carry out.
+    """
+    from tandem.executors import base as executors
+
+    if not profile.hitl.enabled:
+        return None
+    name = profile.hitl.human_executor
+    try:
+        info = executors.info(name)
+    except TandemError as exc:
+        # The session refuses to start on exactly this (Session.start describes the executor first).
+        return probe.Check("human executor", probe.FAIL, exc.message, exc.hint or "", group="profile")
+    if info.ready:
+        return probe.Check("human executor", probe.OK, f"{name} · {info.display_name}", group="profile")
+    detail = f"{name} needs setup: {'; '.join(info.unmet)}"
+    if profile.hitl.allow_unrecorded_human_phase:
+        hint = (
+            "Until then a human step is accepted when you say it is done, unrecorded "
+            "(hitl.allow_unrecorded_human_phase). `tandem executors list` shows what each executor needs."
+        )
+    else:
+        hint = (
+            "While recording, a human step is completed only through it, so until then the only answer at "
+            "one is to give up. `tandem executors list` shows what each executor needs; "
+            "hitl.allow_unrecorded_human_phase: true accepts a step done by hand, unrecorded."
+        )
+    return probe.Check("human executor", probe.WARN, detail, hint, group="profile")
 
 
 def doctor(

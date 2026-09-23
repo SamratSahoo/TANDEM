@@ -114,7 +114,9 @@ start collecting.
 is stamped with the phase it carried out, so the merged episode says which stretch of frames was
 which phase. Answering "I did it" without teleoperating would leave that phase with no
 demonstration while the episode looks complete, so while recording it is refused unless you set
-`hitl.allow_unrecorded_human_phase: true`.
+`hitl.allow_unrecorded_human_phase: true`. `tandem executors list` shows what the executor still
+needs on this machine, and `tandem doctor` says so before you start rather than at the first human
+step.
 
 **A phase the planner cannot plan ends the trial, unless you say otherwise.** That is how the
 paper counts it, so it is the default (`hitl.on_robot_phase_failure: abort`). tandem decides who

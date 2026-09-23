@@ -3,14 +3,17 @@
 ``driver.py`` runs under the DROID environment's interpreter. This module does not. It runs in
 tandem's own process and imports nothing beyond the base install. It launches the driver, answers
 the prompts the driver raises over stdin, and follows the driver's events file. That is how the
-session knows when a leg was recorded and how many frames it has.
+teleop executor knows when a leg was recorded and how many frames it has.
 
-A `TeleopChild` is given the session that launched it and reads from it: the scratch directory
-(``_files["session_dir"]``), the trajectory id it stamps the leg with (``_trajectory_id``, falling
-back to ``current.dir``), the profile's trajectories directory and cameras, and the language label
-(``instruction``). It reports back through ``_log``, ``_emit``, ``_pump`` and ``handoff_error``.
-``tests/test_teleop_handoff.py`` drives it against a stub with exactly those attributes. Which phase
-the leg records is not read off the session; whoever launches the child passes it in.
+A `TeleopChild` is given a host and reads from it: the scratch directory (``_files["session_dir"]``),
+the trajectory id it stamps the leg with (``_trajectory_id``, falling back to ``current.dir``), the
+profile's trajectories directory and cameras, and the language label (``instruction``). It reports
+back through ``_log``, ``_emit``, ``_pump`` and ``handoff_error``. The host was once the session; it is
+now ``executors.teleop._ChildHost``, which supplies exactly those attributes from the executor's
+context and one leg, with a scratch directory of its own per leg, so no hand-off reads another's
+events file. ``tests/test_teleop_handoff.py`` drives the child against a stub with the same
+attributes. Which phase the leg records is not read off the host; whoever launches the child passes
+it in.
 """
 
 from __future__ import annotations

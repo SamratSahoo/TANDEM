@@ -981,10 +981,13 @@ class PhaseLoop:
                     f"still expected: {still}"
                 )
                 return
-            attempts_left -= 1
-            attempt += 1
+            # Told before the retry is spent: the count is the goes whoever carries the step out still
+            # has, the one about to start included (retry_message's "attempt(s) left"). Written after
+            # the decrement, the default single retry was offered with no instruction at all.
             missing = self._human_phase.missing
             self.events.log(retry_message(missing, attempts_left, by=cfg.human_executor, by_hand=by_hand))
+            attempts_left -= 1
+            attempt += 1
 
         self._show_human_phase(None)
         if self._plan is not None:

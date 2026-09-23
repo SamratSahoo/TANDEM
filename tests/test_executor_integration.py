@@ -487,12 +487,23 @@ def test_the_retry_line_offers_done_only_where_it_would_be_accepted(rig):
     assert "or say it IS done" in retry_message(["the box is open"], 1, by_hand=True)
     assert "say it IS done" not in retry_message(["the box is open"], 1, by_hand=False)
 
-    # Two retries: the line is written with the retries left AFTER the one about to start, so with a
-    # single retry it has no instruction to give.
-    r = rig(verdicts=(DOES_NOT_HOLD, HOLDS), verify_retries=2)
+    # The single retry most profiles have is offered with its instruction: the line counts the goes
+    # left with the one about to start, not after it (which left the default retry with no line).
+    r = rig(verdicts=(DOES_NOT_HOLD, HOLDS), verify_retries=1)
     r.run()
     (line,) = [text for text in r.sink.lines if text.startswith("The workspace does not look like")]
     assert "Take the arm again and finish it." in line and "say it IS done" not in line
+
+    # And an executor that is told how many goes it has is told them all: two retries, then one.
+    r = rig(
+        verdicts=(DOES_NOT_HOLD, DOES_NOT_HOLD, HOLDS),
+        verify_retries=2,
+        executor=FakeExecutor(segment_source="policy"),
+        executor_name="diffusion-policy",
+    )
+    r.run()
+    lines = [text for text in r.sink.lines if text.startswith("The workspace does not look like")]
+    assert ["(2 attempt(s) left)" in lines[0], "(1 attempt(s) left)" in lines[1]] == [True, True]
 
 
 def test_an_executor_leg_that_recorded_nothing_stands_when_nothing_is_recorded(rig):
