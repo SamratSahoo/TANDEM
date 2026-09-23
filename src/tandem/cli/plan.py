@@ -111,7 +111,7 @@ def plan(
             theme.console().print(f"        [faint]goal: {json.dumps(rendered)}[/faint]")
 
     theme.blank()
-    _print_contract_check(spec, cfg, caps)
+    _print_contract_check(built, cfg, caps)
 
     if spec.invented:
         theme.blank()
@@ -154,7 +154,7 @@ def _print_operator(operator) -> None:
     console.print(f"          [faint]delete effects[/faint] {atoms(operator.delete_effects)}")
 
 
-def _print_contract_check(spec, cfg, caps) -> None:
+def _print_contract_check(built, cfg, caps) -> None:
     """Whether the phases hang together as a plan, as the proposal stage judged it.
 
     An accepted plan has already passed ``check_plan_effects`` inside the repair loop when the
@@ -162,9 +162,16 @@ def _print_contract_check(spec, cfg, caps) -> None:
     than leave the reader to infer it. With it off, the same check is still reported, because
     "would this have been refused?" is the question this command exists to answer before the arm
     moves. A repeated robot move is only ever a warning (see ``contracts.wasted_robot_move``).
+
+    With ``classify_initial`` on, the plan was then held to the starting state the photo was
+    measured to show (``PhasePlan.recheck_plan_effects``). That second check can prove what the
+    first could not -- a precondition no phase establishes and the scene does not already satisfy
+    -- and a session only records it, since the proposer is out of the loop by then. It is printed
+    here because this is the one place it can still be acted on: reword, or set the scene up.
     """
     from tandem.planning import contracts
 
+    spec = built.spec
     broken = contracts.check_plan_effects(spec, caps=caps)
     if broken is None:
         detail = "checked in the repair loop" if cfg.check_plan_effects else "check_plan_effects is off"
@@ -173,6 +180,11 @@ def _print_contract_check(spec, cfg, caps) -> None:
         theme.fail("the phases' contracts do not hang together", broken)
     else:
         theme.warn("the phases' contracts do not hang together (check_plan_effects is off)", broken)
+    if built.plan_effects_rechecked:
+        if built.inconsistency:
+            theme.warn("the plan does not hang together against the scene in the photo", built.inconsistency)
+        else:
+            theme.ok("the plan holds against the scene in the photo", "the starting state was measured")
     wasted = contracts.wasted_robot_move(spec.phases, caps=caps)
     if wasted:
         theme.warn("this plan repeats work", wasted)

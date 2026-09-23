@@ -40,7 +40,7 @@ from tandem.planning.plan import (
 )
 from tandem.planning.proposal import parse_plan_response
 from tandem.planning.structs import HumanOperator, Phase, SceneTypes, TaskSpecification, VLMPredicate
-from tandem.planning.symbols import Atom, Parameter, Predicate
+from tandem.planning.symbols import Atom, Parameter, Predicate, ProposalError
 
 CAPS = registry.capabilities("tiptop")
 CFG = PlanningConfig(enabled=True)
@@ -189,34 +189,9 @@ def _open_close():
     }
 
 
-def _operator(entry, scene_types):
-    def atoms(key):
-        return frozenset(Atom(a["predicate"], tuple(a["args"])) for a in entry[key])
-
-    return HumanOperator(
-        name=entry["name"],
-        args=tuple(entry["args"]),
-        parameters=tuple(Parameter(f"x{i}", scene_types.type_of(a)) for i, a in enumerate(entry["args"])),
-        preconditions=atoms("preconditions"),
-        add_effects=atoms("add_effects"),
-        delete_effects=atoms("delete_effects"),
-    )
-
-
 def parse(response=None, objects=OBJECTS, caps=CAPS):
-    """Parse a reply the way the proposal stage does, with every human phase's operator attached.
-
-    Attached here only when the parser did not build it, so this keeps working once it does.
-    """
-    response = response or PLAN_RESPONSE
-    spec = parse_plan_response(response, "do the thing", objects, TABLE, caps)
-    for i, entry in enumerate(response["phases"]):
-        phase = spec.phases[i]
-        if "operator" in entry and phase.operator is None:
-            spec = spec.replace_phase(
-                i, dataclasses.replace(phase, operator=_operator(entry["operator"], spec.scene_types))
-            )
-    return spec
+    """Parse a reply the way the proposal stage does; the parser builds each human phase's operator."""
+    return parse_plan_response(response or PLAN_RESPONSE, "do the thing", objects, TABLE, caps)
 
 
 def walk(response=None, objects=OBJECTS, *, caps=CAPS, cfg=CFG):
@@ -702,6 +677,31 @@ def test_blank_feedback_is_no_feedback(monkeypatch):
     monkeypatch.setattr(llm, "gemini_client", lambda: client)
     asyncio.run(build_plan(_image(), "x", OBJECTS, TABLE, CFG, CAPS, None, feedback="   "))
     assert "could not be carried out" not in client.prompts[-1]
+
+
+def test_a_robot_phase_nothing_can_achieve_is_still_refused_now_the_repair_loop_checks_it(monkeypatch):
+    # build_plan no longer runs feasibility.check_robot_phases itself: the proposal's parse closure
+    # does (proposal.check_plan), so the model is told why and gets another go. Pinned across that
+    # seam, feedback included, because each side alone would pass with the check in neither place --
+    # and the planner would then be handed a goal no robot operator can reach, and search forever.
+    no_holding = dataclasses.replace(CAPS, achievable_predicates=CAPS.achievable_predicates - {"Holding"})
+    hold_the_toy = {
+        "phases": [
+            {
+                "executor": "robot",
+                "description": "pick up the toy",
+                "atoms": [{"predicate": "Holding", "args": ["blue_toy"]}],
+            }
+        ]
+    }
+    client = FakeGemini(json.dumps(hold_the_toy))
+    monkeypatch.setattr(llm, "gemini_client", lambda: client)
+    reason = "phase 0 could not be planned: no collision-free placement"
+    with pytest.raises(ProposalError, match="This plan cannot be carried out"):
+        asyncio.run(build_plan(_image(), "x", OBJECTS, TABLE, CFG, no_holding, None, feedback=reason))
+    assert client.plan_calls == CFG.max_attempts
+    assert all(reason in prompt for prompt in client.prompts), "the replan section rides every repair"
+    assert "Holding(blue_toy), which no robot operator can achieve" in client.prompts[-1]
 
 
 def _needs_an_unlocked_box():

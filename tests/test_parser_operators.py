@@ -707,3 +707,49 @@ def test_tandem_plan_says_what_the_check_would_have_refused_when_it_is_off(tmp_p
     output = _flat(_run_plan(tmp_path, monkeypatch, [_open_close()], cfg=off))
     assert "the phases' contracts do not hang together (check_plan_effects is off)" in output
     assert "phase 2 ('drop the toy in') (Insert(blue_toy, white_box)) requires IsOpen(white_box)" in output
+
+
+def _needs_an_unlocked_box():
+    """Opening the box needs it unlocked, and no phase unlocks it: fine until the start is measured."""
+    return _plan(
+        new_predicates=[
+            {"name": "IsOpen", "instructions": "the container {0} is open, so its interior is visible"},
+            {"name": "IsUnlocked", "instructions": "the latch on {0} is undone"},
+        ],
+        phases=[
+            {
+                "executor": "human",
+                "description": "open the box",
+                "instructions": "Open the white_box.",
+                "atoms": _atoms(("IsOpen", ["white_box"])),
+                "operator": _op(
+                    "Open",
+                    ["white_box"],
+                    pre=[("IsUnlocked", ["white_box"])],
+                    add=[("IsOpen", ["white_box"])],
+                ),
+            },
+        ],
+    )
+
+
+@pytest.mark.parametrize("unlocked_at_start", [False, True])
+def test_tandem_plan_reports_the_recheck_against_the_measured_scene(tmp_path, monkeypatch, unlocked_at_start):
+    # The repair loop accepted this plan: with the start unmeasured, the box may already be unlocked.
+    # Once `classify_initial` finds it is not, the plan provably cannot run -- and `tandem plan` is
+    # the one place that can still be acted on, so it must say so rather than only log it.
+    from tandem.planning import grounding
+    from tandem.planning.symbols import Atom
+
+    async def classify(image, spec, cfg, caps):
+        return frozenset({Atom("IsUnlocked", ("white_box",))}) if unlocked_at_start else frozenset()
+
+    monkeypatch.setattr(grounding, "classify_initial_state", classify)
+    cfg = PlanningConfig(enabled=True, classify_initial=True)
+    output = _flat(_run_plan(tmp_path, monkeypatch, [_needs_an_unlocked_box()], cfg=cfg))
+    assert "the phases' contracts hang together checked in the repair loop" in output
+    if unlocked_at_start:
+        assert "the plan holds against the scene in the photo" in output
+    else:
+        assert "the plan does not hang together against the scene in the photo" in output
+        assert "IsUnlocked(white_box)" in output
