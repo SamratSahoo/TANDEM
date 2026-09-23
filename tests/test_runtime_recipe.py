@@ -867,16 +867,16 @@ def test_the_web_ui_and_doctor_read_the_same_runtime_the_terminal_does(profile):
 # --- TiPToP's recipe ---------------------------------------------------------------------------------
 
 
-def test_tiptop_pins_the_commits_the_wheel_used_to_carry():
-    """Fetching replaced vendoring without changing the planner: the pins are the commits the wheel's
-    own copy was cut from (its VENDOR.toml), as full hashes. A later item moves them, sidecar checks
-    and all."""
+def test_tiptop_pins_the_user_s_main_branches():
+    """tiptop 1c6daf3 and cuTAMP 3a2e4d0 are the heads of SamratSahoo's main branches, and move
+    together (the recipe says why); cuRobo's main has not moved from 3a90ff4. Full hashes. Moving a
+    pin is a deliberate act that moves the sidecar checks with it (tests/test_tiptop_bump.py)."""
     from tandem.planners.tiptop.factory import INFO, SOURCES
     from tandem.planners.tiptop.recipe import RECIPE
 
     assert {pin.name: pin.commit for pin in RECIPE.pins} == {
-        "tiptop": "4db8f92671b431de4e5a456523dc84b5246401ee",
-        "cuTAMP": "7b0aeaea452f13a4ee73d95f2aacbb3af720ad0f",
+        "tiptop": "1c6daf3f5d1ab822a0787c40ec0ed6b6caa472de",
+        "cuTAMP": "3a2e4d000339f7460f1989bde84d32b328ac92f9",
         "curobo": "3a90ff49eee169d9636b2a679d98457a2592fb52",
     }
     assert SOURCES == RECIPE.pins == INFO.sources, "the catalog names exactly what an install fetches"

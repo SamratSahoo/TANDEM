@@ -33,9 +33,9 @@ TiPToP
   Licensed under the MIT License (see LICENSE in the fetched tree).
   Upstream: https://github.com/SamratSahoo/tiptop
 
-tandem applies two small patches of its own to the fetched TiPToP tree
-(src/tandem/planners/tiptop/patches/): one lets a profile own its camera calibration file, the
-other makes pyrealsense2 an optional dependency. Each patch file says what it changes and why.
+tandem applies one small patch of its own to the fetched TiPToP tree
+(src/tandem/planners/tiptop/patches/): it lets a profile own its camera calibration file. The
+patch file says what it changes and why.
 
 
 What ships inside tandem

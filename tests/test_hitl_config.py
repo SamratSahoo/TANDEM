@@ -184,22 +184,25 @@ def test_an_unknown_verification_policy_is_refused_in_both_places():
         PlanningConfig(on_verification_failure="ignore")
 
 
-@pytest.mark.parametrize("name", ["", " teleop", "teleop\n", "1teleop", "tele op", "../teleop", "pkg.mod:Cls"])
+@pytest.mark.parametrize(
+    "name", ["", " teleop", "teleop\n", "1teleop", "tele op", "../teleop", "pkg.mod:Cls", "ACT", "Teleop"]
+)
 def test_a_human_executor_that_is_not_a_name_is_refused_in_both_places(name):
     # A path or an import string here is somebody configuring the registry by hand, and a stray
     # space is a typo -- all of them would otherwise surface as "no such executor" minutes into a
-    # session, or worse, be stripped and resolve to something else.
+    # session, or worse, be stripped and resolve to something else. Uppercase is refused too: the
+    # rule is a planner's (tandem.core.names), so `ACT` and `act` cannot name two executors.
     with pytest.raises(ValidationError, match="human_executor"):
         Profile.model_validate({"name": "x", "hitl": {"human_executor": name}})
     with pytest.raises(ValueError, match="human_executor must be the name"):
         PlanningConfig(human_executor=name)
 
 
-@pytest.mark.parametrize("name", ["teleop", "diffusion-policy", "act_v2", "ACT"])
+@pytest.mark.parametrize("name", ["teleop", "diffusion-policy", "act_v2", "act2"])
 def test_an_executor_the_registry_knows_is_accepted_whatever_its_spelling(name, monkeypatch):
     # The shape check lets through any name a registry could hold; the registry then decides whether
     # one is installed (tests/test_executors.py covers the refusal and its suggestion).
-    _installed_executors(monkeypatch, "diffusion-policy", "act_v2", "ACT")
+    _installed_executors(monkeypatch, "diffusion-policy", "act_v2", "act2")
     assert HitlSpec(human_executor=name).to_planning_config().human_executor == name
 
 

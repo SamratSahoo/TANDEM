@@ -30,7 +30,15 @@ _yaml.default_flow_style = False
 
 
 def render_tiptop_config(profile: Profile) -> dict:
-    """The dict tiptop's ``tiptop_cfg()`` expects (robot / cameras / perception)."""
+    """The dict tiptop's ``tiptop_cfg()`` expects (robot / cameras / perception).
+
+    The perception knobs a ``tamp:`` block may set (``tamp_keys.PERCEPTION_KEYS``: M2T2's grasp
+    threshold and pass count, the voxel size, the contact threshold) are written where tiptop reads
+    them -- ``perception.m2t2.num_runs`` and ``perception.m2t2.grasp_threshold`` for the M2T2 pair
+    (perception_wrapper.predict_depth_and_grasps) -- overriding the profile's ``perception:`` value
+    where both are set, as tiptop's own override does. Unset, they are left out, so tiptop's own
+    defaults (5 passes, 0.035) apply rather than a copy of them that could go stale.
+    """
     p = profile
     cameras: dict[str, Any] = {"perception": p.cameras.perception}
     for key, cam in p.cameras.configured().items():
@@ -41,7 +49,7 @@ def render_tiptop_config(profile: Profile) -> dict:
             "fps": cam.fps,
         }
 
-    return {
+    rendered = {
         "robot": {
             "type": p.robot.type,
             "dof": p.robot.dof,
@@ -70,6 +78,13 @@ def render_tiptop_config(profile: Profile) -> dict:
             "depth_smoothing": {"num_frames": p.perception.depth_smoothing_frames},
         },
     }
+    for key, path in tamp_keys.PERCEPTION_KEYS.items():
+        if key in p.tamp:
+            node = rendered
+            for part in path[:-1]:
+                node = node.setdefault(part, {})
+            node[path[-1]] = p.tamp[key]
+    return rendered
 
 
 def write_tiptop_config(profile: Profile, dest: Path) -> Path:
@@ -172,6 +187,42 @@ def check_assets(profile: Profile, *, runtime_dir: Path | None = None) -> list[s
     for key in ("blend_pace", "blend_boundary_mode", "blend_flow_steps", "blend_flow_retime_only"):
         if key in tamp and str(tamp.get("blend_mode", "spline")).lower() != "flow":
             problems.append(f"{key} only applies when blend_mode is 'flow'; it is ignored here")
+    if tamp.get("blend_vae_sample_target") and str(tamp.get("blend_mode", "spline")).lower() != "vae":
+        problems.append("blend_vae_sample_target only applies when blend_mode is 'vae'; it is ignored here")
+
+    # The knobs below are each read only behind another one, by the same resolve_* function that
+    # reads the gate -- so set without it, they are accepted, passed on, and change nothing.
+    retiming = bool(tamp.get("vae_retiming")) and bool(tamp.get("vae_manifold_weight"))
+    if tamp.get("vae_retiming") and not retiming:
+        problems.append(
+            "vae_retiming is set but vae_manifold_weight is 0 or unset, so nothing would optimize the "
+            "trajectory clock and the planner ignores vae_retiming"
+        )
+    for key in ("retime_scale", "retime_smooth_weight", "retime_limit_weight"):
+        if key in tamp and not retiming:
+            problems.append(f"{key} only applies when vae_retiming is on; it is ignored here")
+    if retiming and tamp.get("blend_trajectory"):
+        # Not a mistake -- the planner means it -- but it turns a whole blend_* block off, and the
+        # planner's own warning about it lands in the sidecar log, not in front of anyone.
+        problems.append(
+            "vae_retiming gives the VAE cost the trajectory clock, so trajectory blending "
+            "(blend_trajectory and every blend_* key) is switched off for every plan"
+        )
+
+    seeds = int(tamp.get("posture_selection_seeds") or 0)
+    for key in ("posture_grasp_roll", "posture_ref", "posture_pos_tol", "posture_rot_tol"):
+        if key in tamp and seeds <= 1:
+            problems.append(f"{key} only applies when posture_selection_seeds is above 1; it is ignored here")
+    if seeds > 1 and tamp.get("posture_ref"):
+        # cuTAMP loads the prior at its first plan, well after warm-up.
+        path = _resolve_asset(profile, str(tamp["posture_ref"]), "posture_ref", runtime_dir)
+        if not path.is_file():
+            problems.append(f"posture_selection_seeds is set but posture_ref does not exist: {path}")
+
+    if "transit_apex_min_dist" in tamp and not tamp.get("transit_apex_height"):
+        problems.append(
+            "transit_apex_min_dist only applies when transit_apex_height is above 0; it is ignored here"
+        )
 
     missing = profiles.missing_calibration(profile)
     if missing:

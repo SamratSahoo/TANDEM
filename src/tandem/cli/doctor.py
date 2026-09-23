@@ -26,11 +26,12 @@ def collect_checks(*, profile_name: str | None = None, probe_hardware: bool = Tr
     cfg = settings_mod.load()
     checks: list[probe.Check] = [probe.check_python(), probe.check_platform()]
 
-    runtime_check, runtime_ready, runtime_root = _runtime_check(profile_name, cfg)
+    runtime_check, runtime_ready, runtime_root, active = _runtime_check(profile_name, cfg)
     checks.append(probe.check_disk(runtime_root or cfg.resolved_runtime_dir()))
     checks.append(probe.check_pixi())
     checks.append(probe.check_ffmpeg())
     checks.append(runtime_check)
+    checks.extend(_other_planner_checks(active, cfg))
 
     checks.append(probe.check_nvidia_driver())
     checks.append(probe.check_cuda_runtime())
@@ -113,8 +114,9 @@ def collect_checks(*, profile_name: str | None = None, probe_hardware: bool = Tr
     return checks
 
 
-def _runtime_check(profile_name: str | None, cfg) -> tuple[probe.Check, bool, Path | None]:
-    """The runtime of the planner the profile uses: (the check, whether it is ready, where it is)."""
+def _runtime_check(profile_name: str | None, cfg) -> tuple[probe.Check, bool, Path | None, str | None]:
+    """The runtime of the planner the profile uses: (the check, whether it is ready, where it is, the
+    planner's name -- None when there is no telling which planner that is)."""
     from tandem.cli.runtime import planner_runtime
     from tandem.planners.runtime import RecipeRuntime
 
@@ -127,9 +129,15 @@ def _runtime_check(profile_name: str | None, cfg) -> tuple[probe.Check, bool, Pa
             probe.Check("gpu runtime", probe.WARN, "unknown: " + exc.message.split("\n")[0], group="runtime"),
             False,
             None,
+            None,
         )
     if runtime is None:
-        return probe.Check("gpu runtime", probe.OK, f"{planner} is pure Python", group="runtime"), True, None
+        return (
+            probe.Check("gpu runtime", probe.OK, f"{planner} is pure Python", group="runtime"),
+            True,
+            None,
+            planner,
+        )
 
     status = runtime.status()
     root = Path(status.path) if status.path else None
@@ -138,18 +146,72 @@ def _runtime_check(profile_name: str | None, cfg) -> tuple[probe.Check, bool, Pa
         built = runtime.inspect().built_at if isinstance(runtime, RecipeRuntime) else None
         if built:
             detail += f"  · built {built}"
-        return probe.Check("gpu runtime", probe.OK, detail, group="runtime"), True, root
+        return probe.Check("gpu runtime", probe.OK, detail, group="runtime"), True, root, planner
     return (
         probe.Check(
             "gpu runtime",
             probe.WARN,
-            "; ".join(status.problems or ["not built"]),
-            "Run `tandem init` (or `tandem runtime build`). Not needed to visualize trajectories.",
+            f"{planner}: " + "; ".join(status.problems or ["not built"]),
+            f"Run `tandem planners install {planner}` (`tandem init` does too). Not needed to visualize "
+            "trajectories.",
             group="runtime",
         ),
         False,
         root,
+        planner,
     )
+
+
+def _other_planner_checks(active: str | None, cfg) -> list[probe.Check]:
+    """One row per planner the profile does not use: whether this machine has it, and whether it loads.
+
+    None of these stops a session, so none of them fails: a planner that is simply not installed is
+    a note. Two are warnings, because each is something the machine holds that is wrong -- a runtime
+    built from commits its planner no longer pins (25 GB that a session with it would refuse), and an
+    installed plugin that will not load (which ``tandem planners list`` explains).
+    """
+    from tandem.cli import planners as planners_cli
+    from tandem.planners import registry
+
+    entries = registry.catalog()
+    working = {entry.name for entry in entries if entry.ok}
+    checks = []
+    for entry in entries:
+        if entry.name == active and (entry.ok or entry.name not in working):
+            continue  # the row above
+        label = f"planner {entry.name}"
+        if not entry.ok:
+            checks.append(
+                probe.Check(
+                    label,
+                    probe.WARN,
+                    entry.error or "it will not load",
+                    "Reinstall or uninstall the package that provides it; `tandem planners list` shows the rest.",
+                    group="runtime",
+                )
+            )
+            continue
+        state = planners_cli.runtime_state(entry.name, entry.info, cfg)
+        status = state["status"]
+        if status == planners_cli.INSTALLED:
+            checks.append(probe.Check(label, probe.OK, "installed · not used by this profile", group="runtime"))
+        elif status == planners_cli.OUTDATED:
+            checks.append(
+                probe.Check(
+                    label,
+                    probe.WARN,
+                    state["detail"],
+                    f"`tandem planners install {entry.name}` updates it; `tandem planners remove {entry.name}` "
+                    "frees the disk.",
+                    group="runtime",
+                )
+            )
+        elif status == planners_cli.BROKEN:
+            checks.append(probe.Check(label, probe.WARN, state["detail"], group="runtime"))
+        else:
+            what = "pure Python" if status == planners_cli.NO_RUNTIME else "not installed"
+            checks.append(probe.Check(label, probe.SKIP, f"{what} · not used by this profile", group="runtime"))
+    return checks
 
 
 def _phase_planning_check(profile) -> probe.Check:

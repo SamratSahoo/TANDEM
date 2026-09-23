@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "{{dist}}"
+version = "0.1.0"
+# TODO: one line on what the planner is.
+description = "{{title}}: a task and motion planner for tandem"
+readme = "README.md"
+requires-python = ">=3.10"
+# tandem itself, and nothing heavy: this package is imported to LIST planners, on a laptop too. What
+# the planner needs to run (torch, CUDA, a robot SDK) belongs in its runtime, not here.
+dependencies = ["tandem-tamp>={{tandem_version}}"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+# This table is what makes tandem see the planner: once the package is installed, `{{name}}` is a name
+# a profile's `planner.backend` can hold, and `tandem planners list` shows it. Nothing in tandem
+# changes, and nothing in tandem has to know this package exists.
+[project.entry-points."tandem.planners"]
+{{name}} = "{{module}}.planner:{{class_name}}"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# So `pytest` works from a fresh checkout, before the package is installed.
+pythonpath = ["src"]
+
+# tandem's own lint settings, which the generated code is written to.
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]

@@ -550,7 +550,7 @@ class Planner(abc.ABC):
             detail = "\n".join(f"  - {p}" for p in status.problems)
             raise RuntimeNotReady(
                 f"The {self.info.title} runtime is not installed.\n{detail}".rstrip(),
-                hint=f"Run `tandem runtime build --planner {self.info.name}`.",
+                hint=f"Run `tandem planners install {self.info.name}`.",
             )
 
     def warm(self) -> None:

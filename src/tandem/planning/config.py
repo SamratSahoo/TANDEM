@@ -8,8 +8,9 @@ one of these; so does a test, in one line.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
+
+from tandem.core import names
 
 # Planning a task into phases is reasoning, not spatial grounding, so it does NOT reuse the detection
 # model. A detector runs with thinking disabled because it is localising boxes; asking that same
@@ -34,8 +35,9 @@ ON_VERIFICATION_FAILURE_CHOICES = ("exclude", "label")
 # checked here -- whether anything is registered under it is the executor registry's question, and it
 # is the only thing that knows. The profile asks it (HitlSpec._executor_name, like planner.backend), so
 # a misspelt name is refused when the profile loads; a PlanningConfig built in code is checked by the
-# registry when the executor is created, not here, so this module stays free of the registry.
-HUMAN_EXECUTOR_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
+# registry when the executor is created, not here, so this module stays free of the registry. The shape
+# is a planner's too (tandem.core.names): lowercase, so `ACT` and `act` cannot name two executors.
+HUMAN_EXECUTOR_NAME = names.NAME
 
 
 @dataclass(frozen=True)
@@ -180,8 +182,8 @@ class PlanningConfig:
             )
         if not isinstance(self.human_executor, str) or not HUMAN_EXECUTOR_NAME.fullmatch(self.human_executor):
             raise ValueError(
-                "human_executor must be the name of a registered human executor (a letter, then "
-                f"letters, digits, _ or -), got {self.human_executor!r}"
+                f"human_executor must be the name of a registered human executor ({names.RULE}), "
+                f"got {self.human_executor!r}"
             )
         if self.max_attempts < 1:
             raise ValueError(f"max_attempts must be at least 1, got {self.max_attempts}")

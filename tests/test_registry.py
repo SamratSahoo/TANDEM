@@ -244,7 +244,9 @@ def test_an_unknown_planner_is_named_with_its_nearest_neighbour():
     with pytest.raises(TandemError) as excinfo:
         registry.factory("toyy")
     assert excinfo.value.message == "Unknown planner backend 'toyy'."
-    assert excinfo.value.hint == "Did you mean 'toy'?"
+    # The nearest name first, then the listing that shows every planner, broken ones included.
+    assert excinfo.value.hint.startswith("Did you mean 'toy'?")
+    assert "`tandem planners list`" in excinfo.value.hint
 
 
 def test_a_pure_python_planner_has_no_runtime_to_install():
