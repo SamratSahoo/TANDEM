@@ -32,8 +32,9 @@ from __future__ import annotations
 import difflib
 import importlib
 import importlib.metadata
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from tandem.core import names
@@ -43,6 +44,7 @@ from tandem.planners.base import (
     BackendFactory,
     BackendRuntime,
     Capabilities,
+    OptionsView,
     PlannerInfo,
     TampBackend,
 )
@@ -169,6 +171,159 @@ def capabilities(name: str) -> Capabilities:
 def runtime(name: str, settings: Any = None) -> BackendRuntime | None:
     """The planner's runtime on this machine, or None for a planner that is pure Python."""
     return factory(name).runtime(settings)
+
+
+def validate_options(name: str, options: Mapping[str, Any] | None) -> dict[str, Any]:
+    """``planner.options`` as the planner ``name`` reads them: checked, normalised, defaults filled in.
+
+    The planner decides (``options_for``). Raises what it raises -- a ``TandemError`` or a
+    ``ValueError`` naming the key -- and the registry's own error for a planner that will not load.
+    """
+    return options_for(factory(name), options)
+
+
+def options_for(planner: Any, options: Mapping[str, Any] | None) -> dict[str, Any]:
+    """``options`` as the already-loaded factory ``planner`` reads them.
+
+    A factory with a ``validate_options`` hook is asked; one without it takes its options as written,
+    and is left to refuse what it does not read when it builds a backend from them -- the one place a
+    factory written before the hook existed ever looked at them.
+    """
+    raw = dict(options or {})
+    hook = getattr(planner, "validate_options", None)
+    if not callable(hook):
+        return raw
+    checked = hook(raw)
+    if not isinstance(checked, Mapping):
+        title = getattr(getattr(planner, "info", None), "name", None) or type(planner).__name__
+        raise TandemError(
+            f"The {title!r} planner's validate_options returned a {type(checked).__name__}, not the options.",
+            hint="validate_options(options) returns the options as the planner will read them, or raises.",
+        )
+    return dict(checked)
+
+
+# --------------------------------------------------------------------------- the optional hooks
+#
+# What tandem asks a planner beyond building its backend: how to show its options, what `tandem doctor`
+# should check for it, how to replay a leg it recorded, how to import a profile from its older
+# configuration. Each is asked through here, by name, so no command has to know which planner it is
+# talking to -- and each has a default for a factory that does not answer it (see BackendFactory).
+
+
+def describe_options(name: str, profile: Any, *, settings: Any = None) -> OptionsView:
+    """``profile``'s ``planner.options`` as the planner ``name`` describes them to a person."""
+    planner = factory(name)
+    hook = getattr(planner, "describe_options", None)
+    options = dict(getattr(getattr(profile, "planner", None), "options", None) or {})
+    if not callable(hook):
+        return OptionsView.generic(options, getattr(planner, "OPTIONS", None))
+    view = hook(profile, settings=settings)
+    if not isinstance(view, OptionsView):
+        raise TandemError(
+            f"The {name!r} planner's describe_options returned a {type(view).__name__}, not an OptionsView.",
+            hint="describe_options(profile, *, settings=None) returns a tandem.planners.base.OptionsView.",
+        )
+    return view
+
+
+def doctor_checks(name: str, profile: Any, *, settings: Any = None, probe_hardware: bool = True) -> list:
+    """What `tandem doctor` checks for the planner ``name``: a list of ``tandem.core.probe.Check``.
+
+    ``profile`` is None when there is no profile to check against yet (`tandem init`'s preflight):
+    the planner then checks the machine only. Never raises. doctor is what somebody runs because
+    something is wrong, so a planner whose own checks fail is one FAIL row naming it, and every other
+    row still shows.
+    """
+    from tandem.core import probe
+
+    label = f"planner {name}"
+    try:
+        planner = factory(name)
+    except TandemError as exc:
+        return [probe.Check(label, probe.FAIL, exc.message, exc.hint or "", group="runtime")]
+    hook = getattr(planner, "doctor_checks", None)
+    if not callable(hook):
+        return []
+    try:
+        checks = list(hook(profile, settings=settings, probe_hardware=probe_hardware))
+    except Exception as exc:
+        message = exc.message if isinstance(exc, TandemError) else f"{type(exc).__name__}: {exc}"
+        return [
+            probe.Check(
+                label,
+                probe.FAIL,
+                f"its doctor checks raised: {message}",
+                "That is a bug in the planner, not a finding about this machine.",
+                group="runtime",
+            )
+        ]
+    bad = [type(check).__name__ for check in checks if not isinstance(check, probe.Check)]
+    if bad:
+        return [
+            probe.Check(
+                label,
+                probe.FAIL,
+                f"its doctor checks returned {', '.join(sorted(set(bad)))} rather than tandem.core.probe.Check",
+                group="runtime",
+            )
+        ]
+    return checks
+
+
+def replay(name: str, rollout_dir: Any, *, settings: Any = None) -> None:
+    """Open a leg the planner ``name`` recorded in that planner's own viewer (`tandem traj open`)."""
+    planner = factory(name)
+    hook = getattr(planner, "replay", None)
+    if not callable(hook):
+        raise TandemError(
+            f"The {planner.info.title} planner has no viewer to replay a trajectory in.",
+            hint="`tandem ui` shows every trajectory's cameras and robot state, whichever planner recorded it.",
+        )
+    hook(rollout_dir, settings=settings)
+
+
+def importer(name: str) -> Any:
+    """The planner ``name``'s ``ProfileImporter``, or None when it has no older configuration to import."""
+    return getattr(factory(name), "importer", None)
+
+
+def tools_dir(name: str, settings: Any = None) -> Path | None:
+    """The bin directory of the planner ``name``'s built environment, or None when it has none.
+
+    Where a leg's own recorder put its tools -- the ffmpeg that wrote the clips a merge joins. Never
+    raises: a planner that cannot be loaded, or has no environment, just means PATH's tools.
+    """
+    try:
+        rt = runtime(name, settings)
+    except Exception:
+        return None
+    found = getattr(rt, "bin_dir", None) if rt is not None else None
+    return Path(found) if found is not None else None
+
+
+def require_runtime(name: str, settings: Any = None) -> None:
+    """Raise ``RuntimeNotReady`` when the planner ``name``'s runtime is not installed; a pure-Python one passes.
+
+    For a command that wants to fail before it prints anything; a session checks the same thing again
+    through its backend's ``require_ready``.
+    """
+    from tandem.core.errors import RuntimeNotReady
+
+    rt = runtime(name, settings)
+    if rt is None:
+        return
+    check = getattr(rt, "require_ready", None)
+    if callable(check):
+        check()
+        return
+    status = rt.status()
+    if not status.installed:
+        detail = "".join(f"\n  · {problem}" for problem in status.problems)
+        raise RuntimeNotReady(
+            f"The {info(name).title} runtime is not installed.{detail}",
+            hint=f"Run `tandem planners install {name}`.",
+        )
 
 
 def create(name: str, ctx: BackendContext) -> TampBackend:

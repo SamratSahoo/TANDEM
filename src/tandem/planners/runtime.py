@@ -808,6 +808,12 @@ class RecipeRuntime:
             )
         return path
 
+    @property
+    def bin_dir(self) -> Path | None:
+        """The built environment's bin directory -- its own ffmpeg, say -- or None before it is built."""
+        python = self._env_python()
+        return python.parent if python is not None else None
+
     def _env_python(self) -> Path | None:
         """The environment's interpreter, in its home -- or where a runtime built before the environment
         had a home keeps it, inside the manifest's tree. That runtime works as it stands, so it counts

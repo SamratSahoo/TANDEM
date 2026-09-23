@@ -565,6 +565,34 @@ class PlannerConformance:
         finally:
             backend.close()
 
+    def test_its_options_check_accepts_what_it_returns(self) -> None:
+        # A profile stores what validate_options returned and validates it again every time it is
+        # read, so a check that refuses (or changes) its own output makes a profile unloadable the
+        # first time it is saved.
+        from tandem.planners.registry import options_for
+
+        factory = self.factory()
+        checked = options_for(factory, self.options)
+        again = options_for(factory, checked)
+        if again != checked:
+            _raise(
+                "its validate_options",
+                [f"given its own output {checked!r} it returned {again!r}; it must accept it unchanged"],
+            )
+        json.dumps(checked, default=str)
+
+    def test_its_doctor_checks_are_doctor_rows(self) -> None:
+        # With no profile, as `tandem init` asks before one exists, and touching no hardware.
+        from tandem.core import probe
+
+        hook = getattr(self.factory(), "doctor_checks", None)
+        if not callable(hook):
+            _skip(f"{planner_title(self.factory())} adds nothing to `tandem doctor`")
+        rows = hook(None, settings=None, probe_hardware=False)
+        bad = [type(row).__name__ for row in rows if not isinstance(row, probe.Check)]
+        if bad:
+            _raise("its doctor_checks", [f"returned {', '.join(sorted(set(bad)))}, not tandem.core.probe.Check"])
+
     def test_its_sidecar_can_run_without_tandem(self) -> None:
         from tandem.planners.sidecar import SidecarPlanner
 

@@ -21,6 +21,7 @@ tandem-tamp`` on a laptop. A backend that needs torch imports it behind its own 
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -643,12 +644,96 @@ class BackendRuntime(Protocol):
         """Delete the runtime. Refuses, loudly, anything that does not look like one."""
 
 
+@dataclass(frozen=True)
+class OptionsSection:
+    """One titled group of a planner's settings, as `tandem profile show` and the web editor list them."""
+
+    title: str
+    rows: tuple[tuple[str, str], ...] = ()
+    subtitle: str = ""
+
+    def to_dict(self) -> dict:
+        return {"title": self.title, "subtitle": self.subtitle, "rows": [list(row) for row in self.rows]}
+
+
+@dataclass(frozen=True)
+class OptionsView:
+    """How a planner describes a profile's ``planner.options`` to a person. JSON-safe by construction.
+
+    A profile page, `tandem profile show` and a session header show every planner's settings through
+    this, so none of them knows any planner's schema -- a robot's address, a TAMP override -- and a
+    planner written tomorrow is shown the day it is registered.
+    """
+
+    # One line: the setup at a glance, for a profile card or a session header.
+    summary: str = ""
+    sections: tuple[OptionsSection, ...] = ()
+    # What the planner will actually be handed from these options, resolved (a relative path made
+    # absolute): the answer to "did my setting apply?". JSON-safe.
+    receives: Mapping[str, Any] = field(default_factory=dict)
+    # How it is handed over, for the heading above ``receives``.
+    receives_note: str = ""
+    # Problems these settings have that would otherwise surface minutes into a session.
+    warnings: tuple[str, ...] = ()
+
+    @classmethod
+    def generic(cls, options: Mapping[str, Any], descriptions: Mapping[str, str] | None = None) -> OptionsView:
+        """The view of a planner that does not describe its own: its options, one row each, as they are."""
+        rows = tuple((str(key), _shown(value)) for key, value in options.items())
+        unset = [key for key in (descriptions or {}) if key not in options]
+        subtitle = "none set" if not rows else ""
+        if unset:
+            subtitle = (subtitle + "; " if subtitle else "") + "also reads " + ", ".join(unset)
+        return cls(
+            summary=", ".join(f"{key}={_shown(value)}" for key, value in options.items())[:120],
+            sections=(OptionsSection("options", rows, subtitle),),
+            receives=dict(options),
+            receives_note="planner.options, as the profile sets them",
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "summary": self.summary,
+            "sections": [section.to_dict() for section in self.sections],
+            "receives": dict(self.receives),
+            "receives_note": self.receives_note,
+            "warnings": list(self.warnings),
+        }
+
+
+def _shown(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(v) for v in value)
+    if isinstance(value, Mapping):
+        return json.dumps(value, default=str)
+    return str(value)
+
+
 @runtime_checkable
 class BackendFactory(Protocol):
     """How the registry builds a planner, and what a catalog of planners reads about it.
 
     Register one under a name with ``tandem.planners.registry.register_backend``, or from a package
     through the ``tandem.planners`` entry-point group, and a profile can name it.
+
+    Beyond the four members below, a factory MAY offer any of these. Each has a default in
+    ``tandem.planners.registry`` for a factory that does not, and ``tandem.planners.Planner`` supplies
+    every one, so a planner written with the SDK overrides only what it has something to say about:
+
+    - ``validate_options(options) -> dict``: ``planner.options`` checked and normalised, called when
+      a profile naming the planner loads. Default: taken as written.
+    - ``describe_options(profile, *, settings=None) -> OptionsView``: those options for a person.
+      Default: ``OptionsView.generic``.
+    - ``doctor_checks(profile, *, settings=None, probe_hardware=True) -> list[tandem.core.probe.Check]``:
+      what `tandem doctor` (and, with ``profile=None``, `tandem init`'s preflight) should check for this
+      planner -- a GPU, a server it calls, its hardware. Default: nothing beyond its runtime, which
+      doctor checks for every planner.
+    - ``replay(rollout_dir, *, settings=None) -> None``: open a recorded leg in the planner's own
+      viewer (`tandem traj open`). Default: refused, saying the planner has none.
+    - ``importer``: a ``ProfileImporter`` building a profile from the planner's own older
+      configuration (`tandem profile create --import-from`). Default: None.
     """
 
     info: PlannerInfo
@@ -666,6 +751,27 @@ class BackendFactory(Protocol):
 
     def runtime(self, settings: Any = None) -> BackendRuntime | None:
         """This planner's runtime on this machine, or None when it is pure Python and has none."""
+
+
+class ProfileImporter(Protocol):
+    """Builds a profile from a planner's own configuration elsewhere -- a checkout of the system it came from.
+
+    What `tandem profile create --import-from` and `tandem init` run, through the named planner's
+    factory, so neither has to know what that other system's files look like.
+    """
+
+    #: What it imports from, for a help line: "a hitl-tamp-vla checkout".
+    source: str
+
+    def find(self, near: Path) -> Path | None:
+        """A source at or above ``near`` worth suggesting, or None. Only a suggestion: nothing is read."""
+
+    def configs(self, source: Path) -> list[Path]:
+        """Task configurations inside ``source`` a person may pick one of, for the task and its settings."""
+
+    def build(self, name: str, *, source: Path | None = None, config: Path | None = None) -> tuple[Any, dict, list[str]]:
+        """``(profile, calibration, notes)``: a ``Profile`` named ``name``, extrinsics keyed by camera
+        serial, and one line for each thing a person should know about what was and was not imported."""
 
 
 # Verbs a hosted backend answers, and the only strings that cross the wire. Kept here so the one
