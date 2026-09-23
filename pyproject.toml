@@ -56,6 +56,13 @@ Issues = "https://github.com/SamratSahoo/tandem/issues"
 [project.scripts]
 tandem = "tandem.cli.app:main"
 
+# Planners a profile's `planner.backend` can name. A planner in its own package registers here the
+# same way, under its own name, and tandem finds it without being changed (tandem.planners.registry).
+# TiPToP also ships built in; this entry is the same factory, and says so to anything reading the
+# group rather than tandem's own table.
+[project.entry-points."tandem.planners"]
+tiptop = "tandem.planners.tiptop:FACTORY"
+
 # Who carries out a human phase (hitl.human_executor). tandem registers its own in code as well, so an
 # install whose metadata predates this table still finds it; a package that ships another executor
 # declares it the same way, pointing at an ExecutorFactory. See tandem/executors/base.py.

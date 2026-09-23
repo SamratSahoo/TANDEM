@@ -237,14 +237,19 @@ class Session:
     # ---- lifecycle ---------------------------------------------------------
 
     def start(self) -> Session:
-        """Preflight, build the planner backend, and hand the session to its own thread."""
-        self.runtime.require_ready()
+        """Preflight, build the planner backend, and hand the session to its own thread.
+
+        The planner's own preflight -- whether its runtime is built, whether its assets and
+        calibration are in place -- is the planner's, run by its factory and its ``require_ready``.
+        The session checks only what it needs itself whichever planner is named.
+        """
         if not secrets.gemini_api_key():
             raise TandemError(
                 "No Gemini API key is set, and perception needs one every rollout.",
                 hint="Run `tandem config set-gemini-key`.",
             )
 
+        # The teleop legs record from these as well, so they are the session's to insist on.
         if not self.profile.cameras.configured():
             raise TandemError(
                 f"Profile {self.profile.name!r} has no cameras configured, so nothing can be "
@@ -253,44 +258,61 @@ class Session:
                 "`tandem profile create <name> --import-from <checkout>`.",
             )
 
-        problems = render.check_assets(self.profile, runtime_dir=self.runtime.root)
-        fatal = [p for p in problems if p.startswith("no camera extrinsics")]
-        if fatal:
-            raise TandemError(
-                "\n".join(fatal),
-                hint="Extrinsics are keyed by camera serial; add them before collecting.",
-            )
-        for problem in problems:
-            self._log("tandem", f"warning: {problem}")
-
-        self._files = render.prepare_session_files(self.profile, self.id, runtime_dir=self.runtime.root)
+        self._files = self._session_files()
         self._backend = self._build_backend()
-        self._backend.require_ready()
+        try:
+            self._backend.require_ready()
+        except BaseException:
+            # Nothing is warmed yet, but a backend is allowed to have taken something in create(),
+            # and a session that never starts will never reach _shutdown to give it back.
+            backend, self._backend = self._backend, None
+            try:
+                backend.close()
+            except Exception as exc:
+                self._log("tandem", f"could not close the planner cleanly: {exc}")
+            raise
 
         self._set_state(State.WARMING)
         self._worker = threading.Thread(target=self._run, name=f"session:{self.id}", daemon=True)
         self._worker.start()
         return self
 
-    def _build_backend(self):
-        """The planner this profile names, ready to be warmed."""
-        from tandem.planners import registry
+    def _session_files(self) -> dict:
+        """The session's scratch directory, and its events file, created before anything writes."""
+        session_dir = paths.session_scratch_dir() / self.profile.name / self.id
+        session_dir.mkdir(parents=True, exist_ok=True)
+        events_file = session_dir / "events.jsonl"
+        # Pre-created, so a tailer can attach before the first event is written.
+        events_file.touch()
+        return {"session_dir": session_dir, "events_file": events_file}
 
-        env = render.render_env(
-            self.profile,
-            events_file=self._files["events_file"],
-            task=self.task,
-            runtime_dir=self.runtime.root,
-        )
-        backend_class = registry.backend_class(self.profile.planner.backend)
-        return backend_class(
-            self.runtime,
-            env=env,
-            output_dir=self.profile.trajectories_dir(),
-            execute=self.execute,
-            record=self.record,
-            cost_overrides_file=self._files.get("overrides_file"),
-            on_log=self._log,
+    def _build_backend(self):
+        """The planner this profile names, built by its factory and ready to be warmed.
+
+        Every planner is built the same way, from the same context. What any one of them needs set
+        up first -- a runtime, rendered config, environment variables -- is its factory's business,
+        which is what lets a planner the session has never heard of be named in a profile.
+        """
+        from tandem.planners import registry
+        from tandem.planners.base import BackendContext
+
+        spec = self.profile.planner
+        return registry.create(
+            spec.backend,
+            BackendContext(
+                profile=self.profile,
+                session_dir=self._files["session_dir"],
+                output_dir=self.profile.trajectories_dir(),
+                execute=self.execute,
+                record=self.record,
+                on_log=self._log,
+                options=dict(spec.options),
+                settings=settings_mod.load(),
+                session_id=self.id,
+                task=self.task,
+                events_file=self._files["events_file"],
+                runtime_dir=self.runtime.root,
+            ),
         )
 
     # ---- the session loop --------------------------------------------------

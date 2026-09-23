@@ -459,6 +459,210 @@ class TampBackend(Protocol):
         """
 
 
+# --------------------------------------------------------------------------- building one, and the catalog
+#
+# A backend is never constructed by name-specific code in tandem. The registry maps a planner's name
+# to a FACTORY, and the factory is the only thing that knows how its backend is put together -- which
+# runtime it runs in, which environment variables it reads, which files it wants written first. The
+# session hands every factory the same BackendContext and gets a TampBackend back. That one seam is
+# what lets a planner tandem has never heard of be installed as a package and named in a profile.
+#
+# The same factory is also what a catalog of planners reads: what each one is (PlannerInfo), what it
+# can be asked for (Capabilities), and what it needs installed before it can run (BackendRuntime).
+# All three are answerable without building the backend, and without the heavy environment.
+
+
+@dataclass(frozen=True)
+class SourcePin:
+    """One source tree a planner's runtime is built from, pinned to an exact commit.
+
+    A commit rather than a branch or a tag: a dataset has to be traceable to the planner that
+    produced it, and "main" names a different planner every week.
+    """
+
+    name: str
+    url: str
+    commit: str
+
+    def short(self) -> str:
+        return self.commit[:7]
+
+    def to_dict(self) -> dict:
+        return {"name": self.name, "url": self.url, "commit": self.commit}
+
+
+@dataclass(frozen=True)
+class PlannerInfo:
+    """What a catalog says about a planner before any of it is installed.
+
+    Static and cheap by contract: a listing of every planner reads this for each of them, on a
+    laptop, and must not import a solver or touch the network to do it.
+    """
+
+    # The name a profile's ``planner.backend`` uses. The registry refuses a factory whose info names
+    # a different planner from the one it was registered as, so the two can never disagree.
+    name: str
+    display_name: str = ""
+    # One sentence: what this planner does and what it drives.
+    summary: str = ""
+    homepage: str = ""
+    # What the machine needs before this planner can run, one human-readable line each ("an NVIDIA
+    # GPU with CUDA 12 or newer", "a Franka FR3"). Shown, never checked -- checking is the runtime's
+    # status() and ``tandem doctor``.
+    requires: tuple[str, ...] = ()
+    # The sources an install builds the runtime from. Empty for a planner that is pure Python and
+    # installs with pip like any other package.
+    sources: tuple[SourcePin, ...] = ()
+
+    @property
+    def title(self) -> str:
+        return self.display_name or self.name
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "display_name": self.title,
+            "summary": self.summary,
+            "homepage": self.homepage,
+            "requires": list(self.requires),
+            "sources": [pin.to_dict() for pin in self.sources],
+        }
+
+
+@dataclass(frozen=True)
+class BackendContext:
+    """Everything a session hands a factory to build its backend.
+
+    Deliberately planner-neutral. Nothing here is TipTop's, and a field a backend has no use for is
+    simply ignored by it; what one backend needs that no other does belongs in ``options``, which is
+    the profile's ``planner.options`` block and is the backend's own to define and validate.
+    """
+
+    # The profile the session runs under (``tandem.core.profiles.Profile``; typed loosely so this
+    # module keeps importing nothing but the standard library).
+    profile: Any
+    # This session's scratch directory. The backend may write whatever it needs to start here.
+    session_dir: Path
+    # Where finished legs are filed: the profile's trajectories directory.
+    output_dir: Path
+    execute: bool = True
+    record: bool = True
+    # (stream, text) -> None. The session's log, which is what an operator sees.
+    on_log: Callable[[str, str], None] | None = None
+    # The profile's ``planner.options``: per-backend settings, verbatim. A backend must refuse a key
+    # it does not read rather than ignore it -- an option that silently does nothing is a setting
+    # the operator believes is in force and is not.
+    options: Mapping[str, Any] = field(default_factory=dict)
+    # tandem's machine settings (``tandem.core.settings.Settings``), or None for the saved ones.
+    settings: Any = None
+    session_id: str = ""
+    # The task the session starts on. Later tasks reach the backend through ``perceive(task_hint=)``.
+    task: str = ""
+    # The session's append-only events file, for a backend that writes its own events there too.
+    events_file: Path | None = None
+    # Where the caller has already located this planner's runtime, if it has. None means the factory
+    # resolves its own from ``settings``. A backend with no runtime ignores it.
+    runtime_dir: Path | None = None
+
+    def log(self, text: str, *, stream: str = "tandem") -> None:
+        if self.on_log is not None:
+            self.on_log(stream, text)
+
+
+@dataclass(frozen=True)
+class RuntimeStatus:
+    """Whether a planner's runtime is installed, and what it was built from.
+
+    ``installed`` means ready to run, not merely present: a runtime whose sources are on disk but
+    whose kernels never compiled is not installed, and ``problems`` says why.
+    """
+
+    installed: bool = False
+    # Where the runtime lives, as a string so the status is JSON-safe as it stands.
+    path: str | None = None
+    # The sources the INSTALLED runtime was built from, which is not necessarily what the planner
+    # currently pins (see ``mismatched``). Empty when it does not say.
+    pins: tuple[SourcePin, ...] = ()
+    # For a runtime identified by a version rather than by commits.
+    version: str | None = None
+    # One line of what is and is not there, for a listing.
+    detail: str = ""
+    problems: tuple[str, ...] = ()
+
+    def mismatched(self, wanted: Sequence[SourcePin]) -> tuple[str, ...]:
+        """Names of the pinned sources this runtime was NOT built at.
+
+        A source the installed runtime does not record at all counts as mismatched: a runtime that
+        cannot say what it was built from cannot be said to match anything.
+        """
+        have = {pin.name: pin.commit for pin in self.pins}
+        return tuple(pin.name for pin in wanted if have.get(pin.name) != pin.commit)
+
+    def to_dict(self) -> dict:
+        return {
+            "installed": self.installed,
+            "path": self.path,
+            "pins": [pin.to_dict() for pin in self.pins],
+            "version": self.version,
+            "detail": self.detail,
+            "problems": list(self.problems),
+        }
+
+
+@runtime_checkable
+class BackendRuntime(Protocol):
+    """The heavy environment a planner runs in, as something that can be inspected and installed.
+
+    A planner that is pure Python has none: its factory's ``runtime()`` returns None, and installing
+    it is ``pip install``.
+    """
+
+    def status(self) -> RuntimeStatus:
+        """What is installed. Cheap -- a few stat calls, never a build, never the network."""
+
+    def install(
+        self,
+        *,
+        on_progress: Callable[[str], None] | None = None,
+        sources_dir: Path | None = None,
+        force: bool = False,
+    ) -> None:
+        """Build the runtime, or repair it. Idempotent: a step already done is skipped.
+
+        ``on_progress`` receives one line at a time, as the build prints them. ``sources_dir``
+        overrides where the sources come from -- a directory of checkouts, for a machine with no
+        network or for a planner under development. ``force`` redoes every step.
+        """
+
+    def uninstall(self) -> None:
+        """Delete the runtime. Refuses, loudly, anything that does not look like one."""
+
+
+@runtime_checkable
+class BackendFactory(Protocol):
+    """How the registry builds a planner, and what a catalog of planners reads about it.
+
+    Register one under a name with ``tandem.planners.registry.register_backend``, or from a package
+    through the ``tandem.planners`` entry-point group, and a profile can name it.
+    """
+
+    info: PlannerInfo
+
+    def capabilities(self) -> Capabilities:
+        """The declaration, with nothing built and nothing heavy imported."""
+
+    def create(self, ctx: BackendContext) -> TampBackend:
+        """Build the backend a session will drive. Not warmed: the session calls ``warm()`` itself.
+
+        Everything this planner needs set up before it can be warmed happens here -- its runtime
+        located, its config rendered, its own preflight checks run. A problem it can already see is
+        raised here, loudly, before the session owns anything.
+        """
+
+    def runtime(self, settings: Any = None) -> BackendRuntime | None:
+        """This planner's runtime on this machine, or None when it is pure Python and has none."""
+
+
 # Verbs a hosted backend answers, and the only strings that cross the wire. Kept here so the one
 # canonical list lives beside the protocol it mirrors; `tandem/planners/tiptop/sidecar.py` repeats
 # them because it must not import tandem, and a test pins the two together.
