@@ -102,4 +102,24 @@ CAPABILITIES = Capabilities(
     # Upstream cuTAMP has no reuse_plan_skeleton and never did; the vendored tree's copy was a local
     # commit that was never pushed. Every leg pays a fresh symbolic search.
     supports_skeleton_reuse=False,
+    # Empty for now: the paragraphs of the evaluated prompt that spell out what On means for cuTAMP
+    # arrive together with that prompt in tandem.planning.prompts. Empty, every slot renders its
+    # generic paragraph.
+    prompt_fragments={},
+    # An object rests on one thing at a time. cuTAMP's Place deletes no On atom -- its initial state
+    # has none to delete -- but in the world the toy is no longer where it was, and the contract check
+    # reasons about the world across legs, not about one leg's plan.
+    exclusive_arguments={"On": 0},
+    # The object placed or held is the one that moves; the surface it lands on does not.
+    moved_arguments={"On": 0, "Holding": 0},
+    # The two cuTAMP operators a pick-and-place goal is achieved with, with their motion-level
+    # parameters (conf, traj, grasp) dropped. MoveFree/MoveHolding are the motion between them, and
+    # Push/PushStick serve goals create_tamp_environment never builds.
+    robot_operators=("Pick(?obj: movable)", "Place(?obj: movable, ?surface: surface)"),
+    # Both can be honoured in the sidecar without touching tiptop: `movables` by rebuilding cuTAMP's
+    # TAMPEnvironment with every other object demoted to a static, `return_home=False` by trimming
+    # the plan's trailing GoToInitial (tiptop.goal_clearing.drop_return_to_initial). Neither needs
+    # a fork.
+    supports_movable_restriction=True,
+    supports_return_home=True,
 )

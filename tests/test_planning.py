@@ -707,7 +707,7 @@ def test_a_proposal_that_never_validates_raises_the_last_reason():
 
 def test_config_defaults_to_off_and_rejects_a_bad_failure_policy():
     assert PlanningConfig().enabled is False
-    assert PlanningConfig(enabled=True).on_robot_phase_failure == "teleop"
+    assert PlanningConfig(enabled=True).on_robot_phase_failure == "abort"
     with pytest.raises(ValueError, match="on_robot_phase_failure must be one of"):
         PlanningConfig(on_robot_phase_failure="panic")
     with pytest.raises(ValueError, match="max_attempts must be at least 1"):
@@ -724,7 +724,7 @@ def test_the_profile_is_the_definition_of_these_settings():
 
     resolved = HitlSpec(enabled=True, verify_retries=2).to_planning_config()
     assert resolved.enabled and resolved.verify_retries == 2
-    assert resolved.on_robot_phase_failure == "teleop"
+    assert resolved.on_robot_phase_failure == "abort"
     with pytest.raises(ValidationError, match="enable"):
         HitlSpec(enable=True)
     with pytest.raises(ValidationError, match="on_robot_phase_failure"):

@@ -298,6 +298,29 @@ class HitlSpec(BaseModel):
     # Treat a failed verification as a rollout failure. False records the verdict and carries
     # on, which is what you want while calibrating the classifier prompts.
     verify_enforced: bool = True
+    # What becomes of a trial whose human phase still fails its check once the retries are spent.
+    # `exclude` is the paper's rule: filed under failure/ with `excluded: true`, verdicts and raw
+    # legs kept, and no label prompt -- a check the operator can overrule by answering "success" is
+    # not a filter on the dataset. `label` asks the operator anyway, for calibrating the classifier.
+    on_verification_failure: str = "exclude"
+    # Check the last phase too when it is a human one. False leaves it to the operator's label, as
+    # the reference implementation did; the paper checks every human phase.
+    verify_final_phase: bool = True
+    # Which halves of each operator's contract a camera is asked about. Each costs a model call per
+    # atom with the arm parked, so only the one nothing else can answer is on: a human phase's
+    # effects are the only evidence it happened. Its preconditions are already proved symbolically
+    # by check_plan_effects (and the paper ran with them off); a robot leg's are a guard against a
+    # stale belief; a robot leg's effects are something the arm reports better than a camera sees.
+    check_human_effects: bool = True
+    check_human_preconditions: bool = False
+    check_tamp_preconditions: bool = False
+    check_tamp_effects: bool = False
+    # Stop at an unmet precondition. Off: one classifier call must not cost a demonstration, so the
+    # verdict is recorded and the phase goes ahead.
+    precondition_enforced: bool = False
+    # Check the declared operators against each other before the arm moves, and send a plan that
+    # deletes what a later phase needs back to the model to repair. Symbolic, so it costs nothing.
+    check_plan_effects: bool = True
     # Write every image sent to the VLM and a rendered PNG of the reply into vlm/ beside the
     # rollout. When a run goes wrong the question is always "what did the model see, and what
     # did it say", and that is unanswerable afterwards without this.
@@ -305,12 +328,25 @@ class HitlSpec(BaseModel):
     # SQLite cache for PROPOSAL responses only. Worth setting while iterating on prompts;
     # never applied to grounding or verification.
     cache_path: str | None = None
-    # What happens when the planner cannot plan a robot phase. `teleop` describes the sub-goal to
-    # the operator and lets them do it by hand, checked exactly as any other human phase; `abort`
-    # ends the attempt; `replan` feeds the failure back to the proposer. `teleop` is the option the
-    # old design could not express at all -- the executor split was decided at proposal time inside
-    # the planner's process, so a phase it turned out not to be able to plan could only end the run.
-    on_robot_phase_failure: str = "teleop"
+    # What happens when the planner cannot plan a robot phase. `abort` ends the trial as a failure;
+    # `teleop` describes the sub-goal to the operator and lets them do it by hand, checked exactly as
+    # any other human phase; `replan` feeds the failure back to the proposer. `abort` is the default
+    # because the paper counts a TAMP failure as a trial failure: a teleop fallback turns a robot
+    # phase into a human one, which inflates the human effort a dataset cost and credits the method
+    # with trials it did not complete. A leg that was planned but failed to EXECUTE always ends the
+    # trial; there is no setting for that.
+    on_robot_phase_failure: str = "abort"
+    # Plan consecutive robot phases as one goal where that is sound: one continuous motion, and no
+    # re-perception in the middle for labels to drift across. False re-perceives before every one.
+    conjoin_robot_phases: bool = True
+    # Who carries out a human phase, by registered name. "teleop" -- a person driving the arm -- is
+    # the only one that ships. Only the shape of the name is checked here; whether it is registered
+    # is the executor registry's question, since a third-party executor is installed per machine.
+    human_executor: str = "teleop"
+    # Accept "done" for a human phase that was never teleoperated, while recording (with recording
+    # off it is always accepted). The episode then lacks the one demonstration the trial exists to
+    # capture, while looking complete.
+    allow_unrecorded_human_phase: bool = False
     # Which camera the verification frame comes from. Third-person by default: after a hand-off the
     # arm is wherever the operator left it, so a wrist view points nowhere useful.
     verification_camera: str = "external"
@@ -339,6 +375,26 @@ class HitlSpec(BaseModel):
 
         if v not in ON_FAILURE_CHOICES:
             raise ValueError(f"must be one of {', '.join(ON_FAILURE_CHOICES)}")
+        return v
+
+    @field_validator("on_verification_failure")
+    @classmethod
+    def _known_verification_policy(cls, v: str) -> str:
+        from tandem.planning.config import ON_VERIFICATION_FAILURE_CHOICES
+
+        if v not in ON_VERIFICATION_FAILURE_CHOICES:
+            raise ValueError(f"must be one of {', '.join(ON_VERIFICATION_FAILURE_CHOICES)}")
+        return v
+
+    @field_validator("human_executor")
+    @classmethod
+    def _executor_name(cls, v: str) -> str:
+        # The shape only. Here rather than left to PlanningConfig, whose ValueError would escape as a
+        # raw traceback -- the same trap max_attempts fell into.
+        from tandem.planning.config import HUMAN_EXECUTOR_NAME
+
+        if not HUMAN_EXECUTOR_NAME.fullmatch(v):
+            raise ValueError("must be the name of a human executor, such as teleop")
         return v
 
     @field_validator("verification_camera")

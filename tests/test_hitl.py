@@ -59,7 +59,8 @@ DOES_NOT_HOLD = json.dumps({"holds": False, "reason": "a flap is still closed ov
 
 def test_phase_planning_is_off_by_default(profile):
     assert profile.hitl.enabled is False
-    assert profile.hitl.on_robot_phase_failure == "teleop"
+    # The paper counts a TAMP failure as a trial failure, so that is what a fresh profile does.
+    assert profile.hitl.on_robot_phase_failure == "abort"
     assert profile.planner.backend == "tiptop"
 
 
@@ -258,14 +259,16 @@ def test_phase_actions_are_refused_outside_the_prompt(phase_session):
 
 
 def test_a_phase_the_planner_cannot_plan_is_offered_to_the_person(phase_session):
-    """The capability the old design could not express at all.
+    """The capability the old design could not express at all, now opt-in.
 
     Who did what was decided at proposal time inside the planner's process, so a phase it turned
     out not to be able to plan could only end the attempt. tandem owns the split, so the sub-goal
     is described to the operator, checked exactly as any other human step, and the task carries on.
     """
     session, _, _ = phase_session(
-        HOLDS, backend_kwargs={"plan_failure": "no collision-free grasp"}
+        HOLDS,
+        backend_kwargs={"plan_failure": "no collision-free grasp"},
+        on_robot_phase_failure="teleop",
     )
     session.next_task()
     assert wait_for(lambda: session.state is State.AWAITING_HUMAN_PHASE), f"stuck in {session.state}"
@@ -278,12 +281,13 @@ def test_a_phase_the_planner_cannot_plan_is_offered_to_the_person(phase_session)
     assert any("no collision-free grasp" in line["text"] for line in session.logs())
 
 
-def test_abort_is_still_available_when_a_phase_cannot_be_planned(phase_session):
-    """`teleop` is a default, not a policy anyone is stuck with."""
-    session, _, _ = phase_session(
-        backend_kwargs={"plan_failure": "no collision-free grasp"},
-        on_robot_phase_failure="abort",
-    )
+def test_a_phase_that_cannot_be_planned_ends_the_attempt_by_default(phase_session):
+    """The paper counts a TAMP failure as a trial failure, and so does a profile nobody tuned.
+
+    A teleop fallback here would turn the robot's phase into the operator's without anyone having
+    asked, crediting the method with a trial it did not complete and inflating the human effort
+    the dataset cost."""
+    session, _, _ = phase_session(backend_kwargs={"plan_failure": "no collision-free grasp"})
     session.next_task()
     # Nothing was recorded, so there is nothing to label: straight back to the task prompt.
     assert wait_for(

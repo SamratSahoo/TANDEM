@@ -143,28 +143,85 @@ hitl:
   # default: a human is asked precisely because the predicate is false. Worth turning on for
   # a scene that may start already solved.
   classify_initial: false
-  # Extra chances at a human phase the check says did not happen. A demonstration should not
+
+  # ── checking your steps ──────────────────────────────────────────────────────────────
+  # Extra chances at a human step the check says did not happen. A demonstration should not
   # be thrown away because one classifier call went the wrong way.
   verify_retries: 1
   # Treat a failed check as a rollout failure. Set false while calibrating the classifier
   # prompts: the verdict is still recorded, the run just carries on.
   verify_enforced: true
+  # What becomes of an attempt whose step still fails its check once the retries are spent.
+  #   exclude  it is kept out of the dataset, as the paper does: filed under failure/ with
+  #            `excluded: true`, its verdicts and raw recordings kept so you can see why,
+  #            and you are not asked to label it
+  #   label    you are asked to label it like any other attempt, and your answer decides
+  # `exclude`, because a check you can overrule by answering "success" is not a filter on
+  # what the dataset contains. `label` is for calibrating the classifier, where every time
+  # you and the check disagree is the thing you are measuring.
+  on_verification_failure: exclude
+  # Check the last step too when it is yours. Set false to leave the last step to your label
+  # alone, which is what the reference implementation did; the paper checks every one.
+  verify_final_phase: true
+  # Which camera the verification photo comes from. Third-person by default: after a hand-off
+  # the arm is wherever you left it, so a wrist view points nowhere useful.
+  verification_camera: external
+
+  # ── what is put to a camera ──────────────────────────────────────────────────────────
+  # Every human step comes with a contract — what must be true before it, what it makes
+  # true, what it makes false — and every robot step has its goal. These say which halves a
+  # camera is actually asked about. Each costs one model call per statement, with the arm
+  # parked, so only the one nothing else can answer is on:
+  #   check_human_effects        whether your step happened at all. Nothing else can tell.
+  #   check_human_preconditions  usually redundant: check_plan_effects below already proved
+  #                              the plan sets them up. Off in the paper's experiments. Turn
+  #                              it on when a step keeps failing and you suspect it was never
+  #                              set up properly.
+  #   check_tamp_preconditions   guards a robot step against a stale belief about the scene.
+  #   check_tamp_effects         the planner already reports whether it did its step, and
+  #                              better than a third-person camera can see it.
+  # A failed check is recorded in hitl.json either way.
+  check_human_effects: true
+  check_human_preconditions: false
+  check_tamp_preconditions: false
+  check_tamp_effects: false
+  # Stop when a checked precondition does not hold. Off, the verdict is recorded and the step
+  # goes ahead: one classifier call should not cost you a demonstration.
+  precondition_enforced: false
+  # Check the steps' contracts against each other before the arm moves, and send a plan
+  # that undoes something a later step needs ("close the box" before "put the toy in the
+  # box") back to the model to fix. Symbolic, so it costs no model call and no time.
+  check_plan_effects: true
+
+  # ── carrying the plan out ────────────────────────────────────────────────────────────
+  # What happens when the planner cannot plan one of the robot's steps.
+  #   abort   the attempt ends as a failure
+  #   teleop  the sub-goal is described to you and you do it by hand, checked exactly as any
+  #           other human step, and the task carries on
+  #   replan  the failure is handed back to the model, which decomposes the task differently
+  # `abort`, because that is what the paper measured: it counts a planner failure as a
+  # failed attempt. With `teleop` a robot step becomes yours, so a dataset collected that
+  # way credits the method with attempts it did not complete, and understates how much of
+  # the work you did. Choose `teleop` when all you want is demonstrations. A step that WAS
+  # planned but failed while the arm was executing it always ends the attempt.
+  on_robot_phase_failure: abort
+  # Plan consecutive robot steps as one goal where that is sound: one continuous motion,
+  # and no re-perception in between for the object labels to drift across. Set false to
+  # re-perceive before every robot step, at the cost of the arm stopping between them.
+  conjoin_robot_phases: true
+  # Who carries out a human step. `teleop` — you, driving the arm — is the only one that
+  # ships; others can be installed and registered under their own name.
+  human_executor: teleop
+  # Allow answering "done" for a human step without teleoperating it while recording. That
+  # step then has no recording, and the episode is missing exactly the demonstration it
+  # exists to capture while looking complete. Always allowed when nothing is recorded.
+  allow_unrecorded_human_phase: false
+
+  # Write every image sent to the model, and a rendered PNG of its answer, into vlm/.
   save_vlm_io: true
   # SQLite cache for proposals only, useful while iterating on prompts. Never applied to
   # grounding or verification.
   cache_path: null
-  # What happens when the planner cannot plan one of the robot's phases.
-  #   teleop  the sub-goal is described to you and you do it by hand, checked exactly as any
-  #           other human step, and the task carries on
-  #   abort   the attempt ends and the episode is labeled a failure
-  #   replan  the failure is handed back to the model, which decomposes the task differently
-  # `teleop` is the option the old design could not offer at all: who did what was decided at
-  # planning time inside the planner's own process, so a phase it turned out not to be able to
-  # plan could only end the run.
-  on_robot_phase_failure: teleop
-  # Which camera the verification photo comes from. Third-person by default: after a hand-off
-  # the arm is wherever you left it, so a wrist view points nowhere useful.
-  verification_camera: external
 
 # ─────────────────────────────────────────────────────────────────────────────────────────
 #  planner  —  which task and motion planner tandem calls

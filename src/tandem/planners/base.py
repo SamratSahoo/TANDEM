@@ -104,6 +104,54 @@ class Capabilities:
     # Whether plan() can be handed a previous PlanResult.skeleton to skip the symbolic search.
     supports_skeleton_reuse: bool = False
 
+    # Paragraphs of the phase-segmentation prompt that only make sense for THIS planner, keyed by the
+    # slot ``tandem.planning.prompts`` renders them into. The prompt the method was evaluated with
+    # explains what On means, which predicates a precondition may be written in, and what a robot
+    # phase may ask for -- every one of them a statement about cuTAMP's goal language, not about
+    # phase planning. Held here so the prompt template itself names no predicate; a slot a backend
+    # leaves out gets a generic paragraph rendered from goal_predicates, so an empty map is a
+    # complete declaration, just a less specific prompt.
+    prompt_fragments: Mapping[str, str] = field(default_factory=dict)
+
+    # Predicates that can hold of an object in only ONE atom at a time, by predicate name -> the
+    # position of that object's argument. {"On": 0} says a thing rests on one surface: asserting
+    # On(toy, shelf) retracts On(toy, table) outright. The symbolic contract check
+    # (``tandem.planning.contracts``) reads it as the one delete effect a phase gets for free -- a
+    # robot phase has no operator and declares no delete effects, yet its placements unmistakably end
+    # the old ones -- and without it a plan that moves the toy away and then needs it where it was
+    # passes as consistent. A predicate absent here displaces nothing, which is right for a goal
+    # language with no such exclusivity.
+    exclusive_arguments: Mapping[str, int] = field(default_factory=dict)
+
+    # Which argument of a goal atom names the object a robot phase physically MOVES, by predicate
+    # name -> position. {"On": 0, "Holding": 0}: the toy in On(toy, box) moves, the box does not.
+    # The distinction is the whole point -- "put toy_a on the table" and "put toy_b on the table"
+    # share the table and move nothing in common. Read to tell the planner which objects the plan
+    # actually asks the robot to pick (see supports_movable_restriction), and to flag two
+    # consecutive robot phases that move the same object, the shape of a plan that wrote a step the
+    # robot cannot do as a pick-and-place anyway. A predicate absent here moves nothing.
+    moved_arguments: Mapping[str, int] = field(default_factory=dict)
+
+    # The planner's own operators, as one signature each: Omega_0 in the paper's terms. Never shown
+    # to the proposer (robot_description is what it reasons over, for the reason given there) and
+    # never searched over. It is written into each rollout's provenance so the record says what the
+    # robot side could do alongside the human operators the model invented -- a record that
+    # hard-coded cuTAMP's would be a false statement the moment another planner ran the phases.
+    robot_operators: tuple[str, ...] = ()
+
+    # Whether plan() honours `movables=`: only the named objects may be picked, every other one is
+    # an obstacle. A scene shared with a person contains the person's things -- "pull the block out
+    # USING THE SCREWDRIVER" is what makes the screwdriver a detected object at all -- and a planner
+    # told nothing treats the human's tool as one more thing to pick up. False means the phase
+    # planner does not pass it, and the planner may move anything it detected.
+    supports_movable_restriction: bool = False
+
+    # Whether plan() honours `return_home=False`: end the recorded leg where the last operation left
+    # the arm, instead of driving it home. Only the task's last leg should go home. One in the middle
+    # is motion nobody asked for, recorded into the middle of the demonstration, and the next leg
+    # then plans from home rather than from where this one stopped. False means every leg goes home.
+    supports_return_home: bool = False
+
     def goal_predicate_names(self) -> frozenset[str]:
         return frozenset(self.goal_predicates)
 
