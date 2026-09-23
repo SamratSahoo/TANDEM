@@ -34,7 +34,6 @@ from tandem.planning.contracts import (
     wasted_robot_move,
 )
 from tandem.planning.proposal import parse_plan_response
-from tandem.planning.structs import HumanOperator, VLMPredicate
 from tandem.planning.symbols import Atom, Parameter, Predicate
 
 CAPS = registry.capabilities("tiptop")
@@ -139,36 +138,9 @@ def _phases(*phases):
     return {"phases": list(phases)}
 
 
-def _operator(entry, scene_types):
-    """The operator an `operator` entry describes, grounded the way the parser grounds an atom."""
-
-    def atoms(key):
-        return frozenset(Atom(a["predicate"], tuple(a["args"])) for a in entry[key])
-
-    return HumanOperator(
-        name=entry["name"],
-        args=tuple(entry["args"]),
-        parameters=tuple(Parameter(f"x{i}", scene_types.type_of(a)) for i, a in enumerate(entry["args"])),
-        preconditions=atoms("preconditions"),
-        add_effects=atoms("add_effects"),
-        delete_effects=atoms("delete_effects"),
-    )
-
-
 def parse(response=None, objects=OBJECTS, caps=CAPS):
-    """Parse a reply the way the proposal stage does, with every human phase's operator attached.
-
-    The parser does not read `operator` yet, so it is attached here from the same entry. Once the
-    parser builds operators itself, a phase arrives already carrying one and nothing is attached.
-    """
-    response = response or PLAN_RESPONSE
-    spec = parse_plan_response(response, "do the thing", objects, TABLE, caps)
-    for i, entry in enumerate(response["phases"]):
-        phase = spec.phases[i]
-        if "operator" in entry and phase.operator is None:
-            operator = _operator(entry["operator"], spec.scene_types)
-            spec = spec.replace_phase(i, dataclasses.replace(phase, operator=operator))
-    return spec
+    """Parse a reply the way the proposal stage does. Every human phase arrives carrying its operator."""
+    return parse_plan_response(response or PLAN_RESPONSE, "do the thing", objects, TABLE, caps)
 
 
 def shown(atoms):
@@ -351,10 +323,10 @@ def test_a_precondition_nothing_establishes_is_left_alone_when_the_scene_is_unme
 def _needs_an_unlocked_box():
     """Open(white_box) requires IsUnlocked(white_box), which no phase makes true.
 
-    IsUnlocked is named only in a precondition, which the parser does not yet count as a use, so it
-    is added to the invented predicates by hand.
+    IsUnlocked is named only in a precondition. The parser counts that as a use, so it is typed and
+    accepted like any other invented predicate.
     """
-    spec = parse(
+    return parse(
         _phases(
             {
                 "executor": "human",
@@ -369,10 +341,13 @@ def _needs_an_unlocked_box():
                 ),
             }
         )
-        | {"new_predicates": [{"name": "IsOpen", "instructions": "the container {0} is open"}]}
+        | {
+            "new_predicates": [
+                {"name": "IsOpen", "instructions": "the container {0} is open"},
+                {"name": "IsUnlocked", "instructions": "the box {0} is unlocked"},
+            ]
+        }
     )
-    unlocked = VLMPredicate(Predicate("IsUnlocked", (Parameter("x0", "surface"),)), "the box {0} is unlocked")
-    return dataclasses.replace(spec, invented=(*spec.invented, unlocked))
 
 
 def test_an_invented_precondition_nothing_establishes_passes_while_the_scene_is_unmeasured():

@@ -42,6 +42,13 @@ PLAN = {
             "description": "open the box",
             "instructions": "Open the white_box and fold its flaps back.",
             "atoms": [{"predicate": "IsOpen", "args": ["white_box"]}],
+            "operator": {
+                "name": "Open",
+                "args": ["white_box"],
+                "preconditions": [{"predicate": "HandEmpty", "args": []}],
+                "add_effects": [{"predicate": "IsOpen", "args": ["white_box"]}],
+                "delete_effects": [],
+            },
         },
         {
             "executor": "robot",

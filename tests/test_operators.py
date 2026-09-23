@@ -41,6 +41,13 @@ PLAN_RESPONSE = {
             "description": "open the box",
             "instructions": "Open the white_box and fold its flaps back.",
             "atoms": [{"predicate": "IsOpen", "args": ["white_box"]}],
+            "operator": {
+                "name": "Open",
+                "args": ["white_box"],
+                "preconditions": [{"predicate": "HandEmpty", "args": []}],
+                "add_effects": [{"predicate": "IsOpen", "args": ["white_box"]}],
+                "delete_effects": [],
+            },
         },
         {
             "executor": "robot",
@@ -92,7 +99,7 @@ def spec_with_operator(operator=None):
 
 
 def test_a_human_phase_carries_its_operator_grounded_to_this_scene():
-    # Struct-level half of the LJ test of the same name: the parser half arrives with the parser.
+    # Struct-level half of the LJ test of the same name. The parser half is in test_parser_operators.py.
     phase = spec_with_operator().phases[1]
     operator = phase.operator
     assert operator.display == "Open(white_box)"
