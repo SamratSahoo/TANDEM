@@ -113,14 +113,14 @@ def merge_trajectory(
     except Exception as exc:
         log(f"could not merge trajectory {trajectory_id}: {exc}")
         log(f"the legs are intact; retry with: tandem traj merge {trajectory_id}")
-        write_phase_record(plan, episode_dir, vlm_dir=vlm_dir, log=log)
+        write_phase_record(plan, episode_dir, status=status, vlm_dir=vlm_dir, log=log)
         return
     # `dir` is absent when the merge declined for want of state data, so fall back to the leg
     # the label was filed against — the record has to land somewhere a reader will open.
     # Not `Path(...) or episode_dir`: Path("") is PosixPath("."), which is truthy, so an
     # absent `dir` would file the record in the working directory.
     merged_dir = Path(result["dir"]) if result.get("dir") else episode_dir
-    write_phase_record(plan, merged_dir, vlm_dir=vlm_dir, log=log)
+    write_phase_record(plan, merged_dir, status=status, vlm_dir=vlm_dir, log=log)
     if result.get("merged"):
         log(
             f"merged {result['n_legs']} legs into one trajectory "
@@ -167,10 +167,29 @@ def promote_primary_leg(
     return destination
 
 
+def trial_outcome(outcome: str | None, status: str | None) -> dict:
+    """How the trial ended, as ``hitl.json`` states it: the loop's word, then the operator's label.
+
+    ``outcome`` is what the phase loop recorded (``PhasePlan.set_outcome``), None for a trial that
+    ran to the end. ``status`` is where the episode was filed, ``success`` or ``failure``: the
+    operator's label, or ``failure`` for a trial filed without one.
+
+    An ``excluded`` or ``aborted`` trial keeps that outcome whatever it was filed under. Excluded is
+    the whole point of the record -- such a trial is filed under failure/ WITHOUT a label prompt, and
+    reading the filing as its outcome would put it back among the ordinary failures a dataset keeps.
+    Any other trial takes the label when there is one, since the label is the verdict the operator
+    was asked for (with ``on_verification_failure: label`` it overrules the check on purpose), and
+    otherwise the loop's own word.
+    """
+    final = outcome if outcome in ("excluded", "aborted") or not status else status
+    return {"outcome": final, "excluded": final == "excluded", "filed_under": status}
+
+
 def write_phase_record(
     plan: PhasePlan | None,
     directory: Path | None,
     *,
+    status: str | None = None,
     vlm_dir: Path | None,
     log: Callable[[str], None],
 ) -> None:
@@ -180,12 +199,18 @@ def write_phase_record(
     only the first planner leg's extra files, and that copy is the earliest snapshot — a low
     phase index and no verifications at all — so a record written per leg reads as though the
     task barely started.
+
+    ``status`` is where the episode was filed. It settles the record's ``outcome`` for a trial the
+    loop did not end itself (``trial_outcome``); ``failure_stage`` is always the loop's, the stage
+    at which it ended the attempt, whatever the label said afterwards.
     """
     if plan is None or directory is None or not Path(directory).is_dir():
         return
     directory = Path(directory)
+    record = plan.to_json()
+    record.update(trial_outcome(record.get("outcome"), status))
     try:
-        (directory / "hitl.json").write_text(json.dumps(plan.to_json(), indent=2, default=str))
+        (directory / "hitl.json").write_text(json.dumps(record, indent=2, default=str))
     except OSError as exc:
         log(f"could not write the phase record: {exc}")
 
