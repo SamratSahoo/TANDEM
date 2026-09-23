@@ -207,3 +207,41 @@ def test_an_unstamped_leg_would_block_the_driver_and_is_answered(child, monkeypa
         assert any("asked for a success/failure label" in text for text in stub.logs)
     finally:
         fresh.kill()
+
+
+def _record_one_leg(teleop) -> dict:
+    """Drive one leg to disk and return its _meta.json."""
+    assert wait_for(lambda: teleop._recording)
+    teleop.finish()
+    assert teleop.wait(timeout=20.0)
+    return json.loads((Path(teleop.leg_dir) / "_meta.json").read_text())
+
+
+def test_a_leg_of_a_human_phase_says_which_phase_it_records(child):
+    """The merge copies a leg's phase keys into segments[], and only from the leg itself.
+
+    It never infers a phase from a leg's position, so a teleop leg the driver was not told about is
+    a stretch of the demonstration nobody can attribute to a step. Phase 0 is the case a truthiness
+    check drops, and a person's step is often the first one.
+    """
+    teleop, stub = child()
+    teleop.kill()
+    teleop.wait(timeout=5.0)
+
+    fresh = child_mod.TeleopChild(
+        stub, _settings(), phase_index=0, n_phases=3, phase_description="open the box"
+    ).start()
+    try:
+        meta = _record_one_leg(fresh)
+    finally:
+        fresh.kill()
+    assert meta["phase_index"] == 0
+    assert meta["n_phases"] == 3
+    assert meta["phase_description"] == "open the box"
+
+
+def test_a_leg_with_no_phase_attached_claims_none(child):
+    """A hand-off the operator asked for between phases is not any phase's leg."""
+    teleop, _ = child()
+    meta = _record_one_leg(teleop)
+    assert not {"phase_index", "n_phases", "phase_description"} & set(meta)

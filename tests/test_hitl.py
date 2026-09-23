@@ -455,6 +455,32 @@ def test_the_teleop_leg_is_stamped_with_the_same_trajectory_as_the_planners(phas
     assert sources.count("tamp") >= 1
 
 
+
+def test_the_teleop_leg_of_a_human_phase_is_stamped_with_that_phase(phase_session, teleop_enabled):
+    """The planner's legs carry their phase, and so must the person's.
+
+    The merge maps each leg to its phase in segments[] from the leg's own _meta.json, so a teleop
+    leg launched without the phase is a gap in the one record of who did which step.
+    """
+    from tandem.core import merge as merge_mod
+
+    session, backends, _ = phase_session()
+    session.next_task()
+    assert wait_for(lambda: session.state is State.AWAITING_HUMAN_PHASE)
+    session.request_teleop()
+    assert wait_for(lambda: session.state is State.TELEOP_HANDOFF)
+    assert wait_for(lambda: session._teleop is not None and session._teleop._recording)
+    session.resume_from_teleop()
+    assert wait_for(lambda: session.state is State.AWAITING_LABEL)
+
+    trajectory_id = backends[-1].legs[0]["leg"].trajectory_id
+    teleop_legs = [leg for leg in merge_mod.find_legs(session.profile, trajectory_id) if leg["source"] == "teleop"]
+    assert len(teleop_legs) == 1
+    meta = json.loads((Path(teleop_legs[0]["dir"]) / "_meta.json").read_text())
+    # 0-based, the way the planner's legs count: the robot's phase 0, then the person's.
+    assert (meta["phase_index"], meta["n_phases"]) == (1, 3)
+    assert meta["phase_description"] == "open the box"
+
 def test_replan_actually_re_plans_rather_than_quietly_aborting(phase_session):
     """`replan` is a documented policy, and it has to differ from `abort`.
 

@@ -38,6 +38,10 @@ def main() -> int:
     parser.add_argument("--instruction", default="")
     parser.add_argument("--trajectory-id", default="")
     parser.add_argument("--refuse-first", action="store_true")
+    # The driver's phase stamp, written into _meta.json only when given, as the driver does.
+    parser.add_argument("--phase-index", type=int, default=None)
+    parser.add_argument("--n-phases", type=int, default=None)
+    parser.add_argument("--phase-description", default=None)
     args, _ = parser.parse_known_args()
 
     events = Path(args.events_file)
@@ -85,16 +89,16 @@ def main() -> int:
                 time.sleep(0.005)
 
             if saved:
-                (leg / "_meta.json").write_text(
-                    json.dumps(
-                        {
-                            "n_frames": max(frames, 2),
-                            "instruction": args.instruction,
-                            "trajectory_id": args.trajectory_id or None,
-                            "segment_source": "teleop",
-                        }
-                    )
-                )
+                meta = {
+                    "n_frames": max(frames, 2),
+                    "instruction": args.instruction,
+                    "trajectory_id": args.trajectory_id or None,
+                    "segment_source": "teleop",
+                }
+                for key in ("phase_index", "n_phases", "phase_description"):
+                    if getattr(args, key) is not None:
+                        meta[key] = getattr(args, key)
+                (leg / "_meta.json").write_text(json.dumps(meta))
                 emit(events, "rollout_saved", dir=str(leg), n_frames=max(frames, 2))
             else:
                 emit(events, "rollout_aborted", dir=str(leg))

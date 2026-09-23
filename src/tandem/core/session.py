@@ -416,9 +416,13 @@ class Session:
         nothing else can open them until the release has actually completed — and the teleop child
         must be gone before the planner reaches for them again.
 
-        This is the phase loop's human-leg seam (``phase_loop.HumanLeg``). `phase` is not used here:
-        the teleop driver is told only the task and the trajectory. `recorded` hears about a leg as
-        soon as it is on disk, before the arm is taken back, because taking it back can fail.
+        This is the phase loop's human-leg seam (``phase_loop.HumanLeg``). For a phase, the driver
+        is told which one it is, so the leg says so in its _meta.json and the merged segments[] map
+        it to that phase; its position comes off the view the loop showed the operator just before
+        handing over (the phase alone does not know where it sits in the plan). `phase` is None for
+        a hand-off the operator asked for at a phase boundary, and that leg is stamped with no phase.
+        `recorded` hears about a leg as soon as it is on disk, before the arm is taken back, because
+        taking it back can fail.
         """
         self._set_state(State.HANDING_OFF)
         self.teleop_pending = False
@@ -437,7 +441,7 @@ class Session:
         # the person was still being told the arm was theirs.
         self._resume_ready.clear()
         self._set_state(State.TELEOP_HANDOFF)
-        self._start_teleop()
+        self._start_teleop(self.human_phase if phase is not None else None)
 
         if not self._resume_ready.wait(timeout=HUMAN_PHASE_TIMEOUT) and not self._stopping:
             # Nobody handed the arm back. Taking it anyway would drive a robot somebody may still
@@ -483,8 +487,12 @@ class Session:
         self._event("teleop_handoff_done")
         self._set_state(State.ROLLING)
 
-    def _start_teleop(self) -> None:
+    def _start_teleop(self, view: HumanPhase | None = None) -> None:
         """Launch the teleop driver, now that the planner has actually let go.
+
+        `view` is the human phase this leg records, if it records one. Its position is stamped
+        0-based, the way the planner's legs are, and only for a plan that has a length: a view with
+        no plan behind it would stamp "phase 0 of 0", which reads as knowledge nobody has.
 
         Failure here is not fatal: the session stays parked at its hand-off wait with
         `handoff_error` set, which the operator can recover from by driving the arm themselves,
@@ -499,7 +507,14 @@ class Session:
             self._log("tandem", self.handoff_error)
             return
         try:
-            self._teleop = TeleopChild(self, cfg).start()
+            stamp = {}
+            if view is not None and view.total > 0:
+                stamp = {
+                    "phase_index": view.index,
+                    "n_phases": view.total,
+                    "phase_description": view.description,
+                }
+            self._teleop = TeleopChild(self, cfg, **stamp).start()
             self._log("tandem", "teleop driver started; the arm is yours")
         except Exception as exc:
             self.handoff_error = f"Could not start the teleop driver: {exc}"

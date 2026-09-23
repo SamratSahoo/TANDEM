@@ -447,12 +447,13 @@ src/tandem/
 └── _vendor/       tiptop · cuTAMP · cuRobo, pinned and trimmed
 ```
 
-The **session engine** (`core/session.py`) walks a task's phases: it decides who does each one,
-calls the planner for the robot's, hands the arm to a person for theirs, checks from a photo that
-their step happened, and mints the trajectory id that joins every leg into one episode. It survives
-being preempted, re-warmed and handed over mid-task, and appends a line per event to a JSONL file
-so a session that went wrong can be read off disk after the process is gone. The same object backs
-both `tandem collect` and the browser UI, so the state machine exists once.
+The **session engine** (`core/session.py`, with the walk itself in `core/phase_loop.py`) walks a
+task's phases: it decides who does each one, calls the planner for the robot's, hands the arm to a
+person for theirs, checks from a photo that their step happened, and mints the trajectory id that
+joins every leg into one episode. It survives being preempted, re-warmed and handed over mid-task,
+and appends a line per event to a JSONL file so a session that went wrong can be read off disk after
+the process is gone. The same object backs both `tandem collect` and the browser UI, so the state
+machine exists once.
 
 **tandem plans the task; a planner plans the motion.** `planning/` breaks an instruction into
 an ordered list of phases and decides which are the robot's and which are yours. For a robot

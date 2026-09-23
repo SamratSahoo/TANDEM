@@ -9,7 +9,8 @@ A `TeleopChild` is given the session that launched it and reads from it: the scr
 (``_files["session_dir"]``), the trajectory id it stamps the leg with (``_trajectory_id``, falling
 back to ``current.dir``), the profile's trajectories directory and cameras, and the language label
 (``instruction``). It reports back through ``_log``, ``_emit``, ``_pump`` and ``handoff_error``.
-``tests/test_teleop_handoff.py`` drives it against a stub with exactly those attributes.
+``tests/test_teleop_handoff.py`` drives it against a stub with exactly those attributes. Which phase
+the leg records is not read off the session; whoever launches the child passes it in.
 """
 
 from __future__ import annotations
@@ -42,9 +43,25 @@ class TeleopChild:
     # the arm's owner in a loop with no way out.
     MAX_START_ATTEMPTS = 3
 
-    def __init__(self, session: Session, cfg) -> None:
+    def __init__(
+        self,
+        session: Session,
+        cfg,
+        *,
+        phase_index: int | None = None,
+        n_phases: int | None = None,
+        phase_description: str | None = None,
+    ) -> None:
         self.session = session
         self.cfg = cfg
+        # Which phase of a phase-planned task this leg records, for the driver to stamp into the
+        # leg's _meta.json under the keys the planner's legs use. The merge copies them into
+        # segments[], which is the only place a merged demonstration says which leg was which
+        # phase. All None for a hand-off with no phase attached (one the operator asked for at a
+        # phase boundary, or phase planning off): the keys are then left out, not guessed.
+        self.phase_index = phase_index
+        self.n_phases = n_phases
+        self.phase_description = phase_description
         self.proc: subprocess.Popen | None = None
         self.events_file: Path | None = None
         self._tailer: events_mod.EventTailer | None = None
@@ -101,6 +118,14 @@ class TeleopChild:
             # right: stamped with its id, left unlabeled, and never prompting for a verdict —
             # the verdict belongs to the whole trajectory and is given once, at the end.
             args += ["--trajectory-id", str(trajectory_id)]
+        # `is not None`, not truthiness: phase 0 is a real phase, and a person's step is often the
+        # first one (a box that has to be opened before anything can go in it).
+        if self.phase_index is not None:
+            args += ["--phase-index", str(int(self.phase_index))]
+        if self.n_phases is not None:
+            args += ["--n-phases", str(int(self.n_phases))]
+        if self.phase_description is not None:
+            args += ["--phase-description", str(self.phase_description)]
 
         cameras = self.session.profile.cameras.configured()
         for key, flag in (
