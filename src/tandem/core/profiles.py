@@ -339,9 +339,11 @@ class HitlSpec(BaseModel):
     # Plan consecutive robot phases as one goal where that is sound: one continuous motion, and no
     # re-perception in the middle for labels to drift across. False re-perceives before every one.
     conjoin_robot_phases: bool = True
-    # Who carries out a human phase, by registered name. "teleop" -- a person driving the arm -- is
-    # the only one that ships. Only the shape of the name is checked here; whether it is registered
-    # is the executor registry's question, since a third-party executor is installed per machine.
+    # Who carries out a human phase, by registered name (tandem.executors). "teleop" -- a person driving
+    # the arm -- is the only one that ships; a package adds another through the
+    # `tandem.human_executors` entry point. The name must be one the registry knows on this machine,
+    # like planner.backend: a misspelling found at load time costs nothing, and found at the first
+    # human phase it costs the trial.
     human_executor: str = "teleop"
     # Accept "done" for a human phase that was never teleoperated, while recording (with recording
     # off it is always accepted). The episode then lacks the one demonstration the trial exists to
@@ -389,12 +391,21 @@ class HitlSpec(BaseModel):
     @field_validator("human_executor")
     @classmethod
     def _executor_name(cls, v: str) -> str:
-        # The shape only. Here rather than left to PlanningConfig, whose ValueError would escape as a
-        # raw traceback -- the same trap max_attempts fell into.
+        # The shape first, here rather than left to PlanningConfig, whose ValueError would escape as a
+        # raw traceback -- the same trap max_attempts fell into. Then the registry, by name only: it
+        # reads installed packages' metadata and imports none of them. The price is the one
+        # planner.backend already pays: a profile naming an executor this machine has not installed
+        # does not load here until the package providing it is installed.
+        from tandem.core.errors import TandemError
+        from tandem.executors import base as executors
         from tandem.planning.config import HUMAN_EXECUTOR_NAME
 
         if not HUMAN_EXECUTOR_NAME.fullmatch(v):
             raise ValueError("must be the name of a human executor, such as teleop")
+        try:
+            executors.check_name(v)
+        except TandemError as exc:
+            raise ValueError(f"{exc.message} {exc.hint}" if exc.hint else exc.message) from None
         return v
 
     @field_validator("verification_camera")

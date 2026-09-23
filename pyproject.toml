@@ -56,6 +56,12 @@ Issues = "https://github.com/SamratSahoo/tandem/issues"
 [project.scripts]
 tandem = "tandem.cli.app:main"
 
+# Who carries out a human phase (hitl.human_executor). tandem registers its own in code as well, so an
+# install whose metadata predates this table still finds it; a package that ships another executor
+# declares it the same way, pointing at an ExecutorFactory. See tandem/executors/base.py.
+[project.entry-points."tandem.human_executors"]
+teleop = "tandem.executors.teleop:FACTORY"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["tandem*"]
