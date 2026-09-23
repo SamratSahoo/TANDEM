@@ -13,6 +13,10 @@ and the teleop driver are separate processes and would have to agree on one.
 The merge never partially writes. It builds in a scratch directory beside
 ``eval/success/failure`` and moves it into place, so a failure leaves the legs untouched on
 disk and re-running once the cause is fixed is safe.
+
+Each leg is one phase φ_k of a phase-planned task (or a stretch of one, for conjoined robot
+phases). A leg that says which — ``phase_index`` in its ``_meta.json`` — keeps saying so in the
+merged ``segments[]``, which is what lets τ = ((τ_1, φ_1), …) be read back off one episode.
 """
 
 from __future__ import annotations
@@ -39,6 +43,40 @@ STATE_KEYS = (
     "cmd_gripper",
     "frame_time",
 )
+
+# Per-frame arrays a leg MAY carry. Concatenated like STATE_KEYS, but a leg without one is not
+# defective: its absence says when, and by which driver, the leg was captured. TipTop has written
+# ``action_joint_velocity`` (the deployable DROID action, see DROID_JV_GAIN) since 1c6daf3; older
+# TipTop legs and every teleop leg have nothing there.
+#
+# The rule, per key, is:
+#   * no leg carries it  -> the merged episode does not carry it either. Nothing is invented for
+#     a trajectory whose legs never recorded it, so merging legacy legs gives what it always gave;
+#   * some or all legs carry it -> the merged episode carries it for EVERY frame. A carrier's
+#     array is taken verbatim; a leg without one gets the value derived in that leg's own
+#     provenance (_derive_action_joint_velocity).
+# The derivation has to happen here, per leg, and not later on the joined array: a hand-off is
+# mixed-provenance — a live-teleop leg's cmd_joint_velocity already IS the DROID action, while a
+# pre-1c6daf3 TAMP leg's is the cuTAMP plan's feedforward rad/s — so once the legs are one array
+# there is no single answer left to give. Dropping the key instead would silently discard what
+# the capture wrote, which is the one thing this module refuses to do. (Ported from the monorepo's
+# collect/merge_trajectory.py + collect/droid_action.py; the export still reads cmd_joint_velocity.)
+OPTIONAL_STATE_KEYS = ("action_joint_velocity",)
+
+# What a merged action_joint_velocity is, stated rather than left for a consumer to infer from
+# the source. It is the value TipTop writes into a leg's own _meta.json for the same array.
+ACTION_CONVENTION = "droid_joint_velocity"
+
+# 1 / max_joint_delta (0.2 rad) of the DROID FR3's IK controller (droid/robot_ik/robot_ik_solver.py).
+# The deploy executor runs a joint-velocity action as joint_delta = jv * max_joint_delta once per
+# control step, so the action that reproduces a recorded motion is a TRACKING ERROR in those units:
+#     action_joint_velocity = DROID_JV_GAIN * (cmd_joint_position - joint_position)
+# Mirrors tiptop.lerobot_capture.DROID_JV_GAIN, which is where a carrier's array comes from.
+DROID_JV_GAIN = 5.0
+
+# Keys of a leg's _meta.json that describe that LEG's phase, not the trajectory. The TAMP backend
+# stamps them from LegSpec; the teleop driver from --phase-index/--n-phases/--phase-description.
+PHASE_KEYS = ("phase_index", "n_phases", "phase_description")
 
 
 class MergeError(RuntimeError):
@@ -152,6 +190,70 @@ def pending_trajectory_ids(profile: Profile) -> list[str]:
     return sorted(tid for tid, count in counts.items() if count > 1)
 
 
+# --------------------------------------------------------------------------- the DROID action
+
+
+def _derive_action_joint_velocity(leg_arrays: dict, source: str) -> tuple[np.ndarray, str | None]:
+    """The DROID action for a leg that did not record one, in that leg's own provenance.
+
+    Returns ``(array, note)``. A note says why the array is not simply correct as derived; the
+    merge keeps it in ``_meta.json`` under ``action_notes``, keyed by leg.
+
+    The leg's DECLARED source decides, not a fit of its arrays against the identity. Every leg
+    tandem writes says which driver recorded it, while a regression is only as good as the leg's
+    variance — an operator who barely moved the arm gives it nothing to go on.
+
+    * Not a 7-joint arm: DROID_JV_GAIN is the FR3's, so the identity says nothing about this
+      embodiment. The stored command passes through, under a note.
+    * Not a TAMP leg (teleop, or a policy): its cmd_joint_velocity is the command the env
+      consumed — for teleop, the IK action — which is ground truth rather than a reconstruction,
+      so it passes through untouched.
+    * A TAMP leg: its cmd_joint_velocity is the planner's feedforward rad/s, a different quantity
+      that under-commands the arm at deploy, so the action is RECOMPUTED from the identity —
+      unless the operands cannot support it, in which case the stored array passes through under
+      a note saying so:
+        - cmd_joint_position is constant: a placeholder, and 5 * (0 - q) is plausible-magnitude
+          garbage rather than a crash, the worst way to fail here;
+        - cmd_joint_position is a copy of joint_position: nothing commanded a target, and the
+          identity would read ~0.
+    """
+    cmd_jv = np.asarray(leg_arrays["cmd_joint_velocity"], dtype=np.float32)
+    cmd_jp = np.asarray(leg_arrays["cmd_joint_position"], dtype=np.float32)
+    jp = np.asarray(leg_arrays["joint_position"], dtype=np.float32)
+
+    if jp.ndim != 2 or jp.shape[1] != 7 or cmd_jp.shape != jp.shape:
+        return cmd_jv, (
+            f"joint_position has shape {jp.shape}, not a 7-joint arm, so the DROID identity does not "
+            "apply; action_joint_velocity is the stored cmd_joint_velocity UNCHANGED."
+        )
+    if source != "tamp":
+        return cmd_jv, None
+    if len(cmd_jp) and float(np.abs(cmd_jp - cmd_jp[0]).max()) < 1e-6:
+        return cmd_jv, (
+            "cmd_joint_position is constant (a placeholder), so the DROID action cannot be derived; "
+            "action_joint_velocity is the stored cmd_joint_velocity UNCHANGED. Do not train on this "
+            "leg's actions."
+        )
+    if len(cmd_jp) and float(np.abs(cmd_jp - jp).max()) < 1e-6:
+        return cmd_jv, (
+            "cmd_joint_position is a copy of the measured joint_position (nothing commanded a target), "
+            "so the DROID action cannot be derived; action_joint_velocity is the stored "
+            "cmd_joint_velocity UNCHANGED."
+        )
+    return (DROID_JV_GAIN * (cmd_jp - jp)).astype(np.float32), (
+        "no action_joint_velocity: this TAMP leg predates the capture that writes it, so its "
+        "cmd_joint_velocity is the planner's feedforward rad/s, not the action the deploy executor "
+        f"reads. RECOMPUTED as {DROID_JV_GAIN:g} * (cmd_joint_position - joint_position), the value "
+        "the capture now writes."
+    )
+
+
+# How a leg that lacks an OPTIONAL_STATE_KEYS array gets one when another leg of the same
+# trajectory has it. Every optional key needs an entry: without a rule, the only alternatives are
+# dropping the carriers' arrays or leaving a hole in the joined one.
+_DERIVE_MISSING = {"action_joint_velocity": _derive_action_joint_velocity}
+
+
 # --------------------------------------------------------------------------- concatenation
 
 
@@ -212,8 +314,14 @@ def _concat_state(legs: list[dict], leg_frames: list[int], fps: int) -> dict:
     Measured on a three-leg trajectory, using the single linear map instead was off by 726
     camera frames (48 s). Within each leg we do use that map, then offset by the FRAME COUNTS
     of the preceding legs, which is what the joined file actually holds.
+
+    OPTIONAL_STATE_KEYS are joined by the rule stated beside them: absent everywhere stays
+    absent, and present anywhere is filled in for every leg that lacks it.
     """
     arrays: dict[str, list[np.ndarray]] = {key: [] for key in STATE_KEYS}
+    # Per leg, the optional array it carries or None. Resolved after the loop, because whether a
+    # leg's gap must be filled depends on whether ANY leg carries the key.
+    optional: dict[str, list[np.ndarray | None]] = {key: [] for key in OPTIONAL_STATE_KEYS}
     video_time: list[np.ndarray] = []
     cumulative = 0
     degraded: list[str] = []
@@ -223,18 +331,23 @@ def _concat_state(legs: list[dict], leg_frames: list[int], fps: int) -> dict:
             missing = [key for key in STATE_KEYS if key not in store.files]
             if missing:
                 raise MergeError(f"{leg['dir'].name}: {STATE_FILE} is missing {missing}")
-            extra = [key for key in store.files if key not in STATE_KEYS]
+            extra = [key for key in store.files if key not in STATE_KEYS and key not in OPTIONAL_STATE_KEYS]
             if extra:
                 raise MergeError(
                     f"{leg['dir'].name}: {STATE_FILE} has unexpected arrays {extra}; "
                     "refusing to merge rather than drop them"
                 )
             leg_arrays = {key: store[key] for key in STATE_KEYS}
+            leg_optional = {key: store[key] if key in store.files else None for key in OPTIONAL_STATE_KEYS}
 
         frame_time = leg_arrays["frame_time"].astype(np.float64)
         n = len(frame_time)
         if any(len(leg_arrays[key]) != n for key in STATE_KEYS):
             raise MergeError(f"{leg['dir'].name}: {STATE_FILE} arrays disagree on length")
+        for key, value in leg_optional.items():
+            if value is not None and len(value) != n:
+                raise MergeError(f"{leg['dir'].name}: {key} has {len(value)} rows but the leg has {n} frames")
+            optional[key].append(value)
         for key in STATE_KEYS:
             arrays[key].append(leg_arrays[key])
 
@@ -257,9 +370,27 @@ def _concat_state(legs: list[dict], leg_frames: list[int], fps: int) -> dict:
     merged = {key: np.concatenate(arrays[key], axis=0) for key in STATE_KEYS}
     merged["frame_time"] = merged["frame_time"].astype(np.float64)  # epoch seconds stay f64
     merged["video_time"] = np.concatenate(video_time).astype(np.float64)
+
+    notes: dict[str, str] = {}
+    for key, per_leg in optional.items():
+        if all(value is None for value in per_leg):
+            continue
+        filled: list[np.ndarray] = []
+        for i, (leg, value) in enumerate(zip(legs, per_leg, strict=True)):
+            if value is None:
+                value, note = _DERIVE_MISSING[key]({k: arrays[k][i] for k in STATE_KEYS}, leg["source"])
+                if note:
+                    notes[leg["dir"].name] = note
+            filled.append(np.asarray(value))
+        shapes = sorted({tuple(value.shape[1:]) for value in filled})
+        if len(shapes) > 1:
+            raise MergeError(f"{key}: legs disagree on its per-frame shape {shapes}; cannot join them")
+        merged[key] = np.concatenate(filled, axis=0).astype(np.float32)
+
     return {
         "arrays": merged,
         "degraded": degraded,
+        "action_notes": notes,
         "total_video_frames": cumulative,
         "leg_state_frames": [len(a) for a in arrays["frame_time"]],
     }
@@ -359,7 +490,7 @@ def merge(
         segments = []
         cumulative = 0
         for leg, n_cam, leg_n in zip(legs, leg_frames, state["leg_state_frames"], strict=True):
-            segments.append({
+            segment = {
                 "source": leg["source"],
                 "timestamp": leg["dir"].name,
                 "n_frames": leg_n,
@@ -368,10 +499,34 @@ def merge(
                 "video_stop": (cumulative + n_cam) / float(fps),
                 "record_start": leg["meta"].get("record_start"),
                 "record_stop": leg["meta"].get("record_stop"),
-            })
+            }
+            # Which phase φ_k this stretch of the episode is (and which driver config recorded
+            # it), when the leg recorded that. Only then: a leg from before phase planning, or
+            # with it off, has no phase, and inventing one from the leg's position would pair
+            # frames with the wrong subgoal.
+            for key in ("config_id", *PHASE_KEYS):
+                if leg["meta"].get(key) is not None:
+                    segment[key] = leg["meta"][key]
+            segments.append(segment)
             cumulative += n_cam
 
         meta = dict(primary["meta"])
+        # The primary leg's phase fields describe that ONE leg; left at the top they would label
+        # the whole trajectory as phase k. They live on in segments[]. n_phases is the plan's,
+        # so it stays at the top when every leg that states it agrees.
+        for key in PHASE_KEYS:
+            meta.pop(key, None)
+        stated = {leg["meta"]["n_phases"] for leg in legs if leg["meta"].get("n_phases") is not None}
+        if len(stated) == 1:
+            meta["n_phases"] = stated.pop()
+        # The merged action array exists exactly when some leg carried one, and was then resolved
+        # into one convention for every frame (see OPTIONAL_STATE_KEYS). Say so unconditionally
+        # rather than inherit it: a leg it was built from may have declared no convention at all.
+        meta.pop("action_convention", None)
+        meta.pop("action_notes", None)
+        if "action_joint_velocity" in arrays:
+            meta["action_convention"] = ACTION_CONVENTION
+            meta["action_notes"] = state["action_notes"]
         meta.update({
             "n_frames": n_frames,
             "fps": fps,
@@ -410,10 +565,11 @@ def merge(
             if leg is primary:
                 primary_parked = parked
 
-        # The primary leg's non-state artifacts moved down with it. Surface them at the top so
-        # the merged directory is a complete trajectory — tiptop_plan.json in particular is
-        # what makes a rollout count as collected. Logs stay with the leg that produced them:
-        # the primary's is still being written when this runs, so a copy would be truncated.
+        # The primary leg's non-state artifacts (the backend's plan, perception output, …) moved
+        # down with it. Surface them at the top so the merged directory reads like the rollout it
+        # grew from — `tandem traj replay` looks for the plan there. Logs stay with the leg that
+        # produced them: the primary's is still being written when this runs, so a copy would be
+        # truncated.
         replaced = {STATE_FILE, META_FILE, "tiptop_run.log", "postprocess.log", *CAMERA_FILES}
         if primary_parked is not None:
             for item in sorted(primary_parked.iterdir()):
@@ -442,6 +598,7 @@ def merge(
         "cameras": cameras,
         "cameras_dropped": dropped,
         "proportional_fallback_legs": state["degraded"],
+        "action_notes": state["action_notes"],
         "frames_trimmed": trimmed,
         "legs_skipped": skipped,
         "segments": segments,

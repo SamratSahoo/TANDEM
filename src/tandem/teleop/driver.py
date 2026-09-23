@@ -27,6 +27,8 @@ Protocol (stdin lines written by the Node server):
 
 With --trajectory-id (a tamp->teleop hand-off), episodes are legs of that tamp trajectory: they are
 stamped with the id, left unlabeled in eval/, and never prompt for y/n. See ARCHITECTURE.md §6c.
+With --phase-index / --n-phases / --phase-description (a human phase of a phase-planned task), each
+leg's _meta.json also says which phase it records, under the keys the TAMP legs use.
 
 The arm also returns home automatically at the END of every trajectory (after save / discard / error),
 so it is clear of the workspace before the next episode; the home motion is not part of the recording.
@@ -47,6 +49,7 @@ import signal
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
@@ -276,6 +279,16 @@ class Args:
     # success/failure verdict belongs to the whole trajectory and is given once, on the final tamp
     # leg, after which collect/merge_trajectory.py joins every leg into one episode.
     trajectory_id: str = ""
+    # Set by tandem when this session records a HUMAN PHASE of a phase-planned task: which phase φ_k
+    # (0-based) out of how many, and the phase's own words. Stamped into every saved leg's _meta.json
+    # under the same keys the TAMP backend writes for its legs, so the merged episode's segments[] map
+    # each leg to its phase. Left unset, the keys are simply absent -- a plain teleop episode, or a
+    # hand-off from before phase planning, looks exactly as it always did. Optional (not ""/-1
+    # sentinels) because 0 is a real phase index. typing.Optional, not `int | None`: this runs under
+    # the DROID env's interpreter, which may predate 3.10.
+    phase_index: Optional[int] = None
+    n_phases: Optional[int] = None
+    phase_description: Optional[str] = None
 
 
 def _halt(env):
@@ -408,10 +421,30 @@ def record_episode(env, policy, ep_dir, args, events):
         ep_dir / "_meta.json",
         instruction=args.instruction, n_frames=n, config_id=args.config_id,
         timestamp=ep_dir.name, cameras=cameras,
-        record_start=float(frame_time[0]), record_stop=float(frame_time[-1]),
+        record_start=float(frame_time[0]), record_stop=recording_window_stop(frame_time),
         trajectory_id=args.trajectory_id or None, segment_source="teleop",
+        phase_index=args.phase_index, n_phases=args.n_phases, phase_description=args.phase_description,
     )
     return n, quit_session
+
+
+def recording_window_stop(frame_time):
+    """``record_stop`` for a leg whose clip holds exactly one image per state frame.
+
+    ``record_start``/``record_stop`` are a recording WINDOW, not the first and last timestamps: the
+    export and the merge place state frame t at camera frame ``(t - record_start) * n_cam /
+    (record_stop - record_start)`` -- the map a TAMP leg's camera window gets -- and n frames span n
+    frame periods. Stopping the window at the LAST frame's timestamp covered only n-1 of them, which
+    stretched every index by n/(n-1): from the middle of each teleop leg on, a state frame was paired
+    with the NEXT image, both in a standalone export (which rounds) and in a merged episode's
+    video_time. Ending the window one mean frame period after the last frame makes the map the
+    identity this loop actually recorded (frame i -> image i) at whatever rate the loop really ran.
+    """
+    frame_time = np.asarray(frame_time, dtype=np.float64)
+    if len(frame_time) < 2:
+        return float(frame_time[-1])
+    period = (float(frame_time[-1]) - float(frame_time[0])) / (len(frame_time) - 1)
+    return float(frame_time[-1]) + period
 
 
 def main(args: Args):
