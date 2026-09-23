@@ -32,8 +32,16 @@ LIGHT_MODULES = [
     "tandem.core.runtime",
     "tandem.core.probe",
     "tandem.core.importers",
+    "tandem.core.phase_loop",
+    "tandem.core.episodes",
     "tandem.server.app",
     "tandem.teleop",
+    "tandem.teleop.child",
+    # Who carries out a human phase. The registry is read when a profile loads, so it and the one
+    # executor that ships have to stay as light as the profile itself.
+    "tandem.executors",
+    "tandem.executors.base",
+    "tandem.executors.teleop",
     # Phase planning and the backend protocol are on the laptop path too. The planner package used
     # to be the planner's own code and imported cuTAMP's symbolic layer for its atoms; the reason it
     # is tandem's now is exactly so this list can contain it.
@@ -43,6 +51,7 @@ LIGHT_MODULES = [
     "tandem.planning.config",
     "tandem.planning.proposal",
     "tandem.planning.grounding",
+    "tandem.planning.contracts",
     "tandem.planning.feasibility",
     "tandem.planning.drift",
     "tandem.planning.plan",
@@ -52,6 +61,7 @@ LIGHT_MODULES = [
     "tandem.planners.rpc",
     "tandem.planners.tiptop",
     "tandem.planners.tiptop.backend",
+    "tandem.planners.tiptop.factory",
     "tandem.cli.plan",
 ]
 

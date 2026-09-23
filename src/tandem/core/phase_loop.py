@@ -629,17 +629,27 @@ class PhaseLoop:
 def _missing_from(verdicts: Iterable[dict]) -> list[str]:
     """What a failed verification says is still expected.
 
-    Mirrors the driver's own `missing_statements`: the statements that should hold and do not,
-    already phrased for a person. The `reason` is appended when the model gave one, because
-    "the cloth is not folded" is much less useful than knowing it saw a corner sticking out.
+    Mirrors `grounding.missing_statements`, over the summary dicts the events carry: the verdicts
+    that were not SATISFIED, already phrased for a person. Not the ones that do not hold -- a delete
+    effect passes by not holding, so reading `holds` would list a delete effect that is done and drop
+    one that is still true. The latter is said the other way round, or the operator is told to make
+    true exactly what they were meant to undo. The `reason` is appended when the model gave one,
+    because "the cloth is not folded" is much less useful than knowing it saw a corner sticking out.
     """
     missing = []
     for verdict in verdicts:
-        if not isinstance(verdict, dict) or verdict.get("holds", True):
+        if not isinstance(verdict, dict):
+            continue
+        # A summary written before verdicts carried an expectation has only `holds`, which meant
+        # the same thing then: every atom was expected to hold.
+        satisfied = verdict.get("satisfied", verdict.get("holds", True))
+        if satisfied:
             continue
         statement = str(verdict.get("statement") or verdict.get("atom") or "").strip()
         if not statement:
             continue
+        if verdict.get("expected", True) is False:
+            statement = f"{statement} -- and it should no longer be"
         reason = str(verdict.get("reason") or "").strip()
         missing.append(f"{statement} — {reason}" if reason else statement)
     return missing

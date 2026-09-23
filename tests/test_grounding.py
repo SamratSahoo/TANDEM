@@ -259,6 +259,26 @@ def test_missing_statements_reads_satisfied_and_turns_a_delete_effect_around():
     ]
 
 
+def test_the_phase_loop_tells_the_operator_what_missing_statements_does():
+    # The loop builds the retry message from the verdicts' summary dicts, as the events carry them,
+    # not from the Verdicts. Reading `holds` there would list the delete effect that was undone and
+    # drop the one still true, so the operator would be sent to redo what they got right.
+    from tandem.core.phase_loop import _missing_from
+
+    verdicts = [
+        grounding.Verdict(IS_CLOSED, CLOSED_TEXT, False, "", expected=True),
+        grounding.Verdict(IS_OPEN, OPEN_TEXT, True, "", expected=False, role="effect (deleted)"),
+        grounding.Verdict(TOY_ON_TABLE, TOY_ON_TABLE_TEXT, False, "", expected=False),
+    ]
+    summaries = [v.summary() for v in verdicts]
+    assert _missing_from(summaries) == grounding.missing_statements(verdicts)
+    # The model's reason still rides along, and a summary from before verdicts had an expectation
+    # (only `holds`) still reads as it always did.
+    assert _missing_from([{**summaries[0], "reason": "lid up"}]) == [f"{CLOSED_TEXT} — lid up"]
+    assert _missing_from([{"statement": CLOSED_TEXT, "holds": False}]) == [CLOSED_TEXT]
+    assert _missing_from([{"statement": CLOSED_TEXT, "holds": True}]) == []
+
+
 def test_the_hand_off_names_what_should_stop_being_true():
     # A step whose whole point is that something stops being the case reads as a missing
     # instruction if only the add effects are shown. Everything is listed, checkable or not.

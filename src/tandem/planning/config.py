@@ -32,8 +32,9 @@ ON_VERIFICATION_FAILURE_CHOICES = ("exclude", "label")
 
 # What a human executor may be called: a name, not a path or an import string. Only the SHAPE is
 # checked here -- whether anything is registered under it is the executor registry's question, and it
-# is the only thing that knows. Checking membership here would make a profile naming a third-party
-# executor invalid on every machine that has not installed it, including the ones only reading it.
+# is the only thing that knows. The profile asks it (HitlSpec._executor_name, like planner.backend), so
+# a misspelt name is refused when the profile loads; a PlanningConfig built in code is checked by the
+# registry when the executor is created, not here, so this module stays free of the registry.
 HUMAN_EXECUTOR_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
 
 
