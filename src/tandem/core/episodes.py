@@ -5,8 +5,10 @@ hand-off, from the teleop driver. Each leg has its own directory under
 ``<profile>/trajectories/eval/``, and every leg carries the trajectory id the session minted. This
 module handles the disk side of that. It allocates a leg's directory, takes back the directories
 nothing was recorded into, and, once the operator has labeled the trial, files the trial under
-success/ or failure/. It then merges the legs into one episode, tau = ((tau_1, phi_1), ..,
-(tau_N, phi_N)) in the paper's terms (Sec. IV-E), and writes the phase record beside it.
+success/ or failure/. A trial the method EXCLUDED (a human phase that never verified) is filed under
+failure/ with no label, and its record says ``excluded: true``. Either way the legs are then merged
+into one episode, tau = ((tau_1, phi_1), .., (tau_N, phi_N)) in the paper's terms (Sec. IV-E), and
+the phase record is written beside it.
 
 Nothing here holds a session. Each function is given the profile it files into and somewhere to log.
 """
@@ -99,8 +101,13 @@ def merge_trajectory(
     vlm_dir: Path | None,
     log: Callable[[str], None],
     emit: Callable[[dict], None],
+    reason: str | None = None,
 ) -> None:
     """Join a task's legs into one trajectory, in the background.
+
+    Every trial with legs on disk comes through here, an excluded one included: excluded means kept
+    out of the dataset, not deleted, and its legs are what a reader auditing the exclusion needs.
+    ``reason`` is why the phase loop ended the trial, when it did (``TrialOutcome.reason``).
 
     Failure here must never take down a session: the legs are untouched on disk (the merge
     never partially writes) and `tandem traj merge` can retry once the cause is fixed.
@@ -113,14 +120,14 @@ def merge_trajectory(
     except Exception as exc:
         log(f"could not merge trajectory {trajectory_id}: {exc}")
         log(f"the legs are intact; retry with: tandem traj merge {trajectory_id}")
-        write_phase_record(plan, episode_dir, status=status, vlm_dir=vlm_dir, log=log)
+        write_phase_record(plan, episode_dir, status=status, vlm_dir=vlm_dir, log=log, reason=reason)
         return
     # `dir` is absent when the merge declined for want of state data, so fall back to the leg
     # the label was filed against — the record has to land somewhere a reader will open.
     # Not `Path(...) or episode_dir`: Path("") is PosixPath("."), which is truthy, so an
     # absent `dir` would file the record in the working directory.
     merged_dir = Path(result["dir"]) if result.get("dir") else episode_dir
-    write_phase_record(plan, merged_dir, status=status, vlm_dir=vlm_dir, log=log)
+    write_phase_record(plan, merged_dir, status=status, vlm_dir=vlm_dir, log=log, reason=reason)
     if result.get("merged"):
         log(
             f"merged {result['n_legs']} legs into one trajectory "
@@ -192,6 +199,7 @@ def write_phase_record(
     status: str | None = None,
     vlm_dir: Path | None,
     log: Callable[[str], None],
+    reason: str | None = None,
 ) -> None:
     """Drop the plan, the invented predicates and every verdict beside the finished episode.
 
@@ -202,13 +210,17 @@ def write_phase_record(
 
     ``status`` is where the episode was filed. It settles the record's ``outcome`` for a trial the
     loop did not end itself (``trial_outcome``); ``failure_stage`` is always the loop's, the stage
-    at which it ended the attempt, whatever the label said afterwards.
+    at which it ended the attempt, whatever the label said afterwards. ``reason`` is the loop's own
+    account of why it ended the attempt, written as ``outcome_reason`` when there is one: the
+    failure stage says where a trial stopped, and this says what was wrong there.
     """
     if plan is None or directory is None or not Path(directory).is_dir():
         return
     directory = Path(directory)
     record = plan.to_json()
     record.update(trial_outcome(record.get("outcome"), status))
+    if reason:
+        record["outcome_reason"] = reason
     try:
         (directory / "hitl.json").write_text(json.dumps(record, indent=2, default=str))
     except OSError as exc:

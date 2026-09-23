@@ -276,22 +276,6 @@ async def verify_effects(
     )
 
 
-async def verify_phase(
-    image: Any,
-    phase: Phase,
-    invented: Sequence[VLMPredicate],
-    cfg: PlanningConfig,
-    caps: Capabilities,
-) -> tuple[bool, list[Verdict]]:
-    """Deprecated: call ``verify_effects``, which this now is.
-
-    Kept so the callers written against the add-effects-only check keep working while they move
-    over. It checks the delete effects too now. A caller that reads ``Verdict.holds`` rather than
-    ``satisfied`` will misreport a delete effect, so move it over rather than leaning on this.
-    """
-    return await verify_effects(image, phase, invented, cfg, caps)
-
-
 def missing_statements(verdicts: Sequence[Verdict]) -> list[str]:
     """What is wrong with the workspace, phrased for the operator.
 

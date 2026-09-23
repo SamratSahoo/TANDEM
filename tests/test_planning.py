@@ -653,7 +653,7 @@ def test_only_camera_settleable_atoms_are_put_to_the_model():
         return [Verdict(a, describe(a, descriptions), True, "", expected=expected, role=role) for a in atoms]
 
     with mock.patch.object(grounding, "classify_all", fake_classify_all):
-        ok, _ = asyncio.run(grounding.verify_phase(None, phase, spec.invented, CFG, CAPS))
+        ok, _ = asyncio.run(grounding.verify_effects(None, phase, spec.invented, CFG, CAPS))
     assert ok
     assert {str(a) for a in asked} == {"IsOpen(white_box)", "On(blue_toy, table)"}
 

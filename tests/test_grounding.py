@@ -173,11 +173,10 @@ def test_a_phase_without_an_operator_is_checked_on_its_atoms_alone():
     assert client.statements == [TOY_IN_BOX_TEXT], "HandEmpty is not put to a camera"
 
 
-def test_verify_phase_is_still_there_and_now_checks_delete_effects_too():
-    # The phase loop calls it by its old name until it moves over to verify_effects.
-    (ok, verdicts), _ = check(grounding.verify_phase, CLOSE_PHASE, {CLOSED_TEXT: True, OPEN_TEXT: True})
-    assert not ok
-    assert {v.role for v in verdicts} == {"effect", "effect (deleted)"}
+def test_the_deprecated_verify_phase_alias_is_gone():
+    # The phase loop calls verify_effects and verify_preconditions by name now, and the alias's old
+    # contract (atoms only) was not what it did any more, so nothing is left to lean on it.
+    assert not hasattr(grounding, "verify_phase")
 
 
 # --- preconditions ---------------------------------------------------------------------------------

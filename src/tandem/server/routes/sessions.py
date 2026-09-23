@@ -159,6 +159,12 @@ async def force_stop(session_id: str) -> dict:
 
 @router.post("/sessions/{session_id}/teleop-switch")
 async def teleop_switch(session_id: str) -> dict:
+    """Ask for the arm: at the next plan-step boundary, or at once at a human phase's prompt.
+
+    Between phases it lends the arm to a person through teleop. At a human phase's prompt it hands
+    the step to the profile's human executor (``hitl.human_executor``), teleop unless it says
+    otherwise; ``human_executor`` in the session summary says which, and whether it is ready.
+    """
     session = session_mod.manager().get(session_id)
     session.request_teleop()
     return session.summary()
@@ -173,7 +179,13 @@ async def teleop_resume(session_id: str) -> dict:
 
 @router.post("/sessions/{session_id}/human-phase/done")
 async def human_phase_done(session_id: str) -> dict:
-    """The person did the step by hand. The driver checks it from a photo before carrying on."""
+    """The person did the step by hand. The driver checks it from a photo before carrying on.
+
+    A 409 while recording, unless the profile sets ``hitl.allow_unrecorded_human_phase``: a step
+    done by hand has no leg, and the episode would lack its demonstration while looking complete.
+    The step is then handed over with ``teleop-switch``, which at a human phase's prompt runs the
+    profile's human executor (``hitl.human_executor``) rather than waiting for a plan-step boundary.
+    """
     session = session_mod.manager().get(session_id)
     session.complete_human_phase()
     return session.summary()

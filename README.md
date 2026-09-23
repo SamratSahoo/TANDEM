@@ -86,7 +86,10 @@ needs the human last, "open the box, then put the toy in" needs the robot last, 
 need an intermediate state no final-state goal can express at all.
 
 If the check says it did not happen you are told what is still missing and given another go,
-rather than losing the demonstration to one bad classifier call. Every rollout drops a
+rather than losing the demonstration to one bad classifier call. If it still says so once the
+retries are spent, the trial is **excluded**, as the paper does: it is filed under `failure/`
+with `excluded: true`, its failing verdicts and raw legs kept, and you are not asked for a label
+(`hitl.on_verification_failure: label` asks you instead). Every rollout drops a
 `hitl.json` — the phases, the invented predicates, which clauses of the instruction each phase
 covered, and every verdict — plus a `vlm/` folder holding each image sent to the model and a
 rendered PNG of what it said, rejected attempts included. When a run goes wrong the question is
@@ -106,11 +109,19 @@ last one matters: the usual cause is an object the instruction names that percep
 detect, and the remedy (put it on the table, or reword the task) is only available *before* you
 start collecting.
 
-**A phase the planner cannot plan becomes yours.** tandem decides who does what, so when the
-planner fails to find a plan for a robot phase the sub-goal is described to you, you do it by
-hand, and the same check verifies it — the task carries on instead of ending. Set
-`hitl.on_robot_phase_failure` to `abort` for the older behaviour, or `replan` to hand the
-failure back to the model.
+**Your part is recorded like the robot's.** A human phase is carried out by
+`hitl.human_executor` — `teleop`, you driving the arm, is the only one that ships — and its leg
+is stamped with the phase it carried out, so the merged episode says which stretch of frames was
+which phase. Answering "I did it" without teleoperating would leave that phase with no
+demonstration while the episode looks complete, so while recording it is refused unless you set
+`hitl.allow_unrecorded_human_phase: true`.
+
+**A phase the planner cannot plan ends the trial, unless you say otherwise.** That is how the
+paper counts it, so it is the default (`hitl.on_robot_phase_failure: abort`). tandem decides who
+does what, so with `teleop` the sub-goal is described to you instead: you carry it out, the same
+check verifies it, and the task carries on. `replan` proposes the task again and tells the model
+why the planner could not plan that phase. A leg that was planned but failed to *execute* always
+ends the trial: the arm is somewhere no plan put it.
 
 Off by default, and disabled nothing in it runs.
 
@@ -298,6 +309,7 @@ hitl:
   enabled: true
   verify_retries: 1        # extra goes at a step the check says did not happen
   verify_enforced: true    # false records the verdict and carries on
+  on_verification_failure: exclude   # or `label`: ask the operator about a trial the check stopped
 ```
 
 ```console

@@ -46,7 +46,8 @@ class PlanningConfig:
     proposal_model: str = DEFAULT_PROPOSAL_MODEL
     vlm_model: str = DEFAULT_VLM_MODEL
     # Reprompts allowed when a proposal comes back unparseable or fails validation. The error message
-    # is fed back to the model, which is what makes a second attempt worth making at all.
+    # is fed back to the model, which is what makes a second attempt worth making at all. It also
+    # bounds `on_robot_phase_failure: replan`: at most this many re-plans per trial.
     max_attempts: int = 3
     # Classify the plan's invented predicates on the FIRST image, before anything runs. Off by
     # default: a human is being asked precisely because the predicate is false, so it costs one model
@@ -133,7 +134,8 @@ class PlanningConfig:
     #   abort   the trial ends as a failure (failure_stage "tamp_planning")
     #   teleop  the sub-goal is described to the operator, who does it by hand, verified exactly as
     #           any other human phase, and the task carries on
-    #   replan  the failure is fed back to the proposer, which decomposes the task again
+    #   replan  the failure is fed back to the proposer, which decomposes the task again (at most
+    #           max_attempts times per trial, then as abort)
     # `abort` is the default because it is what the method's numbers mean: the paper counts a TAMP
     # failure as a trial failure. A teleop fallback turns a robot phase into a human one, so a dataset
     # collected with it credits the method with trials it did not complete as designed and
