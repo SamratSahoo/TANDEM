@@ -201,6 +201,8 @@ class Sidecar:
         self.execute_plans = True
         self.record = True
         self.cost_overrides: dict = {}
+        # summarize_curobo_config's record of the solver settings in force; written into each leg.
+        self.curobo_config: dict = {}
         # scene_id -> everything a later plan() call needs, so a phase is planned against the pass
         # that reported the labels it is stated in rather than a fresh one.
         self.scenes: dict = {}
@@ -211,19 +213,35 @@ class Sidecar:
     # ---- lifecycle ---------------------------------------------------------
 
     def warm(self, *, output_dir: str, execute: bool, record: bool, cost_overrides: str | None) -> dict:
-        """Build the solvers, open the cameras, connect the robot. Tens of seconds."""
+        """Build the solvers, open the cameras, connect the robot. Tens of seconds.
+
+        The TAMP config is built the way tiptop's own ``tiptop-run`` builds it (``_sync_entrypoint``),
+        knob for knob and through the same ``resolve_*`` functions -- not because that entrypoint is
+        a contract, but because it is the one place upstream states which override feeds which
+        TAMPConfiguration field. A knob it threads through and this does not is a knob a profile sets,
+        tandem validates, and the planner then quietly ignores; tests/test_tiptop_bump.py compares
+        the two constructions in the pinned sources so that cannot creep back in on a bump.
+        """
         import asyncio
         import logging
         from concurrent.futures import ProcessPoolExecutor
 
         import rerun as rr
+        from cutamp.posture_prior import posture_ref_summary
         from tiptop import tiptop_run
         from tiptop.config import tiptop_cfg
         from tiptop.motion_planning import (
+            apply_perception_overrides,
+            resolve_grasp_center_cost,
             resolve_grasp_orientation_cost,
+            resolve_grasp_rank_conf_weight,
             resolve_max_motion_refine_attempts,
+            resolve_posture_selection,
+            resolve_require_m2t2_grasps,
             resolve_time_dilation_factor,
             resolve_traj_length_norm,
+            resolve_transit_apex,
+            summarize_curobo_config,
         )
         from tiptop.planning import build_tamp_config
         from tiptop.tiptop_run import get_demo_container
@@ -243,6 +261,36 @@ class Sidecar:
         max_planning_time = float(self.cost_overrides.get("max_planning_time") or 60.0)
 
         cfg = tiptop_cfg()
+        # Perception knobs ride the same overrides (m2t2_num_runs, grasp_threshold, ...). tandem has
+        # already written them into the tiptop.yml it renders, so this normally changes nothing; it is
+        # here so the sidecar builds exactly what tiptop-run builds from the same overrides file, and
+        # anything it does change is said out loud, because it means the two disagreed.
+        for key, (old, new) in apply_perception_overrides(cfg, self.cost_overrides).items():
+            _log(f"perception override: {key} {old} -> {new}")
+
+        # The config default is required, not optional: an override of None or 1.0 means "no extra
+        # scaling" and falls back to it, and tiptop.yml ships 0.2 -- passing 1.0 here would run every
+        # trajectory at five times the intended speed. (vae_retiming forces 1.0: the VAE owns the
+        # clock then.)
+        time_dilation_factor = resolve_time_dilation_factor(
+            self.cost_overrides, cfg.robot.time_dilation_factor
+        )
+        # What the solvers are built with, resolved: written beside every leg (see plan()) so the
+        # overrides in force are on record per leg, as tiptop-run records them per rollout.
+        self.curobo_config = summarize_curobo_config(self.cost_overrides, time_dilation_factor)
+
+        apex_height, apex_min_dist = resolve_transit_apex(self.cost_overrides)
+        if apex_height > 0:
+            _log(f"transit apex on: {apex_height} m (min transit distance {apex_min_dist} m)")
+        posture_selection = resolve_posture_selection(self.cost_overrides)
+        if posture_selection.get("posture_selection_seeds", 0) > 1:
+            # Summarising the prior loads it, so a posture_ref that is missing or not a baked prior
+            # fails the warm-up here, before the solvers and cameras come up, not at the first plan.
+            _log(
+                f"teleop-posture IK branch selection on: {posture_selection['posture_selection_seeds']} seeds"
+                f" | prior: {posture_ref_summary(posture_selection.get('posture_ref'))}"
+            )
+
         robot_types = tiptop_run._planning_robot_types()
         tamp_configs = {
             robot_type: build_tamp_config(
@@ -250,19 +298,25 @@ class Sidecar:
                 max_planning_time=max_planning_time,
                 opt_steps=opt_steps,
                 robot_type=robot_type,
-                # The config default is required, not optional: an override of None or 1.0 means
-                # "no extra scaling" and falls back to it, and tiptop.yml ships 0.2 -- passing 1.0
-                # here would run every trajectory at five times the intended speed.
-                time_dilation_factor=resolve_time_dilation_factor(
-                    self.cost_overrides, cfg.robot.time_dilation_factor
-                ),
+                time_dilation_factor=time_dilation_factor,
                 collision_activation_distance=0.0,
                 enable_visualizer=False,
                 traj_length_norm=resolve_traj_length_norm(self.cost_overrides),
                 grasp_orientation_cost=resolve_grasp_orientation_cost(self.cost_overrides),
+                grasp_center_cost=resolve_grasp_center_cost(self.cost_overrides),
+                grasp_rank_conf_weight=resolve_grasp_rank_conf_weight(self.cost_overrides),
                 arm_mode=cfg.robot.get("arm_mode", "single"),
                 dual_task=cfg.robot.get("dual_task", "parallel"),
                 max_motion_refine_attempts=resolve_max_motion_refine_attempts(self.cost_overrides),
+                transit_apex_height=apex_height,
+                transit_apex_min_dist=apex_min_dist,
+                # Half of this was already live before it was passed: build_curobo_solvers reads the
+                # seed count to size the IK solver. Without it here the solver would return extra
+                # branches and cuTAMP would never choose between them.
+                posture_selection=posture_selection,
+                # A leg whose object got no M2T2 grasps then fails to plan, and says so, instead of
+                # grasping a collision-sphere guess -- which comes back as an ordinary ok=False.
+                require_m2t2_grasps=resolve_require_m2t2_grasps(self.cost_overrides),
             )
             for robot_type in robot_types
         }
@@ -279,7 +333,7 @@ class Sidecar:
             0.0,
             self.record,
             self.cost_overrides,
-            {},
+            self.curobo_config,
             tamp_configs=tamp_configs,
         )
         self._had_external_cam_2 = self.container.external_cam_2 is not None
@@ -810,6 +864,13 @@ class Sidecar:
         directory.mkdir(parents=True, exist_ok=True)
         processed_scene = entry["scene"]
         observation = entry["observation"]
+        # The same per-rollout record tiptop-run leaves (its curobo_config.json): the overrides this
+        # leg was planned under, and what they resolved to. The copied tiptop.yml says what the
+        # perception knobs were; this says what the solvers were.
+        try:
+            (directory / "curobo_config.json").write_text(json.dumps(self.curobo_config, indent=2))
+        except (OSError, TypeError, ValueError) as exc:
+            _log(f"could not write {directory / 'curobo_config.json'}: {exc}")
 
         # Refused before anything is built rather than planned with the restriction quietly widened.
         # The fork this replaces widened it -- the goal's own object always stayed pickable -- which

@@ -504,7 +504,7 @@ means an imported legacy config works unchanged.
 
 A planner's runtime is **declared, not shipped**. TiPToP's recipe
 (`src/tandem/planners/tiptop/recipe.py`) pins tiptop, cuTAMP and cuRobo to exact commits, lists
-what to trim from each and the two patches to apply, names tiptop's own pixi manifest, and the
+what to trim from each and the one patch to apply, names tiptop's own pixi manifest, and the
 build step that compiles cuRobo's kernels. `planners/runtime.py` does the rest, for any planner
 that declares a recipe: it fetches each commit with `git fetch --depth 1` and `git archive`,
 checks it is the commit it asked for, applies the patches (a patch that no longer applies stops

@@ -207,7 +207,9 @@ class CamerasSpec(BaseModel):
 class GeminiSpec(BaseModel):
     model_config = {"extra": "forbid"}
 
-    model: str = "gemini-robotics-er-1.6-preview"
+    # The detector the pinned tiptop runs (perception/gemini.py's default model_id). tiptop takes no
+    # model from its config, so this states it rather than choosing it; keep it equal on a bump.
+    model: str = "gemini-robotics-er-2-preview"
     temperature: float | None = None
 
 
@@ -556,7 +558,11 @@ def validate_tamp(raw: dict | None) -> dict:
     out: dict[str, Any] = {}
     for key, value in raw.items():
         if value is None:
+            if key in tamp_keys.NULL_REFUSED:
+                raise ValueError(tamp_keys.NULL_REFUSED[key])
             continue
+        if key in tamp_keys.REFUSED:
+            raise ValueError(f"TAMP setting {key!r} {tamp_keys.REFUSED[key]}.")
         if key not in tamp_keys.ALL_KEYS:
             hint = tamp_keys.suggest(key)
             extra = f" Did you mean: {', '.join(hint)}?" if hint else ""
@@ -654,10 +660,10 @@ def _check_enums(cfg: dict) -> None:
 
 
 def _check_positives(cfg: dict) -> None:
-    for key in ("num_particles", "opt_steps_per_skeleton", "blend_speed_scale", "blend_pace_scale"):
+    for key in tamp_keys.POSITIVE_KEYS:
         if key in cfg and cfg[key] <= 0:
             raise ValueError(f"{key} must be > 0 (got {cfg[key]})")
-    for key in ("blend_boundary_window", "blend_boundary_window_sec", "blend_profile_end_sec"):
+    for key in tamp_keys.NON_NEGATIVE_KEYS:
         if key in cfg and cfg[key] < 0:
             raise ValueError(f"{key} must be >= 0 (got {cfg[key]})")
     tdf = cfg.get("time_dilation_factor_literal")

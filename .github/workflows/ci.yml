@@ -98,7 +98,6 @@ jobs:
               "tandem/planners/tiptop/sidecar.py",
               "tandem/planners/sidecar_kit/tandem_sidecar.py",
               "tandem/planners/tiptop/patches/0001-tiptop-config-from-env.patch",
-              "tandem/planners/tiptop/patches/0002-tiptop-optional-realsense.patch",
               "tandem/planners/tiptop/assets/vae_full_v2.pt",
               "tandem/planners/tiptop/assets/rnd_droid.pt",
           ]
@@ -195,7 +194,7 @@ jobs:
         # skipping them (tests/planner_sources.py), so this job cannot pass by checking nothing.
         env:
           TANDEM_PLANNER_SOURCES: ${{ runner.temp }}/planner-sources
-        run: pytest -q -rs tests/test_planners.py tests/test_sidecar_legs.py tests/test_packaging.py
+        run: pytest -q -rs tests/test_planners.py tests/test_sidecar_legs.py tests/test_packaging.py tests/test_tiptop_bump.py
 
       - name: Install TiPToP's runtime sources the way an install does, short of the GPU build
         # Fetch, trim, patch and place the checkpoints, against GitHub, from the recipe's pins. Only the

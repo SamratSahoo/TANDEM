@@ -1,0 +1,77 @@
+tamp_overrides:
+  vae_retiming: false          
+  vae_manifold_weight: 25000   
+  vae_path: "vae/checkpoints/vae_full_v2.pt"   
+  joint_density_weight: 0
+  uniform_velocity_weight: 0.0
+  traj_length_norm: "inf"
+  grasp_pose_change_weight: 0
+  grasp_center_weight: 30
+  grasp_threshold: 0.02
+  m2t2_num_runs: 60
+  require_m2t2_grasps: false
+  voxel_downsample_size: 0.005
+  num_particles: 512
+  opt_steps_per_skeleton: 600
+  transit_apex_height: 0.075
+  transit_apex_min_dist: 0.10
+  time_dilation_factor_literal: 1.0
+  posture_selection_seeds: 12
+  posture_grasp_roll: true
+  blend_trajectory: true
+  blend_mode: vae
+  blend_ops: [Pick, MoveFree, MoveHolding, Place, GoToInitial]
+  blend_smoothing: 3.0e-4
+  blend_boundary_speed: 0.07
+  blend_vae_sample_target: false
+  blend_max_duration_mult: 2.0
+  blend_vel_slack: 1.0
+  blend_acc_slack: 1.0
+
+hitl:
+  enabled: false
+  proposal_model: "gemini-2.5-pro"
+  vlm_model: "gemini-2.5-flash"
+  verify_retries: 1
+  verify_enforced: true
+  save_vlm_io: true
+  classify_initial: false
+
+  # ---- the human-operator contract ---- #
+  # Every human phase is proposed as an explicit operator -- Push(box) with its preconditions and
+  # its add/delete effects -- in the shape cuTAMP states its own. It is never searched over (the
+  # phase order is already fixed by the proposer); it is a contract, and these keys say which halves
+  # of it are actually enforced or put to a camera.
+
+  # Symbolic, before the arm moves and before any image is classified: walk the phase list and
+  # refuse a plan that deletes a precondition a later phase needs. Costs no VLM call, and the
+  # rejection goes back to the proposer through the reprompt loop, so it usually self-corrects.
+  check_plan_effects: true
+
+  # Before each human phase: are its declared preconditions true in the workspace right now? OFF --
+  # the plan-time check above already proved the plan establishes them, so this mostly re-asks a
+  # question already answered, at one VLM call per checkable atom with the arm parked. Worth turning
+  # on when a human phase keeps failing and it is not clear whether it was ever set up properly.
+  check_human_preconditions: false
+  # After each human phase: its add effects must hold AND its delete effects must not. This is the
+  # check that has always run; with an operator it now also catches what the step failed to undo.
+  check_human_effects: true
+
+  # Before each robot leg: are the beliefs earlier phases are on the hook for still true? OFF -- it
+  # lands between perception and cuTAMP with the arm parked, and these runs would rather spend that
+  # time collecting. Turn on to catch the human phase that verified as done but left the world
+  # otherwise, before cuTAMP plans onto it.
+  check_tamp_preconditions: false
+  # After each robot leg. OFF: cuTAMP either found and executed a plan for On(bread, plate) or it
+  # reported that it could not, and the arm's own account of that beats a third-person camera.
+  check_tamp_effects: false
+
+  # An unmet precondition is recorded and reported, but does NOT stop the plan or withhold the arm.
+  # Off while the classifier prompts are still being calibrated: one bad VLM call must not cost an
+  # operator a demonstration. Turn on to make the contract binding.
+  precondition_enforced: false
+hugginface_slug: "8c_pp_3bread_cloth_08272026_v2"
+
+prompt: "place the 3 breads on the plate and then cover the plate with the cloth"
+num_episodes: 20
+

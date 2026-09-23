@@ -1,4 +1,4 @@
-"""TiPToP's runtime, as a recipe: three pinned trees, two patches, two checkpoints, one pixi environment.
+"""TiPToP's runtime, as a recipe: three pinned trees, one patch, two checkpoints, one pixi environment.
 
 Read by ``tandem.planners.runtime``, which does the fetching, patching and building; everything here
 is a fact about TiPToP. A bump is an edit of the commits below -- nothing ships in the wheel any more,
@@ -44,13 +44,19 @@ ASSETS = _HERE / "assets"
 # src/tandem/planners -- which is the whole point: a planner tandem has to fork is a planner tandem has
 # to keep forking.
 #
-# tiptop and cuTAMP MUST move together. Upstream tiptop passes `pick_transparent` and `q_return`, which
-# older cuTAMP trees do not accept; pinning one forward and not the other is a TypeError on every plan.
+# tiptop and cuTAMP MUST move together, and nothing will catch it if they do not: both cuTAMP commits
+# call themselves 0.0.5, so tiptop's check_cutamp_version passes either way. This tiptop imports
+# cutamp.posture_prior and cutamp.particle_initialization.NoGraspsError and always passes the
+# TAMPConfiguration fields transit_apex_*, grasp_center_cost, grasp_rank_conf_weight and
+# require_m2t2_grasps; under the older cuTAMP that is an ImportError at warm, then a TypeError on
+# every config. cuRobo did not move: SamratSahoo/curobo's main is still 3a90ff4, and it already has
+# everything these two call on it (IKSolver.solve_batch(return_seeds=), the VAE cost's retiming).
 # The sidecar is checked against these exact trees (tests/test_planners.py, tests/test_sidecar_legs.py,
-# run by CI with the pinned sources fetched), so move the pins and those checks together.
+# tests/test_tiptop_bump.py, run by CI with the pinned sources fetched), and so is the set of `tamp:`
+# keys a profile may set (core/tamp_keys.py): move the pins and those checks together.
 TIPTOP = Source(
     SourcePin(
-        "tiptop", "https://github.com/SamratSahoo/tiptop.git", "4db8f92671b431de4e5a456523dc84b5246401ee"
+        "tiptop", "https://github.com/SamratSahoo/tiptop.git", "1c6daf3f5d1ab822a0787c40ec0ed6b6caa472de"
     ),
     trim=(
         "docs/_static",  # 22 MB of screen recordings and screenshots
@@ -61,16 +67,20 @@ TIPTOP = Source(
         # $TIPTOP_CALIBRATION: a profile owns its extrinsics instead of the shared runtime. The patch
         # says why at length; upstreaming it would leave this recipe with nothing to patch here.
         PATCHES / "0001-tiptop-config-from-env.patch",
-        # pyrealsense2 becomes an extra. Kept so a fetched tree is byte-for-byte the tree the wheel used
-        # to carry; it is a candidate to drop, since tiptop's pixi.lock still lists the dependency.
-        PATCHES / "0002-tiptop-optional-realsense.patch",
+        # There used to be a second one, making pyrealsense2 an extra. It is gone on purpose: tiptop's
+        # pixi.lock records tiptop's own requires-dist, so editing that list makes the lock stale, and
+        # `pixi install` then re-solves the whole PyPI side instead of installing what tiptop locked
+        # (pixi 0.81, measured: "metadata for local package 'tiptop' has changed", then a re-solve;
+        # `--locked` refuses a stale lock). The environment is linux-64 / Python 3.12 only, where the
+        # locked pyrealsense2 wheel resolves, so the patch bought nothing there. Do not patch
+        # pyproject.toml, pixi.toml or pixi.lock here; change them upstream, together.
     ),
     marker="pixi.toml",
 )
 
 CUTAMP = Source(
     SourcePin(
-        "cuTAMP", "https://github.com/SamratSahoo/cuTAMP.git", "7b0aeaea452f13a4ee73d95f2aacbb3af720ad0f"
+        "cuTAMP", "https://github.com/SamratSahoo/cuTAMP.git", "3a2e4d000339f7460f1989bde84d32b328ac92f9"
     ),
     trim=(
         "cutamp/robots/assets/yam_description",  # 11 MB; the bimanual YAM is out of scope

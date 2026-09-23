@@ -160,7 +160,9 @@ def test_tiptops_patches_and_checkpoints_ship_as_package_data():
     from tandem.planners.tiptop.recipe import RECIPE
 
     shipped = [p for s in RECIPE.sources for p in s.patches] + [a.source for a in RECIPE.assets]
-    assert len(shipped) == 4
+    # One patch (0001, $TIPTOP_CALIBRATION) and two checkpoints. 0002 was dropped with the bump to
+    # tiptop 1c6daf3: it made tiptop's pixi.lock stale (tests/test_tiptop_bump.py).
+    assert len(shipped) == 3
     globs = _package_data_globs()
     for path in shipped:
         assert path.is_file(), f"{path} is missing"
