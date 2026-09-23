@@ -19,8 +19,8 @@ from pathlib import Path
 import pytest
 from helpers import wait_for
 
-from tandem.core import session as session_mod
 from tandem.core.settings import Settings
+from tandem.teleop import child as child_mod
 
 FAKE_TELEOP = Path(__file__).parent / "fake_teleop.py"
 
@@ -81,21 +81,21 @@ def child(tmp_path, monkeypatch):
     made = []
 
     def build(*extra_args):
-        original = session_mod.TeleopChild.start
+        original = child_mod.TeleopChild.start
 
         def start(self):
             self._extra = list(extra_args)
             return original(self)
 
-        monkeypatch.setattr(session_mod.TeleopChild, "start", start)
-        instance = session_mod.TeleopChild(stub, _settings())
+        monkeypatch.setattr(child_mod.TeleopChild, "start", start)
+        instance = child_mod.TeleopChild(stub, _settings())
         # The stand-in takes one extra flag; append it to the argv the real code built.
-        real_popen = session_mod.subprocess.Popen
+        real_popen = child_mod.subprocess.Popen
 
         def popen(args, **kwargs):
             return real_popen([*args, *extra_args], **kwargs)
 
-        monkeypatch.setattr(session_mod.subprocess, "Popen", popen)
+        monkeypatch.setattr(child_mod.subprocess, "Popen", popen)
         made.append(instance.start())
         return made[-1], stub
 
@@ -174,7 +174,7 @@ def test_the_leg_is_stamped_even_when_no_planner_leg_was_recorded_first(child, m
 
     teleop.kill()
     teleop.wait(timeout=5.0)
-    fresh = session_mod.TeleopChild(stub, _settings()).start()
+    fresh = child_mod.TeleopChild(stub, _settings()).start()
     try:
         assert wait_for(lambda: fresh._recording)
         fresh.finish()
@@ -198,7 +198,7 @@ def test_an_unstamped_leg_would_block_the_driver_and_is_answered(child, monkeypa
 
     stub._trajectory_id = ""
     stub.current = None
-    fresh = session_mod.TeleopChild(stub, _settings()).start()
+    fresh = child_mod.TeleopChild(stub, _settings()).start()
     try:
         assert wait_for(lambda: fresh._recording)
         fresh.finish()
