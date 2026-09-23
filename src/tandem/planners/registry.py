@@ -32,11 +32,11 @@ from __future__ import annotations
 import difflib
 import importlib
 import importlib.metadata
-import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from tandem.core import names
 from tandem.core.errors import TandemError
 from tandem.planners.base import (
     BackendContext,
@@ -63,8 +63,12 @@ _registered: dict[str, Any] = {}
 # and must not lose it between calls -- and a name registered anew is never answered from the cache.
 _loaded: dict[str, tuple[Any, BackendFactory]] = {}
 
-# A planner's name is typed into YAML and onto a command line, and becomes part of paths.
-_NAME = re.compile(r"^[a-z][a-z0-9_-]*$")
+# A planner's name is typed into YAML and onto a command line, and becomes part of paths. The same rule
+# as a human executor's (tandem.core.names), so the two catalogs accept the same spellings.
+_NAME = names.NAME
+
+#: What an unknown name's hint points at: the listing that shows every planner, broken ones included.
+LIST_COMMAND = "tandem planners list"
 
 # What the session calls on a backend. A factory that returns something missing one of these fails at
 # create() with the list, rather than at the first human phase with an AttributeError.
@@ -128,9 +132,9 @@ def available() -> list[str]:
     Imports nothing: entry points are listed by name. A name here is one a profile may use, not a
     promise it will load -- ``catalog()`` answers that.
     """
-    names = set(_registered) | set(_BUILTIN)
-    names.update(ep.name for ep in _entry_points() if _NAME.match(ep.name))
-    return sorted(names)
+    known = set(_registered) | set(_BUILTIN)
+    known.update(ep.name for ep in _entry_points() if _NAME.match(ep.name))
+    return sorted(known)
 
 
 def factory(name: str) -> BackendFactory:
@@ -143,6 +147,14 @@ def factory(name: str) -> BackendFactory:
 def info(name: str) -> PlannerInfo:
     """What a catalog says about the planner, with nothing of it built or installed."""
     return factory(name).info
+
+
+def origin(name: str) -> str:
+    """Where the planner ``name`` comes from: "registered", "built-in" or "entry point (<dist> <version>)".
+
+    Imports nothing. "unknown" for a name nothing provides.
+    """
+    return _origin_of((name or "").strip())
 
 
 def capabilities(name: str) -> Capabilities:
@@ -227,8 +239,7 @@ def catalog() -> list[CatalogEntry]:
                     CatalogEntry(
                         name,
                         _ep_origin(ep),
-                        error=f"{name!r} is not a usable planner name (lowercase letters, digits, _ and -, "
-                        "starting with a letter)",
+                        error=f"{name!r} is not a usable planner name ({names.RULE})",
                     )
                 )
             continue
@@ -282,6 +293,9 @@ def _source(name: str) -> tuple[str, Any]:
     known = available()
     suggestion = difflib.get_close_matches(name, known, n=1, cutoff=0.6)
     hint = f"Did you mean {suggestion[0]!r}?" if suggestion else f"Known backends: {', '.join(known)}."
+    # The listing, too: it is where a planner that is installed but will not load shows up with its
+    # reason, which is the likeliest explanation for a name that "should" be here and is not.
+    hint += f" `{LIST_COMMAND}` shows every planner, and why one will not load."
     raise TandemError(f"Unknown planner backend {name!r}.", hint=hint)
 
 
@@ -393,8 +407,7 @@ def _check_name(name: str) -> None:
     if not isinstance(name, str) or not _NAME.match(name):
         raise TandemError(
             f"{name!r} is not a usable planner name.",
-            hint="Use lowercase letters, digits, _ and -, starting with a letter: it is typed into "
-            "profiles and onto command lines.",
+            hint=f"Use {names.RULE}: it is typed into profiles and onto command lines.",
         )
 
 

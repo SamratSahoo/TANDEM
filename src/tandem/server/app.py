@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 
 from tandem import __version__
 from tandem.core.errors import ProfileError, SessionConflict, TandemError
+from tandem.server.routes import planners as planners_routes
 from tandem.server.routes import profiles as profiles_routes
 from tandem.server.routes import sessions as sessions_routes
 from tandem.server.routes import settings as settings_routes
@@ -49,6 +50,7 @@ def create_app(*, initial_profile: str | None = None) -> FastAPI:
     app.include_router(trajectories_routes.router, prefix="/api")
     app.include_router(sessions_routes.router, prefix="/api")
     app.include_router(settings_routes.router, prefix="/api")
+    app.include_router(planners_routes.router, prefix="/api")
 
     @app.get("/api/health")
     async def health() -> dict:

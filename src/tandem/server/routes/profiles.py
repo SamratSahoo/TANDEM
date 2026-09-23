@@ -120,8 +120,12 @@ async def create_profile(body: dict[str, Any] = Body(...)) -> dict:
         profile.description = f"copied from {source}"
         calibration = profiles_mod.calibration(base)
     else:
+        from tandem.cli import planners as planners_cli
+
         profile = profiles_mod.load_file(resources.path("profile_template.yml"), name=name)
         profile.description = ""
+        # The machine's default planner, as `tandem profile create` gives it.
+        profile.planner = profiles_mod.PlannerSpec(backend=planners_cli.planner_for_new_profile())
         calibration = {}
 
     if body.get("prompt"):

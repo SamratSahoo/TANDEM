@@ -100,6 +100,11 @@ jobs:
               "tandem/planners/tiptop/patches/0001-tiptop-config-from-env.patch",
               "tandem/planners/tiptop/assets/vae_full_v2.pt",
               "tandem/planners/tiptop/assets/rnd_droid.pt",
+              # `tandem planners new` writes a plugin package from these; a wheel without them scaffolds nothing.
+              "tandem/resources/scaffold/pyproject.toml.tmpl",
+              "tandem/resources/scaffold/package/planner.py.tmpl",
+              "tandem/resources/scaffold/package/sidecar.py.tmpl",
+              "tandem/resources/scaffold/tests/test_conformance.py.tmpl",
           ]
           missing = [name for name in required if name not in names]
           if missing:
@@ -148,6 +153,11 @@ jobs:
           /tmp/clean/bin/tandem profile list --json
           /tmp/clean/bin/tandem traj list --json
           /tmp/clean/bin/tandem runtime status --json
+          /tmp/clean/bin/tandem planners list --json
+          /tmp/clean/bin/tandem planners info tiptop --json
+          /tmp/clean/bin/tandem executors list --json
+          # From the wheel's own templates, into a directory the installed CLI has never seen.
+          /tmp/clean/bin/tandem planners new smoke --sidecar --dir /tmp/tandem-ci/smoke-planner
           # doctor exits non-zero when a check fails, which it will here (no GPU runtime, no
           # Gemini key). What matters is that it runs and reports rather than crashing.
           /tmp/clean/bin/tandem doctor --no-hardware --json || true

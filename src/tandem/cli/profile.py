@@ -218,8 +218,12 @@ def create(
         )
         origin = f"imported from {import_from or tamp_config}"
     else:
+        from tandem.cli import planners as planners_cli
+
         profile = profiles.load_file(resources.path("profile_template.yml"), name=name)
         profile.description = ""
+        # The machine's default planner (`tandem planners use NAME --default`), not the template's.
+        profile.planner = profiles.PlannerSpec(backend=planners_cli.planner_for_new_profile())
         origin = "from the built-in template"
 
     if prompt:

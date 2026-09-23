@@ -73,6 +73,11 @@ LIGHT_MODULES = [
     "tandem.planners.testing",
     "tandem.cli.runtime",
     "tandem.cli.plan",
+    # The catalogs: listing planners and executors is the laptop's question as much as the rig's.
+    "tandem.core.names",
+    "tandem.cli.planners",
+    "tandem.cli.executors",
+    "tandem.server.routes.planners",
 ]
 
 

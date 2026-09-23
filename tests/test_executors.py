@@ -158,7 +158,9 @@ def test_an_unknown_name_is_refused_with_the_nearest_one(tmp_path):
     ):
         with pytest.raises(TandemError, match="Unknown human executor 'teleopp'") as caught:
             attempt()
-        assert caught.value.hint == "Did you mean 'teleop'?"
+        # The nearest name first, then the listing that shows every executor, broken ones included.
+        assert caught.value.hint.startswith("Did you mean 'teleop'?")
+        assert "`tandem executors list`" in caught.value.hint
 
 
 def test_an_unknown_name_with_nothing_close_lists_the_known_ones_and_the_entry_point():

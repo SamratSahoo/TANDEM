@@ -4,6 +4,11 @@ Every command here acts on one planner's runtime: the planner the active profile
 ``--profile``'s, or ``--planner``), found through the planner registry. For TiPToP that is the GPU
 runtime `tandem init` builds: its pinned sources fetched, its pixi environment solved and cuRobo's
 kernels compiled. A planner that is pure Python has no runtime, and says so.
+
+Choosing a planner, and installing or removing any planner's runtime by name, is `tandem planners`
+(``cli/planners.py``). This group stays for what is specific to the one in use -- entering its
+environment, running a command in it -- and for the scripts already written against it. The pixi
+consent flow and the build with progress live here and are shared by both, and by `tandem init`.
 """
 
 from __future__ import annotations
@@ -36,16 +41,18 @@ _PROFILE = typer.Option(
 def active_planner(profile_name: str | None = None) -> str:
     """The planner a profile names -- the active profile unless one is named.
 
-    A profile that does not exist yet has the planner a new one would get. That is the one case with
+    A profile that does not exist yet has the planner a new one would get: the machine's default
+    (``default_planner``, which `tandem planners use NAME --default` sets). That is the one case with
     no profile to ask, and it is the first thing `tandem init` meets: it builds the runtime before it
     creates the first profile. A profile that exists but does not load is an error, not a reason to
     guess: installing the wrong planner's runtime is twenty minutes and 25 GB spent on nothing.
     """
     from tandem.core import profiles
 
-    name = profile_name or settings_mod.load().active_profile
+    cfg = settings_mod.load()
+    name = profile_name or cfg.active_profile
     if not profiles.exists(name):
-        return profiles.PlannerSpec.model_fields["backend"].default
+        return cfg.default_planner
     return profiles.load(name).planner.backend
 
 
@@ -209,10 +216,19 @@ def status(
     else:
         for problem in payload["problems"]:
             theme.warn(problem)
-        theme.next_steps([("tandem runtime build", "build or repair it")])
+        theme.next_steps(
+            [
+                (f"tandem planners install {payload['planner']}", "build or repair it"),
+                ("tandem planners list", "every planner, and which are installed"),
+            ]
+        )
 
 
-@app.command("build", help="Build (or repair) the runtime of the active profile's planner.")
+@app.command(
+    "build",
+    help="Build (or repair) the runtime of the active profile's planner. `tandem planners install NAME` "
+    "does the same for any planner, by name.",
+)
 def build(
     force: bool = typer.Option(False, "--force", help="Fetch every source again before building."),
     env_only: bool = typer.Option(False, "--env-only", help="Stop once the environment is solved."),
@@ -365,6 +381,43 @@ def _pixi_installed() -> bool:
     from tandem.core.probe import find_pixi
 
     return find_pixi() is not None
+
+
+def needs_pixi(rt: Any) -> bool:
+    """Whether building ``rt`` runs pixi: a recipe's runtime that declares an environment."""
+    from tandem.planners.runtime import RecipeRuntime
+
+    return isinstance(rt, RecipeRuntime) and rt.recipe.environment is not None
+
+
+def ensure_pixi(title: str, *, ask: bool, allowed: bool) -> None:
+    """The consent flow before pixi is installed into the home directory: `init`'s and `planners install`'s.
+
+    pixi's installer is `curl | bash` into ~/.pixi, and it edits the shell's rc file on the way. That
+    is done on an explicit yes and nothing less: ``ask`` puts the question to the person at the
+    terminal, and ``allowed`` is a yes given in advance (``--yes``, or `tandem init`'s own "accept
+    every default"). With neither, the answer is an error saying how to give it -- never a silent
+    install, and never a build that fails twenty seconds in because the tool it needs is missing.
+    """
+    if _pixi_installed():
+        return
+    theme.info(f"pixi is the environment manager {title}'s planner stack needs.")
+    theme.info("It installs to ~/.pixi and touches nothing else.")
+    if ask:
+        if not typer.confirm("  Install pixi now?", default=True):
+            raise TandemError(
+                "pixi is required to build the runtime.",
+                hint="Install it from https://pixi.sh, then run the command again.",
+            )
+    elif not allowed:
+        raise TandemError(
+            f"pixi is not installed, and the {title} runtime is built in a pixi environment.",
+            hint="Run again with --yes to let tandem install it (into ~/.pixi), or install it yourself "
+            "from https://pixi.sh.",
+        )
+    theme.busy("Installing pixi")
+    install_pixi(log=lambda _line: None)
+    theme.ok("pixi installed")
 
 
 def install_pixi(log=None) -> None:

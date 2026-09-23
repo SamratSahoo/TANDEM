@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import tomlkit
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from tandem.core import paths
 from tandem.core.errors import TandemError
@@ -42,8 +42,25 @@ class Settings(BaseModel):
     data_root: str = ""  # blank -> paths.default_data_root()
     runtime_dir: str = ""  # blank -> paths.default_runtime_dir()
     hf_org: str = ""
+    # The planner a NEW profile plans with (`tandem planners use NAME --default`). A profile, once it
+    # exists, names its own planner and this never overrides it. It is also whose runtime `tandem
+    # init` builds before the first profile exists.
+    default_planner: str = "tiptop"
     ui: UiSettings = Field(default_factory=UiSettings)
     teleop: TeleopSettings = Field(default_factory=TeleopSettings)
+
+    @field_validator("default_planner")
+    @classmethod
+    def _planner_name(cls, v: str) -> str:
+        # The shape only, not whether the planner is installed. Settings load before every command,
+        # `tandem planners` included, so a default naming a plugin that was since uninstalled must not
+        # take down the very command that lists planners and changes the default. It is checked
+        # against the registry where it is used: when a profile is created with it.
+        from tandem.core import names
+
+        if not names.is_valid(v):
+            raise ValueError(f"must be a planner's name ({names.RULE}), such as tiptop")
+        return v
 
     # ---- resolved accessors -------------------------------------------------
 
@@ -147,6 +164,9 @@ def get_dotted(settings: Settings, key: str):
 
 
 def set_dotted(settings: Settings, key: str, value: str) -> Settings:
+    # On a copy: `settings` is usually the cached object every later load() returns, and a value that
+    # fails validation below must not be left in it.
+    settings = settings.model_copy(deep=True)
     parts = key.split(".")
     node = settings
     for part in parts[:-1]:
@@ -160,8 +180,14 @@ def set_dotted(settings: Settings, key: str, value: str) -> Settings:
     field = type(node).model_fields[leaf]
     coerced = _coerce(value, field.annotation)
     setattr(node, leaf, coerced)
-    # Re-validate the whole tree so a bad value is rejected here, not at next load.
-    return Settings.model_validate(settings.model_dump())
+    # Re-validate the whole tree so a bad value is rejected here, not at next load -- as an error the
+    # CLI renders, not a pydantic traceback.
+    try:
+        return Settings.model_validate(settings.model_dump())
+    except ValueError as exc:
+        errors = getattr(exc, "errors", None)
+        detail = "; ".join(str(e.get("msg", "")).removeprefix("Value error, ") for e in errors()) if errors else str(exc)
+        raise TandemError(f"{value!r} is not a valid {key}: {detail}", hint="Run `tandem config list`.") from exc
 
 
 def _coerce(value: str, annotation):

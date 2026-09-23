@@ -403,7 +403,7 @@ class HitlSpec(BaseModel):
         from tandem.planning.config import HUMAN_EXECUTOR_NAME
 
         if not HUMAN_EXECUTOR_NAME.fullmatch(v):
-            raise ValueError("must be the name of a human executor, such as teleop")
+            raise ValueError("must be the name of a human executor (lowercase), such as teleop")
         try:
             executors.check_name(v)
         except TandemError as exc:
@@ -463,7 +463,9 @@ class PlannerSpec(BaseModel):
         if v not in known:
             close = difflib.get_close_matches(v, known, n=1, cutoff=0.6)
             suffix = f" (did you mean {close[0]!r}?)" if close else ""
-            raise ValueError(f"must be one of {', '.join(known)}{suffix}")
+            raise ValueError(
+                f"must be one of {', '.join(known)}{suffix}; `{registry.LIST_COMMAND}` shows every planner"
+            )
         return v
 
 

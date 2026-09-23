@@ -141,7 +141,14 @@ runtime under `~/.local/share/tandem/`. The planner's sources are not in the pac
 fetches them at the exact commits this version of tandem pins (with `git`, or GitHub's archive of
 the commit where there is no `git`). A workstation with no network installs from a bundle made
 elsewhere — `python tools/bundle.py --planner tiptop --out DIR`, then
-`tandem runtime build --sources DIR`.
+`tandem planners install tiptop --sources DIR`.
+
+**Which planner.** TiPToP is the planner tandem ships, and the one `tandem init` sets up unless
+told otherwise (`--planner NAME`). `tandem planners list` shows every planner tandem can see —
+including any an installed package registers — whether this machine has built it, and which one
+the active profile plans with. `tandem planners install NAME` builds one; `tandem planners use
+NAME` switches a profile to it. To add your own, `tandem planners new NAME` scaffolds a package
+that passes tandem's conformance kit before you have written a line of it.
 
 <table>
 <tr><td width="50%">
@@ -233,7 +240,8 @@ package itself — no Node, no build step, no CDN.
   controls as the terminal, and an inline review at the label prompt so you decide while
   looking at the rollout rather than from memory.
 - **Profiles** — edit a profile and see exactly what the planner will receive.
-- **Settings** — credentials, paths, runtime status, and the full diagnostic report.
+- **Settings** — credentials, paths, the planners and human executors (which is installed, which
+  the profile uses, and a button to switch), runtime status, and the full diagnostic report.
 
 The plots show something worth knowing: the shaded bands are the frames that π₀.₅-DROID's
 non-idle filter will **throw away at training time**. A rollout that looks fine can be 40%
@@ -326,10 +334,14 @@ $ tandem profile show fold-cloth --tamp
 | `tandem traj list \| show \| open \| relabel \| rm \| merge` | Inspect trajectories. `open` is a 3D replay in Rerun; `merge` re-joins a hand-off's legs if the automatic merge failed. |
 | `tandem export lerobot` | Build a LeRobot v3.0 dataset and optionally push it to the Hub. |
 | `tandem config set-gemini-key` | Store the Gemini key. `--stdin` keeps it out of shell history. |
-| `tandem runtime status \| build \| shell \| run` | The GPU runtime. |
+| `tandem planners list \| info \| install \| use \| remove` | The task and motion planners tandem can drive: which this machine has, which a profile plans with. Install one's runtime, switch a profile to it (`--default` for every new profile). TiPToP ships; a package adds another through the `tandem.planners` entry point. |
+| `tandem planners new <name> [--sidecar]` | Scaffold a package for a planner of your own. It passes tandem's conformance kit as generated. |
+| `tandem executors list \| use` | Who carries out a human phase (`hitl.human_executor`), and what each still needs here. |
+| `tandem runtime status \| build \| shell \| run` | The runtime of the planner the active profile uses. |
 
 The commands that report state — `doctor`, `profile list|show`, `traj list|show`,
-`runtime status`, `config list` — all take `--json`. `NO_COLOR` is honoured.
+`planners list|info`, `executors list`, `runtime status`, `config list` — all take `--json`.
+`NO_COLOR` is honoured.
 
 ---
 

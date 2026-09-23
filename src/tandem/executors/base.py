@@ -49,6 +49,7 @@ from importlib import import_module, metadata
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
+from tandem.core import names
 from tandem.core.errors import TandemError
 from tandem.planners.base import LegSpec
 
@@ -56,6 +57,9 @@ if TYPE_CHECKING:
     from tandem.core.phase_loop import HumanPhase
 
 ENTRY_POINT_GROUP = "tandem.human_executors"
+
+#: What an unknown name's hint points at: the listing of every executor, broken ones included.
+LIST_COMMAND = "tandem executors list"
 
 # What a leg an executor records is, in its _meta.json. The merge and the export treat "tamp" legs as
 # the planner's (the DROID action identity is derived only for those), so an executor may not claim it:
@@ -368,12 +372,10 @@ def register_human_executor(name: str, factory: Any, *, replace: bool = False) -
     A name that is already taken, built in or installed, is refused unless `replace` is set. Shadowing
     an executor has to be done on purpose, because every leg it records is attributed to that name.
     """
-    from tandem.planning.config import HUMAN_EXECUTOR_NAME
-
-    if not isinstance(name, str) or not HUMAN_EXECUTOR_NAME.fullmatch(name):
+    if not names.is_valid(name):
         raise TandemError(
             f"{name!r} cannot be the name of a human executor.",
-            hint="A name is a letter, then letters, digits, _ or -, as it is written in hitl.human_executor.",
+            hint=f"Use {names.RULE}, as it is written in hitl.human_executor -- the same rule as a planner's.",
         )
     if factory is None:
         raise TandemError(f"No factory was given for the human executor {name!r}.")
@@ -579,6 +581,8 @@ def _unknown(name: str) -> TandemError:
             f"{ENTRY_POINT_GROUP!r} entry point, so install the package that provides it, or name one "
             "of these."
         )
+    # The listing also shows an installed executor that will not load, and why.
+    hint += f" `{LIST_COMMAND}` shows every human executor."
     return TandemError(f"Unknown human executor {name!r}.", hint=hint)
 
 

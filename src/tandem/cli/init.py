@@ -37,6 +37,12 @@ def init(
         exists=True,
         file_okay=False,
     ),
+    planner: str = typer.Option(
+        None,
+        "--planner",
+        help="The planner the profile plans with, and whose runtime is built (see `tandem planners list`). "
+        "Default: the profile's own, or for a new one the machine's default (tiptop).",
+    ),
 ) -> None:
     interactive = theme.is_tty() and not yes
     theme.banner("setup")
@@ -93,13 +99,22 @@ def init(
     theme.ok("Data root", str(data_root))
     theme.blank()
 
-    # ---- 4. the GPU runtime -------------------------------------------------
+    # ---- 4. the planner -----------------------------------------------------
+    # Chosen before anything is built: the runtime step builds THIS planner's runtime, and the profile
+    # step creates the profile with it. A laptop builds nothing, so it is only shown the choice it
+    # made on the command line, if any.
     if not viz_only:
-        theme.rule("gpu runtime")
-        _build_runtime(profile_name, interactive=interactive, repair=repair)
+        theme.rule("planner")
+        planner = _choose_planner(profile_name, planner, interactive=interactive)
         theme.blank()
 
-    # ---- 5. the Gemini key --------------------------------------------------
+    # ---- 5. the GPU runtime -------------------------------------------------
+    if not viz_only:
+        theme.rule("gpu runtime")
+        _build_runtime(profile_name, interactive=interactive, repair=repair, planner=planner)
+        theme.blank()
+
+    # ---- 6. the Gemini key --------------------------------------------------
     theme.rule("gemini api key")
     source = secrets.gemini_key_source()
     if source != "none" and not repair:
@@ -121,38 +136,97 @@ def init(
             theme.warn("No key set", "run `tandem config set-gemini-key`")
     theme.blank()
 
-    # ---- 6. the first profile -----------------------------------------------
+    # ---- 7. the first profile -----------------------------------------------
     theme.rule("profile")
     if profiles.exists(profile_name) and not repair:
         theme.ok(f"Profile {profile_name!r} already exists", str(profiles.profiles_root() / profile_name))
+        if planner is not None:
+            _switch_planner(profile_name, planner)
     else:
         _create_profile(
-            profile_name, import_from=import_from, interactive=interactive, viz_only=viz_only
+            profile_name, import_from=import_from, interactive=interactive, viz_only=viz_only, planner=planner
         )
     cfg = settings_mod.load()
     cfg.active_profile = profile_name
     settings_mod.save(cfg)
     theme.blank()
 
-    # ---- 7. teleop hand-off (optional) --------------------------------------
+    # ---- 8. teleop hand-off (optional) --------------------------------------
     if not viz_only:
         theme.rule("teleop hand-off  (optional)")
         _setup_teleop(interactive=interactive, repair=repair)
         theme.blank()
 
-    # ---- 8. done ------------------------------------------------------------
+    # ---- 9. done ------------------------------------------------------------
     _summary(viz_only=viz_only, profile_name=profile_name)
 
 
 # --------------------------------------------------------------------------- steps
 
 
-def _build_runtime(profile_name: str, *, interactive: bool, repair: bool) -> None:
-    """Build the runtime of the planner this profile uses -- the one a new profile gets, before it exists."""
-    from tandem.planners import registry
-    from tandem.planners.runtime import RecipeRuntime
+def _choose_planner(profile_name: str, requested: str | None, *, interactive: bool) -> str:
+    """Which planner this machine is set up for: the catalog shown, one chosen, and checked.
 
-    planner, runtime = runtime_cli.planner_runtime(profile_name=profile_name)
+    ``--planner`` wins. Otherwise a profile that already exists keeps the planner it names -- init is
+    re-run on a working machine, and must not quietly swap its planner -- and a new one gets the
+    machine's default, or, at a terminal with more than one planner to choose from, the one picked.
+    The choice is checked against the registry here, before twenty minutes go into a runtime.
+    """
+    from tandem.cli import planners as planners_cli
+    from tandem.planners import registry
+
+    payload = planners_cli.catalog_payload(profile_name=profile_name)
+    planners_cli.render_catalog(payload["planners"])
+    for row in payload["planners"]:
+        if row["status"] == planners_cli.BROKEN:
+            theme.fail(f"{row['name']}: {row['detail']}")
+
+    # A profile that exists but does not load is an error, not a reason to guess its planner.
+    existing = profiles.load(profile_name).planner.backend if profiles.exists(profile_name) else None
+    usable = [row["name"] for row in payload["planners"] if row["ok"]]
+    if requested:
+        choice = requested
+    elif existing:
+        choice = existing
+    elif interactive and len(usable) > 1:
+        default = payload["default_planner"] if payload["default_planner"] in usable else usable[0]
+        choice = typer.prompt("  Planner", default=default).strip()
+    else:
+        choice = payload["default_planner"]
+
+    info = registry.info(choice)  # unknown or broken: the registry's own error, with the nearest name
+    detail = f"profile {profile_name!r} plans with it" if existing == choice else choice
+    theme.ok(f"Planner: {info.title}", detail)
+    if existing and existing != choice:
+        theme.info(f"Profile {profile_name!r} plans with {existing} now; it will be switched to {choice}.")
+    return choice
+
+
+def _switch_planner(profile_name: str, planner: str) -> None:
+    """Point an existing profile at the planner init was asked to set up, saying what changed."""
+    from tandem.cli import planners as planners_cli
+
+    if profiles.load(profile_name).planner.backend == planner:
+        return
+    result = planners_cli.use_planner(planner, profile_name=profile_name)
+    theme.ok(f"Profile {profile_name!r} now plans with {result['display_name']}", f"was {result['previous']}")
+    if result["dropped_options"]:
+        theme.warn(
+            f"Removed planner.options {', '.join(sorted(map(str, result['dropped_options'])))}",
+            f"they were {result['previous']}'s own settings",
+        )
+
+
+def _build_runtime(profile_name: str, *, interactive: bool, repair: bool, planner: str | None = None) -> None:
+    """Build ``planner``'s runtime -- by default the one the profile uses, or a new profile would get.
+
+    The consent flow for pixi and the build itself are `tandem planners install`'s (``cli/runtime``),
+    so the wizard and the command cannot drift apart. `init` is "accept every default" when it cannot
+    ask, so without a terminal it installs pixi rather than failing.
+    """
+    from tandem.planners import registry
+
+    planner, runtime = runtime_cli.planner_runtime(planner=planner, profile_name=profile_name)
     title = registry.info(planner).title
     if runtime is None:
         theme.ok(f"{title} is pure Python", "there is no runtime to build")
@@ -163,23 +237,13 @@ def _build_runtime(profile_name: str, *, interactive: bool, repair: bool) -> Non
         theme.ok("Runtime is already built", str(status.path))
         return
 
-    needs_pixi = isinstance(runtime, RecipeRuntime) and runtime.recipe.environment is not None
-    if needs_pixi and probe.find_pixi() is None:
-        theme.info(f"pixi is the environment manager {title}'s planner stack needs.")
-        theme.info("It installs to ~/.pixi and touches nothing else.")
-        if interactive and not typer.confirm("  Install pixi now?", default=True):
-            raise TandemError(
-                "pixi is required to build the runtime.",
-                hint="Install it from https://pixi.sh, then re-run `tandem init`.",
-            )
-        theme.busy("Installing pixi")
-        runtime_cli.install_pixi(log=lambda _line: None)
-        theme.ok("pixi installed")
+    if runtime_cli.needs_pixi(runtime):
+        runtime_cli.ensure_pixi(title, ask=interactive, allowed=True)
 
-    for note in runtime.recipe.notes if isinstance(runtime, RecipeRuntime) else ():
+    for note in getattr(getattr(runtime, "recipe", None), "notes", ()) or ():
         theme.info(note)
     if interactive and not typer.confirm("  Build it now?", default=True):
-        theme.warn("Skipped", "run `tandem runtime build` when you are ready")
+        theme.warn("Skipped", f"run `tandem planners install {planner}` when you are ready")
     else:
         runtime_cli.run_build(runtime, force=repair)
 
@@ -215,8 +279,18 @@ def _render_checks(checks: list[probe.Check]) -> None:
 
 
 def _create_profile(
-    name: str, *, import_from: Path | None, interactive: bool, viz_only: bool = False
+    name: str,
+    *,
+    import_from: Path | None,
+    interactive: bool,
+    viz_only: bool = False,
+    planner: str | None = None,
 ) -> None:
+    from tandem.cli import planners as planners_cli
+
+    # Resolved before anything is written: a default naming a planner this machine no longer has
+    # stops here, not in a profile that every later command refuses.
+    planner = planners_cli.planner_for_new_profile(planner)
     calibration: dict = {}
     notes: list[str] = []
 
@@ -258,6 +332,9 @@ def _create_profile(
     if interactive:
         profile.task.prompt = typer.prompt("  Task prompt", default=profile.task.prompt).strip()
 
+    # The planner init set this machine up for, whether the rest came from the template or an import:
+    # a profile naming a different planner from the runtime just built would not collect.
+    profile.planner = profiles.PlannerSpec(backend=planner)
     path = profiles.save(profile)
     if calibration:
         profile.calibration_file().write_text(json.dumps(calibration, indent=2) + "\n")
@@ -327,11 +404,17 @@ def _setup_teleop(*, interactive: bool, repair: bool) -> None:
 def _summary(*, viz_only: bool, profile_name: str) -> None:
     cfg = settings_mod.load()
     theme.rule("ready")
+    try:
+        planner, runtime = runtime_cli.planner_runtime(profile_name=profile_name)
+        where = runtime.status().path if runtime is not None else "none needed (pure Python)"
+    except TandemError as exc:
+        planner, where = "unknown", exc.message.splitlines()[0]
     theme.kv(
         [
             ("profile", profile_name),
+            ("planner", planner),
             ("data root", cfg.resolved_data_root()),
-            ("runtime", "not installed (visualization only)" if viz_only else cfg.resolved_runtime_dir()),
+            ("runtime", "not installed (visualization only)" if viz_only else where),
             ("config", paths.config_file()),
         ]
     )

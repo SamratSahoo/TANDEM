@@ -546,7 +546,8 @@ class RecipeRuntime:
         detail = "\n".join(f"  · {p}" for p in st.problems)
         raise RuntimeNotReady(
             f"The {self.recipe.display_name} runtime at {self.root} is not ready.\n{detail}",
-            hint="Run `tandem init` to build it, or `tandem runtime build` to retry just this step.",
+            hint=f"Run `tandem planners install {self.recipe.planner}` to build or repair it; every step "
+            "already done is skipped.",
         )
 
     def record(self) -> dict:
