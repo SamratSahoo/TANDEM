@@ -1,9 +1,14 @@
-"""Import an existing hitl-tamp-vla setup into a tandem profile.
+"""Import an existing hitl-tamp-vla setup into a tandem profile that plans with TiPToP.
 
 The monorepo split one setup across two files — ``tiptop/tiptop/config/tiptop.yml`` (robot,
 cameras, perception) and ``data-collection/cfg/tamp/<name>.yml`` (task, TAMP overrides,
 episode target, HF slug) — plus a calibration JSON keyed by camera serial. This reassembles
 them into a single profile so an existing rig is one command away from working.
+
+TiPToP's, because everything it reads is TiPToP's configuration: the robot, the perception and the
+TAMP overrides land in the profile's ``planner.options`` (``options.py``), the cameras and the task
+in the profile itself. It is offered to tandem through the factory's ``importer`` (``IMPORTER``
+below), so `tandem profile create --import-from` and `tandem init` reach it without naming TiPToP.
 """
 
 from __future__ import annotations
@@ -15,7 +20,8 @@ from typing import Any
 from ruamel.yaml import YAML
 
 from tandem.core.errors import TandemError
-from tandem.core.profiles import Profile, resolve_interpolation, validate_tamp
+from tandem.core.profiles import Profile, resolve_interpolation
+from tandem.planners.tiptop.options import validate_tamp
 
 # The same dereferencing a profile does when it is read, so an imported value and a stored
 # one can never disagree about what ${oc.env:...} means.
@@ -101,10 +107,17 @@ def build_profile(
     data: dict[str, Any] = template.model_dump(mode="python", exclude_none=True)
     data["name"] = name
     data["description"] = ""
+    # Whatever the template plans with, an import is TiPToP's settings: they are TiPToP's options.
+    planner = data.setdefault("planner", {})
+    if planner.get("backend") != "tiptop":
+        from tandem.planners.tiptop.options import TiptopOptions
+
+        planner.update(backend="tiptop", options=TiptopOptions().to_options())
+    options = planner.setdefault("options", {})
 
     cfg_path = sources.get("tiptop_config")
     if cfg_path and cfg_path.is_file():
-        _merge_tiptop_config(data, _load_yaml(cfg_path))
+        _merge_tiptop_config(data, options, _load_yaml(cfg_path))
         notes.append(f"robot and cameras from {cfg_path}")
     elif root is not None:
         notes.append(
@@ -115,7 +128,7 @@ def build_profile(
     if tamp_config is not None:
         if not tamp_config.is_file():
             raise TandemError(f"No such TAMP config: {tamp_config}")
-        _merge_tamp_config(data, _load_yaml(tamp_config))
+        _merge_tamp_config(data, options, _load_yaml(tamp_config))
         data["description"] = f"imported from {tamp_config.name}"
         notes.append(f"task and TAMP settings from {tamp_config}")
 
@@ -143,12 +156,12 @@ def build_profile(
     return profile, calibration, notes
 
 
-def _merge_tiptop_config(data: dict, raw: dict) -> None:
+def _merge_tiptop_config(data: dict, options: dict, raw: dict) -> None:
     # Merged into the template's defaults, not substituted for them: an upstream tiptop.yml
     # may omit a field (q_capture, gripper_port) that the profile schema still needs.
     robot = raw.get("robot") or {}
     if robot:
-        data.setdefault("robot", {}).update(
+        options.setdefault("robot", {}).update(
             {
                 k: _deref(v)
                 for k, v in robot.items()
@@ -178,7 +191,7 @@ def _merge_tiptop_config(data: dict, raw: dict) -> None:
 
     perc = raw.get("perception") or {}
     if perc:
-        target = data.setdefault("perception", {})
+        target = options.setdefault("perception", {})
         m2t2 = perc.get("m2t2") or {}
         if m2t2:
             # The upstream URL embeds ${oc.env:TIPTOP_M2T2_PORT,8123} mid-string, which is
@@ -204,7 +217,7 @@ def _merge_tiptop_config(data: dict, raw: dict) -> None:
                 target[key] = perc[key]
 
 
-def _merge_tamp_config(data: dict, raw: dict) -> None:
+def _merge_tamp_config(data: dict, options: dict, raw: dict) -> None:
     task: dict[str, Any] = {}
     if raw.get("prompt"):
         task["prompt"] = str(raw["prompt"])
@@ -222,7 +235,7 @@ def _merge_tamp_config(data: dict, raw: dict) -> None:
         # produces. Unknown keys fail loudly rather than import a knob that does nothing --
         # upstream configs really do contain such typos, and they cost whole datasets.
         try:
-            data["tamp"] = validate_tamp(dict(overrides))
+            options["tamp"] = validate_tamp(dict(overrides))
         except ValueError as exc:
             raise TandemError(
                 f"The TAMP settings in this config are not valid:\n  {exc}",
@@ -244,3 +257,33 @@ def resolve_hf_repo(slug: str, org: str | None) -> str:
     if "/" in slug or not org:
         return slug
     return f"{org}/{slug}"
+
+
+# --------------------------------------------------------------------------- as the factory offers it
+
+
+class HitlTampVlaImporter:
+    """The monorepo importer, as TiPToP's factory offers it (``tandem.planners.base.ProfileImporter``)."""
+
+    source = "a hitl-tamp-vla checkout"
+
+    def find(self, near: Path) -> Path | None:
+        """A hitl-tamp-vla checkout at or above ``near``. Only a suggestion: it is confirmed before any read."""
+        here = Path(near).resolve()
+        for base in (here, *here.parents):
+            for name in ("hitl-tamp-vla", "tamp-vla"):
+                candidate = base / name
+                if candidate.is_dir() and find_sources(candidate)["tiptop_config"]:
+                    return candidate
+        return None
+
+    def configs(self, source: Path) -> list[Path]:
+        return list_tamp_configs(source)
+
+    def build(
+        self, name: str, *, source: Path | None = None, config: Path | None = None
+    ) -> tuple[Profile, dict, list[str]]:
+        return build_profile(name, root=source, tamp_config=config)
+
+
+IMPORTER = HitlTampVlaImporter()

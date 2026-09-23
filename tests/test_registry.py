@@ -105,8 +105,8 @@ def test_options_survive_a_profile_round_trip(profile):
     loaded = profiles.load(profile.name)
     assert loaded.planner.backend == "toy"
     assert loaded.planner.options == {"bins": ["red", "blue"], "speed": 0.5}
-    # A profile that says nothing about options has none, rather than failing to load.
-    assert profiles.PlannerSpec().options == {}
+    # A profile that says nothing about options has the planner's defaults, rather than failing to load.
+    assert profiles.PlannerSpec().options == TIPTOP.validate_options({})
 
 
 def test_the_session_builds_a_registered_planner_from_one_context(profile, tmp_path, monkeypatch):
@@ -261,16 +261,24 @@ def test_an_installed_plugin_is_listed_by_name_without_being_imported(plugin, mo
         FACTORY = FakeFactory("toy")
         """,
     )
-    _declare(monkeypatch, ("toy", f"{module}:FACTORY"))
+    other = plugin(
+        "other_planner_plugin",
+        """
+        from helpers import FakeFactory
+        FACTORY = FakeFactory("other")
+        """,
+    )
+    _declare(monkeypatch, ("toy", f"{module}:FACTORY"), ("other", f"{other}:FACTORY"))
 
-    assert registry.available() == ["tiptop", "toy"]
-    # A profile naming it validates without importing it: listing planners, or loading a profile,
-    # must never cost an import of every plugin installed.
+    # Listing planners imports none of them.
+    assert registry.available() == ["other", "tiptop", "toy"]
+    assert module not in sys.modules and other not in sys.modules
+    # A profile naming one imports that one -- its options are its to check -- and never the rest:
+    # loading a profile must not cost an import of every plugin installed.
     assert profiles.PlannerSpec(backend="toy").backend == "toy"
-    assert module not in sys.modules
+    assert module in sys.modules and other not in sys.modules
 
     loaded = registry.factory("toy")
-    assert module in sys.modules
     assert registry.factory("toy") is loaded
     (entry,) = _entries("toy")
     assert entry.ok and entry.origin.startswith("entry point") and entry.info.name == "toy"
@@ -442,6 +450,12 @@ def test_tiptops_catalog_pins_are_the_commits_its_install_delivers():
     assert TIPTOP.runtime().recipe is RECIPE
 
 
+@pytest.fixture
+def gemini_key(monkeypatch):
+    """TiPToP's perception calls Gemini, so its factory will not build a backend without a key."""
+    monkeypatch.setattr(secrets, "gemini_api_key", lambda: "test-key")
+
+
 def _context(profile, tmp_path, **overrides) -> BackendContext:
     session_dir = paths.session_scratch_dir() / profile.name / "s1"
     session_dir.mkdir(parents=True, exist_ok=True)
@@ -457,15 +471,21 @@ def _context(profile, tmp_path, **overrides) -> BackendContext:
         task="stack the cups",
         events_file=events,
         runtime_dir=tmp_path / "runtime",
+        options=dict(profile.planner.options),
     )
     fields.update(overrides)
     return BackendContext(**fields)
 
 
-def test_the_tiptop_factory_builds_what_the_session_used_to_build_inline(profile, tmp_path):
-    profile.tamp = {"num_particles": 256}
+def test_the_tiptop_factory_builds_what_the_session_used_to_build_inline(profile, tmp_path, gemini_key):
     # The session's events file, wherever the session keeps it: the sidecar appends to the same one.
-    ctx = _context(profile, tmp_path, events_file=tmp_path / "the-sessions-events.jsonl")
+    # TiPToP's settings are what the session hands the factory: the profile's planner.options.
+    ctx = _context(
+        profile,
+        tmp_path,
+        events_file=tmp_path / "the-sessions-events.jsonl",
+        options={**profile.planner.options, "tamp": {"num_particles": 256}},
+    )
 
     backend = registry.create("tiptop", ctx)
 
@@ -482,35 +502,42 @@ def test_the_tiptop_factory_builds_what_the_session_used_to_build_inline(profile
     assert json.loads(backend._cost_overrides_file.read_text()) == {"num_particles": 256}
 
 
-def test_tiptop_is_handed_no_overrides_when_the_profile_sets_none(profile, tmp_path):
-    profile.tamp = {}
-    backend = TIPTOP.create(_context(profile, tmp_path))
+def test_tiptop_is_handed_no_overrides_when_the_profile_sets_none(profile, tmp_path, gemini_key):
+    backend = TIPTOP.create(_context(profile, tmp_path, options={**profile.planner.options, "tamp": {}}))
     assert backend._cost_overrides_file is None
 
 
 def test_tiptop_refuses_options_it_does_not_read(profile, tmp_path):
-    with pytest.raises(TandemError, match="takes no planner.options, but the profile sets speed"):
+    with pytest.raises(TandemError, match=r"planner.options.speed: Extra inputs are not permitted"):
         TIPTOP.create(_context(profile, tmp_path, options={"speed": 2}))
 
 
-def test_tiptop_refuses_a_camera_with_no_extrinsics_before_writing_anything(profile, tmp_path):
+def test_tiptop_refuses_a_camera_with_no_extrinsics_before_writing_anything(profile, tmp_path, gemini_key):
     profile.calibration_file().write_text("{}\n")
     with pytest.raises(TandemError, match="no camera extrinsics"):
         TIPTOP.create(_context(profile, tmp_path))
     assert not (paths.session_scratch_dir() / profile.name / "tiptop.yml").exists()
 
 
-def test_tiptops_asset_warnings_reach_the_operator(profile, tmp_path):
-    profile.tamp = {"blend_ops": ["Pick"]}
+def test_tiptops_asset_warnings_reach_the_operator(profile, tmp_path, gemini_key):
     logs: list[tuple[str, str]] = []
-    TIPTOP.create(_context(profile, tmp_path, on_log=lambda stream, text: logs.append((stream, text))))
+    TIPTOP.create(
+        _context(
+            profile,
+            tmp_path,
+            options={**profile.planner.options, "tamp": {"blend_ops": ["Pick"]}},
+            on_log=lambda stream, text: logs.append((stream, text)),
+        )
+    )
     assert any(
         stream == "tandem" and text.startswith("warning: blend_ops is set but blend_trajectory is not true")
         for stream, text in logs
     )
 
 
-def test_tiptop_finds_its_runtime_in_the_settings_when_the_caller_names_none(profile, tmp_path, monkeypatch):
+def test_tiptop_finds_its_runtime_in_the_settings_when_the_caller_names_none(
+    profile, tmp_path, monkeypatch, gemini_key
+):
     monkeypatch.delenv("TANDEM_RUNTIME_DIR", raising=False)
     settings = settings_mod.Settings(runtime_dir=str(tmp_path / "elsewhere"))
     backend = TIPTOP.create(_context(profile, tmp_path, runtime_dir=None, settings=settings))

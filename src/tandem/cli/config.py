@@ -87,7 +87,11 @@ def set_(
     theme.ok(f"{key} = {settings_mod.get_dotted(updated, key)}", str(path))
 
 
-@app.command("set-gemini-key", help="Store the Gemini API key tiptop's perception uses.")
+@app.command(
+    "set-gemini-key",
+    help="Store the Gemini API key: phase planning uses it, and so does a planner whose perception calls "
+    "Gemini (TiPToP's does).",
+)
 def set_gemini_key(
     from_stdin: bool = typer.Option(
         False,

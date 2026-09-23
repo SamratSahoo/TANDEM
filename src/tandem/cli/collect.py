@@ -65,20 +65,23 @@ def collect(
     backend = profile.planner.backend
     # Fail before printing a session header for a session that cannot start.
     registry.require_runtime(backend, cfg)
+    view = registry.describe_options(backend, profile, settings=cfg)
 
     theme.blank()
     theme.heading(f"collect · {profile.name}", profile.description)
     theme.kv(
         [
             ("task", task or profile.goal_or_prompt()),
-            ("robot", f"{profile.robot.type} at {profile.robot.host}  ·  {profile.robot.time_dilation_factor:.0%} speed"),
+            ("planner", "  ·  ".join(filter(None, (registry.info(backend).title, view.summary)))),
             ("cameras", ", ".join(profile.cameras.configured())),
             ("execute", "no — planning only" if no_execute else "yes"),
             ("output", profile.trajectories_dir()),
         ]
     )
-    if profile.tamp:
-        theme.info(f"{len(profile.tamp)} TAMP override(s) active", "tandem profile show --tamp")
+    if view.receives:
+        theme.info(f"{len(view.receives)} planner setting(s) passed on", "tandem profile show --planner")
+    for warning in view.warnings:
+        theme.warn(warning)
     if profile.hitl.enabled:
         theme.info(
             "phase planning is on",

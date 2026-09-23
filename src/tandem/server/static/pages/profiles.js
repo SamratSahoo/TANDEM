@@ -1,4 +1,8 @@
 // Profiles — the cards, and an editor that shows exactly what the planner will receive.
+//
+// The planner's own settings (planner.options) are edited as one JSON block and described by the
+// planner itself (planner_view: a summary, what it receives, what is wrong), so this page knows no
+// planner's schema and shows a planner registered tomorrow the same way it shows TiPToP.
 
 import { api } from "../api.js";
 import { clear, h, mount } from "../dom.js";
@@ -53,9 +57,8 @@ function card(profile, state, refresh, editorHost) {
       h("div.bar" + (pct >= 100 ? ".done" : ""), h("span", { style: { width: `${pct}%` } })),
       h("span.faint.small", `${done}/${profile.target}`)),
     h("div.row", { style: { marginTop: "10px" } },
-      h("span.chip", profile.robot),
+      h("span.chip", { title: profile.planner_summary || "" }, profile.planner),
       h("span.chip", `${(profile.cameras || []).length} cams`),
-      profile.tamp_count ? h("span.chip.accent", `${profile.tamp_count} tamp`) : null,
       h("div.spacer"),
       !profile.active
         ? h("button.small.ghost", {
@@ -89,20 +92,20 @@ async function openEditor(host, name, refresh) {
   }
 
   const profile = payload.profile;
-  const yamlHost = h("textarea", {
-    value: JSON.stringify(profile.tamp || {}, null, 2),
-    style: { minHeight: "220px" },
+  const view = payload.planner_view || {};
+  const optionsHost = h("textarea", {
+    value: JSON.stringify((profile.planner || {}).options || {}, null, 2),
+    style: { minHeight: "260px" },
   });
-  const overridesHost = h("pre.mono", {
+  const receivesHost = h("pre.mono", {
     style: { background: "var(--bg-alt)", padding: "12px", borderRadius: "7px", overflow: "auto", maxHeight: "260px" },
-  }, JSON.stringify(payload.tamp_overrides || {}, null, 2));
+  }, JSON.stringify(view.receives || {}, null, 2));
+  const receivesNote = h("div.desc", view.receives_note || "");
 
   const promptInput = h("input", { value: profile.task.prompt || "" });
   const goalInput = h("input", { value: profile.task.goal || "", placeholder: "same as the task above" });
   const targetInput = h("input", { type: "number", min: "1", value: String(profile.task.target_episodes) });
   const descInput = h("input", { value: profile.description || "" });
-  const hostInput = h("input", { value: profile.robot.host });
-  const tdfInput = h("input", { type: "number", step: "0.05", min: "0.05", max: "1", value: String(profile.robot.time_dilation_factor) });
 
   const warningsHost = h("div");
   function drawWarnings(list) {
@@ -112,11 +115,11 @@ async function openEditor(host, name, refresh) {
   drawWarnings(payload.warnings);
 
   async function save() {
-    let tamp;
+    let options;
     try {
-      tamp = JSON.parse(yamlHost.value || "{}");
+      options = JSON.parse(optionsHost.value || "{}");
     } catch (error) {
-      toast.err("TAMP settings are not valid JSON", error.message);
+      toast.err("The planner's settings are not valid JSON", error.message);
       return;
     }
     const body = {
@@ -128,19 +131,16 @@ async function openEditor(host, name, refresh) {
         goal: goalInput.value.trim() || null,
         target_episodes: Number(targetInput.value) || profile.task.target_episodes,
       },
-      robot: {
-        ...profile.robot,
-        host: hostInput.value,
-        time_dilation_factor: Number(tdfInput.value) || profile.robot.time_dilation_factor,
-      },
-      tamp,
+      planner: { ...profile.planner, options },
     };
     try {
       const updated = await api.saveProfile(name, body);
       toast.ok(`Saved ${name}`);
       drawWarnings(updated.warnings);
-      overridesHost.textContent = JSON.stringify(
-        (await api.profile(name)).tamp_overrides || {}, null, 2);
+      const saved = updated.planner_view || {};
+      receivesHost.textContent = JSON.stringify(saved.receives || {}, null, 2);
+      receivesNote.textContent = saved.receives_note || "";
+      optionsHost.value = JSON.stringify((updated.profile.planner || {}).options || {}, null, 2);
       refresh();
     } catch (error) {
       reportError(error, "Could not save the profile");
@@ -158,20 +158,19 @@ async function openEditor(host, name, refresh) {
     h("div.field-row",
       h("div.field", h("label", "Planner goal"), goalInput,
         h("div.desc", "Only when the goal must differ from the label.")),
-      h("div.field", h("label", "Target episodes"), targetInput),
-      h("div.field", h("label", "Robot host"), hostInput),
-      h("div.field", h("label", "Speed"), tdfInput,
-        h("div.desc", "time_dilation_factor. 0.2 is 20% — raise it only once you trust the setup."))),
+      h("div.field", h("label", "Target episodes"), targetInput)),
     h("div.field",
-      h("label", "TAMP settings"),
-      yamlHost,
+      h("label", `Planner settings — ${(profile.planner || {}).backend || "?"}`),
+      view.summary ? h("div.faint.small", { style: { marginBottom: "6px" } }, view.summary) : null,
+      optionsHost,
       h("div.desc",
-        "tiptop's own key names, so anything documented upstream works verbatim. " +
-        "Unknown keys are rejected on save — a silently ignored override is the failure mode that looks like success.")),
+        "planner.options, checked by the planner itself when you save. A key it does not read is " +
+        "rejected — a silently ignored setting is the failure mode that looks like success. " +
+        "`tandem planners info <name>` lists what a planner reads.")),
     h("div.field",
       h("label", "What the planner receives"),
-      overridesHost,
-      h("div.desc", "Passed as --curobo-overrides. Paths are resolved to absolute here.")),
+      receivesHost,
+      receivesNote),
     h("div.row",
       h("button.primary", { onclick: save }, "Save"),
       h("div.spacer"),

@@ -15,8 +15,8 @@ from tandem import resources
 from tandem.cli import theme
 from tandem.core import profiles
 from tandem.core import settings as settings_mod
-from tandem.core.errors import ProfileError
-from tandem.planners.tiptop import importers, render
+from tandem.core.errors import ProfileError, TandemError
+from tandem.planners import registry
 
 app = typer.Typer(no_args_is_help=True, help="Create and manage collection profiles.")
 
@@ -45,7 +45,7 @@ def list_profiles(as_json: bool = typer.Option(False, "--json", help="Machine-re
                     "active": name == cfg.active_profile,
                     "description": profile.description,
                     "prompt": profile.task.prompt,
-                    "robot": profile.robot.type,
+                    "planner": profile.planner.backend,
                     "collected": counts["success"],
                     "target": profile.task.target_episodes,
                     "eval": counts["eval"],
@@ -61,7 +61,7 @@ def list_profiles(as_json: bool = typer.Option(False, "--json", help="Machine-re
         typer.echo(json.dumps(rows, indent=2))
         return
 
-    table = theme.table("", "profile", "task", "robot", "collected", "")
+    table = theme.table("", "profile", "task", "planner", "collected", "")
     for row in rows:
         marker = "[accent]●[/accent]" if row["active"] else " "
         if not row.get("valid"):
@@ -77,7 +77,7 @@ def list_profiles(as_json: bool = typer.Option(False, "--json", help="Machine-re
             marker,
             row["name"],
             _truncate(row["prompt"], 42),
-            row["robot"],
+            row["planner"],
             progress,
             "  ".join(extra),
         )
@@ -88,23 +88,41 @@ def list_profiles(as_json: bool = typer.Option(False, "--json", help="Machine-re
 @app.command("show", help="Show a profile in full.")
 def show(
     name: str = typer.Argument(None, help="Profile name (default: the active one)."),
-    tamp_only: bool = typer.Option(False, "--tamp", help="Print only what the planner will receive."),
+    receives_only: bool = typer.Option(
+        False,
+        "--planner",
+        "--tamp",
+        help="Print only what the planner will receive from its options (--tamp is the older name).",
+    ),
     as_json: bool = typer.Option(False, "--json", help="Machine-readable output."),
 ) -> None:
     profile = profiles.load(name)
     cfg = settings_mod.load()
-    overrides = render.render_tamp_overrides(profile, runtime_dir=cfg.resolved_runtime_dir())
+    backend = profile.planner.backend
+    # The planner's own account of its options: this command knows no planner's schema.
+    try:
+        view = registry.describe_options(backend, profile, settings=cfg)
+    except TandemError as exc:
+        if receives_only:
+            raise  # what a planner that will not load receives is not something to guess at
+        # The rest of the profile is still worth showing -- this is where a broken planner gets
+        # noticed -- so its options are shown as written, with the planner's own error among the warnings.
+        from dataclasses import replace
 
-    if tamp_only:
-        text = json.dumps(overrides, indent=2, sort_keys=True)
+        from tandem.planners.base import OptionsView
+
+        view = replace(OptionsView.generic(profile.planner.options), warnings=(exc.message,))
+
+    if receives_only:
+        text = json.dumps(dict(view.receives), indent=2, sort_keys=True, default=str)
         if as_json:
             typer.echo(text)
         else:
-            theme.heading("planner overrides", "passed as --curobo-overrides")
-            if overrides:
+            theme.heading(f"what {backend} receives", view.receives_note)
+            if view.receives:
                 theme.console().print(Syntax(text, "json", theme="ansi_dark", background_color="default"))
             else:
-                theme.info("none — the planner runs with stock settings")
+                theme.info("nothing — the planner runs with its stock settings")
         return
 
     counts = _counts(profile)
@@ -113,10 +131,10 @@ def show(
         payload["_resolved"] = {
             "dir": str(profile.dir()),
             "trajectories": counts,
-            "tamp_overrides": overrides,
-            "warnings": render.check_assets(profile, runtime_dir=cfg.resolved_runtime_dir()),
+            "planner": view.to_dict(),
+            "warnings": list(view.warnings),
         }
-        typer.echo(json.dumps(payload, indent=2))
+        typer.echo(json.dumps(payload, indent=2, default=str))
         return
 
     theme.blank()
@@ -131,17 +149,6 @@ def show(
     )
 
     theme.blank()
-    theme.heading("robot")
-    theme.kv(
-        [
-            ("type", profile.robot.type),
-            ("address", f"{profile.robot.host}:{profile.robot.port}"),
-            ("gripper / state", f"{profile.robot.gripper_port} / {profile.robot.state_port}"),
-            ("speed", f"{profile.robot.time_dilation_factor:.0%} (time_dilation_factor)"),
-        ]
-    )
-
-    theme.blank()
     theme.heading("cameras", f"perception reads the {profile.cameras.perception} camera")
     cam_table = theme.table("role", "serial", "type", "resolution", "fps")
     for role, cam in profile.cameras.configured().items():
@@ -150,12 +157,15 @@ def show(
     theme.console().print(cam_table)
 
     theme.blank()
-    theme.heading("tamp", f"{len(overrides)} override(s)" if overrides else "stock settings")
-    if overrides:
-        tamp_table = theme.table("setting", "value")
-        for key in sorted(overrides):
-            tamp_table.add_row(f"[key]{key}[/key]", _render(overrides[key]))
-        theme.console().print(tamp_table)
+    theme.heading("planner", _planner_title(backend))
+    for section in view.sections:
+        theme.blank()
+        theme.heading(f"  {section.title}", section.subtitle)
+        if section.rows:
+            rows = theme.table("setting", "value")
+            for key, value in section.rows:
+                rows.add_row(f"[key]{key}[/key]", value)
+            theme.console().print(rows)
 
     theme.blank()
     if profile.hitl.enabled:
@@ -179,11 +189,10 @@ def show(
             "set hitl.enabled to let a model split it into steps",
         )
 
-    warnings = render.check_assets(profile, runtime_dir=cfg.resolved_runtime_dir())
-    if warnings:
+    if view.warnings:
         theme.blank()
         theme.heading("warnings")
-        for warning in warnings:
+        for warning in view.warnings:
             theme.warn(warning)
 
 
@@ -192,10 +201,24 @@ def create(
     name: str = typer.Argument(..., help="Profile name (lowercase, digits, - and _)."),
     from_profile: str = typer.Option(None, "--from", help="Clone an existing profile."),
     import_from: Path = typer.Option(
-        None, "--import-from", help="Import from a hitl-tamp-vla checkout.", exists=True, file_okay=False
+        None,
+        "--import-from",
+        help="Import from the planner's own older setup (for TiPToP: a hitl-tamp-vla checkout).",
+        exists=True,
+        file_okay=False,
     ),
     tamp_config: Path = typer.Option(
-        None, "--tamp-config", help="A cfg/tamp/*.yml to import task + TAMP settings from.", exists=True, dir_okay=False
+        None,
+        "--tamp-config",
+        help="One task config inside that setup to import the task and its settings from (a cfg/tamp/*.yml).",
+        exists=True,
+        dir_okay=False,
+    ),
+    planner: str = typer.Option(
+        None,
+        "--planner",
+        help="The planner whose setup --import-from reads, and the new profile plans with. "
+        "Default: the machine's default planner.",
     ),
     prompt: str = typer.Option(None, "--prompt", help="The task prompt."),
     activate: bool = typer.Option(False, "--use", help="Make this the active profile."),
@@ -214,8 +237,10 @@ def create(
         calibration = profiles.calibration(source)
         origin = f"cloned from {from_profile}"
     elif import_from or tamp_config:
-        profile, calibration, notes = importers.build_profile(
-            name, root=import_from, tamp_config=tamp_config
+        from tandem.cli import planners as planners_cli
+
+        profile, calibration, notes = import_profile(
+            name, planners_cli.planner_for_new_profile(planner), source=import_from, config=tamp_config
         )
         origin = f"imported from {import_from or tamp_config}"
     else:
@@ -223,8 +248,11 @@ def create(
 
         profile = profiles.load_file(resources.path("profile_template.yml"), name=name)
         profile.description = ""
-        # The machine's default planner (`tandem planners use NAME --default`), not the template's.
-        profile.planner = profiles.PlannerSpec(backend=planners_cli.planner_for_new_profile())
+        # The machine's default planner (`tandem planners use NAME --default`), not the template's. The
+        # template's options are its own planner's (TiPToP's), kept when that is the one chosen.
+        chosen = planners_cli.planner_for_new_profile(planner)
+        if profile.planner.backend != chosen:
+            profile.planner = profiles.PlannerSpec(backend=chosen)
         origin = "from the built-in template"
 
     if prompt:
@@ -248,6 +276,45 @@ def create(
 
     if activate:
         use(name)
+
+
+def import_profile(
+    name: str, planner: str, *, source: Path | None, config: Path | None
+) -> tuple[profiles.Profile, dict, list[str]]:
+    """``(profile, calibration, notes)`` from ``planner``'s own older setup, through its importer."""
+    importer = registry.importer(planner)
+    if importer is None:
+        raise TandemError(
+            f"The {registry.info(planner).title} planner has nothing to import a profile from.",
+            hint="Name the planner whose setup it is with --planner, or create the profile from the template "
+            "(leave out --import-from) and edit its planner.options.",
+        )
+    return importer.build(name, source=source, config=config)
+
+
+@app.command("migrate", help="Rewrite profiles in the current layout (planner settings under planner.options).")
+def migrate(
+    name: str = typer.Argument(None, help="Profile name (default: every profile)."),
+) -> None:
+    """A profile in an older layout loads as it is, with a notice; saving it once writes the current one."""
+    names = [name] if name else profiles.list_names()
+    if not names:
+        theme.info("No profiles yet.")
+        return
+    for each in names:
+        before = (profiles.profiles_root() / each / "profile.yml").read_text()
+        path = profiles.save(profiles.load(each))
+        if path.read_text() == before:
+            theme.info(f"{each}: already current")
+        else:
+            theme.ok(f"{each}: rewritten in the current layout", str(path))
+
+
+def _planner_title(backend: str) -> str:
+    try:
+        return registry.info(backend).title
+    except TandemError as exc:
+        return f"{backend} — {exc.message}"
 
 
 @app.command("use", help="Make a profile the active one.")
@@ -346,13 +413,3 @@ def _progress_bar(done: int, target: int, width: int = 14) -> str:
 def _truncate(text: str, width: int) -> str:
     text = text or ""
     return text if len(text) <= width else text[: width - 1] + "…"
-
-
-def _render(value: object) -> str:
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, list):
-        return ", ".join(str(v) for v in value)
-    if isinstance(value, dict):
-        return json.dumps(value)
-    return str(value)

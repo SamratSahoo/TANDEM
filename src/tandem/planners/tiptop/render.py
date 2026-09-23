@@ -1,4 +1,4 @@
-"""Profile → the three things a tiptop subprocess actually consumes.
+"""Profile and TiPToP's options → the three things a tiptop subprocess actually consumes.
 
     render_tiptop_config(profile)   -> the YAML tiptop_cfg() loads   ($TIPTOP_CONFIG)
     render_tamp_overrides(profile)  -> the JSON --curobo-overrides reads
@@ -7,6 +7,10 @@
 Keeping this in one small, unit-testable module is deliberate: it is the seam where a
 profile stops being tandem's concern and becomes tiptop's, and it is where "did my override
 actually apply?" is decided.
+
+Every function takes the profile -- for the task, the cameras and the calibration, which are
+tandem's -- and ``options``, TiPToP's own settings (``options.TiptopOptions``). Left out, they are
+the profile's ``planner.options``; the factory passes the ones the session handed it.
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ from tandem.core import paths, profiles, secrets
 from tandem.core.errors import ProfileError
 from tandem.core.profiles import Profile
 from tandem.planners.tiptop import tamp_keys
+from tandem.planners.tiptop.options import DETECTOR_MODEL, TiptopOptions, options_of, parse
 
 _yaml = YAML()
 _yaml.default_flow_style = False
@@ -30,7 +35,11 @@ _yaml.default_flow_style = False
 # --------------------------------------------------------------------------- tiptop.yml
 
 
-def render_tiptop_config(profile: Profile) -> dict:
+def _options(profile: Profile, options: Any) -> TiptopOptions:
+    return options_of(profile) if options is None else parse(options)
+
+
+def render_tiptop_config(profile: Profile, options: Any = None) -> dict:
     """The dict tiptop's ``tiptop_cfg()`` expects (robot / cameras / perception).
 
     The perception knobs a ``tamp:`` block may set (``tamp_keys.PERCEPTION_KEYS``: M2T2's grasp
@@ -41,6 +50,7 @@ def render_tiptop_config(profile: Profile) -> dict:
     defaults (5 passes, 0.035) apply rather than a copy of them that could go stale.
     """
     p = profile
+    o = _options(profile, options)
     cameras: dict[str, Any] = {"perception": p.cameras.perception}
     for key, cam in p.cameras.configured().items():
         cameras[key] = {
@@ -52,14 +62,14 @@ def render_tiptop_config(profile: Profile) -> dict:
 
     rendered = {
         "robot": {
-            "type": p.robot.type,
-            "dof": p.robot.dof,
-            "host": p.robot.host,
-            "port": p.robot.port,
-            "gripper_port": p.robot.gripper_port,
-            "time_dilation_factor": p.robot.time_dilation_factor,
-            "q_home": list(p.robot.q_home),
-            "q_capture": list(p.robot.q_capture),
+            "type": o.robot.type,
+            "dof": o.robot.dof,
+            "host": o.robot.host,
+            "port": o.robot.port,
+            "gripper_port": o.robot.gripper_port,
+            "time_dilation_factor": o.robot.time_dilation_factor,
+            "q_home": list(o.robot.q_home),
+            "q_capture": list(o.robot.q_capture),
         },
         "cameras": cameras,
         "perception": {
@@ -67,46 +77,46 @@ def render_tiptop_config(profile: Profile) -> dict:
             # the key, so it stays for config compatibility.
             "foundation_stereo": {"url": "http://localhost:1234"},
             "m2t2": {
-                "url": p.perception.m2t2.url,
-                "apply_bounds": p.perception.m2t2.apply_bounds,
+                "url": o.perception.m2t2.url,
+                "apply_bounds": o.perception.m2t2.apply_bounds,
             },
-            "sam": {"mode": p.perception.sam_mode},
-            "robot_mask_margin_m": p.perception.robot_mask_margin_m,
-            "depth_trunc_m": p.perception.depth_trunc_m,
-            "voxel_downsample_size": p.perception.voxel_downsample_size,
-            "contact_threshold_m": p.perception.contact_threshold_m,
-            "mask_erosion_pixels": p.perception.mask_erosion_pixels,
-            "depth_smoothing": {"num_frames": p.perception.depth_smoothing_frames},
+            "sam": {"mode": o.perception.sam_mode},
+            "robot_mask_margin_m": o.perception.robot_mask_margin_m,
+            "depth_trunc_m": o.perception.depth_trunc_m,
+            "voxel_downsample_size": o.perception.voxel_downsample_size,
+            "contact_threshold_m": o.perception.contact_threshold_m,
+            "mask_erosion_pixels": o.perception.mask_erosion_pixels,
+            "depth_smoothing": {"num_frames": o.perception.depth_smoothing_frames},
         },
     }
     for key, path in tamp_keys.PERCEPTION_KEYS.items():
-        if key in p.tamp:
+        if key in o.tamp:
             node = rendered
             for part in path[:-1]:
                 node = node.setdefault(part, {})
-            node[path[-1]] = p.tamp[key]
+            node[path[-1]] = o.tamp[key]
     return rendered
 
 
-def write_tiptop_config(profile: Profile, dest: Path) -> Path:
+def write_tiptop_config(profile: Profile, dest: Path, options: Any = None) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     with dest.open("w") as fh:
         fh.write("# Generated by tandem from the profile — edits here are overwritten.\n")
-        _yaml.dump(render_tiptop_config(profile), fh)
+        _yaml.dump(render_tiptop_config(profile, options), fh)
     return dest
 
 
 # --------------------------------------------------------------------------- overrides
 
 
-def render_tamp_overrides(profile: Profile, *, runtime_dir: Path | None = None) -> dict:
+def render_tamp_overrides(profile: Profile, options: Any = None, *, runtime_dir: Path | None = None) -> dict:
     """The flat dict of solver-cost knobs the planner backend is built with.
 
     Path-valued knobs are resolved to absolute paths here rather than left for tiptop to
     interpret against a repo root, so "relative" means "relative to the profile" — the only
     reading a profile author can reasonably expect.
     """
-    out: dict[str, Any] = dict(profile.tamp)
+    out: dict[str, Any] = dict(_options(profile, options).tamp)
     for key in tamp_keys.PATH_KEYS:
         if key in out:
             out[key] = str(_resolve_asset(profile, str(out[key]), key, runtime_dir))
@@ -129,16 +139,18 @@ def _resolve_asset(profile: Profile, value: str, key: str, runtime_dir: Path | N
             return resolved.resolve()
     # Nothing on disk yet. Return the profile-relative interpretation so the error message
     # names the place the user most likely meant.
-    return (profile.dir() / candidate).resolve()
+    return profiles.resolve_path(profile, value)
 
 
-def write_tamp_overrides(profile: Profile, dest: Path, *, runtime_dir: Path | None = None) -> Path | None:
+def write_tamp_overrides(
+    profile: Profile, dest: Path, options: Any = None, *, runtime_dir: Path | None = None
+) -> Path | None:
     """Write the overrides JSON, or return None when the profile sets nothing.
 
     Returning None matters: passing an empty --curobo-overrides is not the same as passing
     none, and we want stock behaviour to be exactly stock.
     """
-    overrides = render_tamp_overrides(profile, runtime_dir=runtime_dir)
+    overrides = render_tamp_overrides(profile, options, runtime_dir=runtime_dir)
     if not overrides:
         return None
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -146,14 +158,15 @@ def write_tamp_overrides(profile: Profile, dest: Path, *, runtime_dir: Path | No
     return dest
 
 
-def check_assets(profile: Profile, *, runtime_dir: Path | None = None) -> list[str]:
+def check_assets(profile: Profile, options: Any = None, *, runtime_dir: Path | None = None) -> list[str]:
     """Problems that would only surface minutes into a warmed session. Cheap to check now.
 
     The VAE manifold cost torch.loads its checkpoint lazily, so a missing file does not fail
     until the first plan — after cuRobo, SAM2 and the cameras have all warmed up.
     """
     problems: list[str] = []
-    tamp = profile.tamp
+    o = _options(profile, options)
+    tamp = o.tamp
 
     if tamp.get("vae_manifold_weight") and tamp.get("vae_path"):
         path = _resolve_asset(profile, str(tamp["vae_path"]), "vae_path", runtime_dir)
@@ -210,6 +223,20 @@ def check_assets(profile: Profile, *, runtime_dir: Path | None = None) -> list[s
             "transit_apex_min_dist only applies when transit_apex_height is above 0; it is ignored here"
         )
 
+    # Settings tiptop never reads (see options.GeminiSpec): kept so a profile can say which detector
+    # labelled its data, and warned about when what they say is not what runs.
+    gemini = o.perception.gemini
+    if gemini.model != DETECTOR_MODEL:
+        problems.append(
+            f"perception.gemini.model is {gemini.model!r}, but the pinned tiptop always runs {DETECTOR_MODEL!r} "
+            "(it takes no model from its config), so this changes nothing; set it to that"
+        )
+    if gemini.temperature is not None:
+        problems.append(
+            "perception.gemini.temperature is set, but the pinned tiptop calls its detector with its own "
+            "default, so this changes nothing; set it to null"
+        )
+
     missing = profiles.missing_calibration(profile)
     if missing:
         problems.append(
@@ -223,6 +250,7 @@ def check_assets(profile: Profile, *, runtime_dir: Path | None = None) -> list[s
 
 def render_env(
     profile: Profile,
+    options: Any = None,
     *,
     events_file: Path,
     task: str | None = None,
@@ -237,6 +265,7 @@ def render_env(
     variables.
     """
     env = dict(base if base is not None else os.environ)
+    o = _options(profile, options)
 
     # First task; later ones are typed at the child's stdin prompt.
     env["TIPTOP_TASK"] = task or profile.goal_or_prompt()
@@ -250,7 +279,7 @@ def render_env(
         env.pop("TIPTOP_INSTRUCTION", None)
 
     env["TIPTOP_EVENTS_FILE"] = str(events_file)
-    env["TIPTOP_STATE_PORT"] = str(profile.robot.state_port)
+    env["TIPTOP_STATE_PORT"] = str(o.robot.state_port)
     env["TIPTOP_CONFIG"] = str(_session_config_path(profile))
     env["TIPTOP_CALIBRATION"] = str(profile.calibration_file())
     # The source scoped per-robot data with DC_WORKSPACE and keyed extrinsics off it; a
@@ -269,7 +298,8 @@ def render_env(
         if key in cams:
             env[var] = cams[key].serial
 
-    # google-genai's bare Client() reads either name; set both so it cannot miss.
+    # google-genai's bare Client() reads either name; set both so it cannot miss. TiPToP's perception
+    # needs it (its detector is Gemini), so a session with TiPToP refuses to start without one.
     key = secrets.gemini_api_key()
     if key:
         env["GEMINI_API_KEY"] = key
@@ -285,10 +315,8 @@ def render_env(
             env.setdefault("VAE_MANIFOLD_CKPT", str(vae))
         if rnd.is_file():
             env.setdefault("RND_NOVELTY_CKPT", str(rnd))
-    if profile.tamp.get("vae_path"):
-        env["VAE_MANIFOLD_CKPT"] = str(
-            _resolve_asset(profile, str(profile.tamp["vae_path"]), "vae_path", runtime_dir)
-        )
+    if o.tamp.get("vae_path"):
+        env["VAE_MANIFOLD_CKPT"] = str(_resolve_asset(profile, str(o.tamp["vae_path"]), "vae_path", runtime_dir))
 
     # opencv's LAPACK and torch both drive one shared libmkl_core; the threaded path returns a
     # corrupt pivot array and cuRobo's get_stomp_cov() dies inside torch.inverse. Planning runs
@@ -301,16 +329,22 @@ def _session_config_path(profile: Profile) -> Path:
     return paths.session_scratch_dir() / profile.name / "tiptop.yml"
 
 
-def prepare_session_files(profile: Profile, session_id: str, *, runtime_dir: Path | None = None) -> dict:
-    """Materialise everything a session needs before the child is spawned.
+def prepare_session_files(
+    profile: Profile, session_dir: Path, options: Any = None, *, runtime_dir: Path | None = None
+) -> dict:
+    """Materialise everything a session needs before the child is spawned, in the session's own directory.
 
-    Returns ``{events_file, config_file, overrides_file, session_dir}``.
+    ``session_dir`` is the session's (``BackendContext.session_dir``): the session made it and owns
+    it, so where it is is not this module's to work out. Returns ``{events_file, config_file,
+    overrides_file, session_dir}``.
     """
-    session_dir = paths.session_scratch_dir() / profile.name / session_id
+    session_dir = Path(session_dir)
     session_dir.mkdir(parents=True, exist_ok=True)
 
-    config_file = write_tiptop_config(profile, _session_config_path(profile))
-    overrides_file = write_tamp_overrides(profile, session_dir / "curobo-overrides.json", runtime_dir=runtime_dir)
+    config_file = write_tiptop_config(profile, _session_config_path(profile), options)
+    overrides_file = write_tamp_overrides(
+        profile, session_dir / "curobo-overrides.json", options, runtime_dir=runtime_dir
+    )
 
     events_file = session_dir / "events.jsonl"
     # Pre-create so the tailer can attach before the child writes its first line.

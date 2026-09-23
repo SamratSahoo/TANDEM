@@ -244,8 +244,8 @@ def check_gemini_key() -> Check:
             "gemini api key",
             FAIL,
             "not set",
-            "Run `tandem config set-gemini-key`. Perception calls Gemini once per rollout to turn "
-            "the task string into objects and goal predicates, so collection cannot run without it.",
+            "Run `tandem config set-gemini-key`. Phase planning asks Gemini to split each task into "
+            "steps and to check each human one; a planner that calls it as well says so in its own row.",
             group="credentials",
         )
     return Check(

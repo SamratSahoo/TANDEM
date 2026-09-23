@@ -20,24 +20,26 @@ On disk::
 from __future__ import annotations
 
 import json
-import math
+import logging
 import os
 import re
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 from ruamel.yaml import YAML
 
 from tandem.core import settings as settings_mod
 from tandem.core.errors import ProfileError
-from tandem.planners.tiptop import tamp_keys
 
 # Same rule the source used for DC_WORKSPACE: a safe single path segment (no traversal) that
 # is also a valid HuggingFace repo-name fragment.
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 STATUSES = ("eval", "success", "failure")
+
+#: What each profile.yml is written as. 2: a planner's own settings are under planner.options.
+LAYOUT_VERSION = 2
 
 # OmegaConf env interpolations: "${oc.env:VAR}" or "${oc.env:VAR,default}".
 #
@@ -111,46 +113,6 @@ class TaskSpec(BaseModel):
         return v
 
 
-class RobotSpec(BaseModel):
-    model_config = {"extra": "forbid"}
-
-    type: str = "fr3_robotiq"
-    dof: int = 7
-    host: str = "172.16.0.2"
-    port: int = 5555
-    gripper_port: int = 5559
-    # The bamboo shim's --state-port. JointSampler reads encoders here while the control
-    # thread is parked inside a blocking move; without it, capture aborts.
-    state_port: int = 5557
-    time_dilation_factor: float = 0.2
-    q_home: list[float] = Field(default_factory=lambda: [0.0, -0.628, 0.0, -2.513, 0.0, 1.885, 0.0])
-    q_capture: list[float] = Field(
-        default_factory=lambda: [-0.034, 0.090, 0.080, -1.319, -0.003, 1.253, 0.030]
-    )
-
-    @field_validator("type")
-    @classmethod
-    def _known_robot(cls, v: str) -> str:
-        if v not in {"fr3_robotiq", "ur5", "franka", "panda_robotiq"}:
-            raise ValueError(f"unsupported robot type {v!r} (fr3_robotiq | ur5 | franka | panda_robotiq)")
-        return v
-
-    @field_validator("time_dilation_factor")
-    @classmethod
-    def _sane_tdf(cls, v: float) -> float:
-        if not 0.0 < v <= 1.0:
-            raise ValueError("time_dilation_factor must be in (0, 1]; start at 0.2 (20% speed)")
-        return v
-
-    @model_validator(mode="after")
-    def _joint_counts(self):
-        for field in ("q_home", "q_capture"):
-            vals = getattr(self, field)
-            if len(vals) != self.dof:
-                raise ValueError(f"{field} has {len(vals)} values but robot.dof is {self.dof}")
-        return self
-
-
 class CameraSpec(BaseModel):
     model_config = {"extra": "forbid"}
 
@@ -203,60 +165,6 @@ class CamerasSpec(BaseModel):
             for key in ("hand", "external", "external_2")
             if (cam := getattr(self, key)) is not None
         }
-
-
-class GeminiSpec(BaseModel):
-    model_config = {"extra": "forbid"}
-
-    # The detector the pinned tiptop runs (perception/gemini.py's default model_id). tiptop takes no
-    # model from its config, so this states it rather than choosing it; keep it equal on a bump.
-    model: str = "gemini-robotics-er-2-preview"
-    temperature: float | None = None
-
-
-class M2T2Spec(BaseModel):
-    model_config = {"extra": "forbid"}
-
-    url: str = "http://localhost:8123"
-    apply_bounds: bool = True
-
-    @field_validator("url")
-    @classmethod
-    def _parseable(cls, v: str) -> str:
-        """Reject a URL that cannot be parsed, where the field name is still in hand.
-
-        An import used to leave OmegaConf's ``${oc.env:TIPTOP_M2T2_PORT,8123}`` in here, and
-        the first thing to notice was urlparse raising several layers away, inside the
-        diagnostic command you run *because* something is wrong.
-        """
-        from urllib.parse import urlparse
-
-        try:
-            parsed = urlparse(v)
-            parsed.port  # noqa: B018 — raises when the port is not an integer
-        except ValueError as exc:
-            raise ValueError(f"{v!r} is not a usable URL: {exc}") from exc
-        if not parsed.scheme or not parsed.hostname:
-            raise ValueError(f"{v!r} needs a scheme and a host, e.g. http://localhost:8123")
-        return v
-
-
-class PerceptionSpec(BaseModel):
-    model_config = {"extra": "forbid"}
-
-    gemini: GeminiSpec = Field(default_factory=GeminiSpec)
-    m2t2: M2T2Spec = Field(default_factory=M2T2Spec)
-    sam_mode: str = "local"
-    # Temporal depth smoothing: N stereo frames grabbed back-to-back at the static capture
-    # pose and per-pixel median-fused. 1 disables it.
-    depth_smoothing_frames: int = 5
-    # Padding on the robot's collision spheres before they are projected out of a
-    # third-person point cloud. Raise it if a rim of arm survives.
-    robot_mask_margin_m: float = 0.02
-    depth_trunc_m: float = 5.0
-    voxel_downsample_size: float = 0.0075
-    contact_threshold_m: float = 0.01
-    mask_erosion_pixels: int = 3
 
 
 class HitlSpec(BaseModel):
@@ -441,9 +349,13 @@ class PlannerSpec(BaseModel):
     name is an error rather than a fallback, because a session that silently planned with a
     different planner from the one asked for produces a dataset nobody can interpret afterwards.
 
-    `options` is the named planner's own settings block, passed to its factory verbatim. Its keys are
-    the planner's to define and to check, so they are not validated here -- only when the planner is
-    built for a session, by the planner, which refuses a key it does not read.
+    `options` is the named planner's own settings block: TiPToP's robot, perception and TAMP
+    overrides, a toy planner's list of items. Its keys are the planner's to define and to check, so
+    the planner checks them -- here, when the profile loads, through its ``validate_options`` -- and
+    what is stored is what the planner returned: normalised, defaults filled in. A mistake is then
+    found when the profile is edited, not when a session starts with the arm about to move. A planner
+    that cannot be loaded at all cannot check them; its options are kept as written, and the session
+    that tries to build it says why.
     """
 
     model_config = {"extra": "forbid"}
@@ -470,6 +382,43 @@ class PlannerSpec(BaseModel):
             )
         return v
 
+    @model_validator(mode="after")
+    def _options_the_planner_accepts(self):
+        from tandem.core.errors import TandemError
+        from tandem.planners import registry
+
+        try:
+            factory = registry.factory(self.backend)
+        except TandemError:
+            # Installed but broken: nothing can check these, and refusing the profile over it would
+            # stop it being opened to fix -- the same reason the name above is checked by name only.
+            return self
+        try:
+            self.options = registry.options_for(factory, self.options)
+        except TandemError as exc:
+            raise ValueError(_options_problem(exc.message, exc.hint)) from None
+        except ValueError as exc:  # a pydantic ValidationError is one
+            raise ValueError(_options_problem(exc)) from None
+        return self
+
+
+def _options_problem(exc: Any, hint: str | None = None) -> str:
+    """One planner's complaint about its options, located under ``options.`` for the reader.
+
+    A planner that validates with pydantic raises a ValidationError whose locations are relative to
+    its own block (``tamp``, ``robot.q_home``); prefixed, each reads as the path in the profile.
+    """
+    errors = getattr(exc, "errors", None)
+    if callable(errors):
+        lines = []
+        for err in errors():
+            loc = ".".join(str(part) for part in err.get("loc", ()))
+            msg = str(err.get("msg", "")).removeprefix("Value error, ")
+            lines.append(f"options.{loc}: {msg}" if loc else f"options: {msg}")
+        return "\n    ".join(lines) or str(exc)
+    text = str(exc)
+    return f"options: {text} {hint}".rstrip() if hint else f"options: {text}"
+
 
 class RecordingSpec(BaseModel):
     model_config = {"extra": "forbid"}
@@ -490,21 +439,30 @@ class Profile(BaseModel):
 
     model_config = {"extra": "forbid"}
 
-    version: int = 1
+    version: int = LAYOUT_VERSION
     name: str = "default"
     description: str = ""
     task: TaskSpec = Field(default_factory=TaskSpec)
-    robot: RobotSpec = Field(default_factory=RobotSpec)
+    # The rig's cameras, by role. tandem's, not the planner's: the teleop executor records from
+    # them, and their roles are the dataset's camera layout. A planner reads them from here too.
     cameras: CamerasSpec = Field(default_factory=CamerasSpec)
-    perception: PerceptionSpec = Field(default_factory=PerceptionSpec)
-    # Flat, using tiptop's own key names -- see tandem/planners/tiptop/tamp_keys.py for why.
-    tamp: dict[str, Any] = Field(default_factory=dict)
-    # Deliberately NOT part of `tamp`: that dict is a solver-cost funnel read by a hand-written
-    # if-ladder, and this changes what a dataset CONTAINS rather than how the arm moves.
+    # Phase planning: tandem's own method, so its settings are tandem's whichever planner runs.
     hitl: HitlSpec = Field(default_factory=HitlSpec)
+    # Which planner, and everything that is only that planner's business (planner.options).
     planner: PlannerSpec = Field(default_factory=PlannerSpec)
     recording: RecordingSpec = Field(default_factory=RecordingSpec)
     export: ExportSpec = Field(default_factory=ExportSpec)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _current_layout(cls, data: Any, info: ValidationInfo) -> Any:
+        if not isinstance(data, dict):
+            return data
+        data, moved = migrate(data)
+        if moved:
+            context = info.context if isinstance(info.context, dict) else {}
+            _notice_migrated(str(data.get("name") or "?"), moved, context.get("source"))
+        return data
 
     @field_validator("name")
     @classmethod
@@ -515,11 +473,6 @@ class Profile(BaseModel):
                 f"(must match {NAME_RE.pattern})"
             )
         return v
-
-    @field_validator("tamp")
-    @classmethod
-    def _valid_tamp(cls, v: dict) -> dict:
-        return validate_tamp(v)
 
     # ---- paths -------------------------------------------------------------
 
@@ -544,135 +497,72 @@ class Profile(BaseModel):
         return self.task.goal or self.task.prompt
 
 
-# --------------------------------------------------------------------------- tamp validation
+# --------------------------------------------------------------------------- the older layout
+#
+# Until profile version 2 a planner's settings sat at the top level of every profile -- `robot:`,
+# `perception:` and `tamp:`, beside `task:` and `cameras:`. They were TiPToP's, the only planner there
+# was, and they are TiPToP's `planner.options` now. A profile in the older layout still loads: it is
+# migrated as it is read, saying so once, and written in the current layout the next time it is saved.
+
+#: The top-level sections of the older layout that belong to a planner, and the planner they belong to.
+LEGACY_PLANNER_SECTIONS = ("robot", "perception", "tamp")
+LEGACY_PLANNER = "tiptop"
+
+_log = logging.getLogger(__name__)
+# Profiles already said to be in the older layout, so a command that loads one ten times says it once.
+_noticed: set[str] = set()
 
 
-def validate_tamp(raw: dict | None) -> dict:
-    """Type-check and normalise a ``tamp:`` block against tiptop's real key set.
+def migrate(data: dict) -> tuple[dict, list[str]]:
+    """``data`` in the current layout, and which of its top-level sections had to move to get there.
 
-    Unknown keys are a hard error with a suggestion. Silently-ignored overrides are the
-    single worst failure mode here: a run looks fine, produces data, and the knob you were
-    studying never applied.
+    A planner's sections go under ``planner.options`` when the profile plans with the planner they
+    belong to. When it plans with another, nothing ever read them -- a planner is built from its own
+    options alone -- so they are dropped, and said to be: the one change that loses a setting is the
+    one that must not be quiet. A section set in both places is refused rather than one of them
+    silently winning.
     """
-    if not raw:
-        return {}
-    if not isinstance(raw, dict):
-        raise ValueError("tamp must be a mapping")
-
-    out: dict[str, Any] = {}
-    for key, value in raw.items():
-        if value is None:
-            if key in tamp_keys.NULL_REFUSED:
-                raise ValueError(tamp_keys.NULL_REFUSED[key])
-            continue
-        if key in tamp_keys.REFUSED:
-            raise ValueError(f"TAMP setting {key!r} {tamp_keys.REFUSED[key]}.")
-        if key not in tamp_keys.ALL_KEYS:
-            hint = tamp_keys.suggest(key)
-            extra = f" Did you mean: {', '.join(hint)}?" if hint else ""
-            raise ValueError(f"unknown TAMP setting {key!r}.{extra}")
-
-        if key == "traj_length_norm":
-            out[key] = _normalise_traj_norm(value)
-        elif key in tamp_keys.PATH_KEYS:
-            out[key] = str(value)
-        elif key in tamp_keys.LIST_KEYS:
-            out[key] = _validate_blend_ops(key, value)
-        elif key in tamp_keys.INDEX_MAP_KEYS:
-            out[key] = _validate_index_map(key, value)
-        else:
-            out[key] = _coerce_scalar(key, value)
-
-    _check_enums(out)
-    _check_positives(out)
-    return out
-
-
-def _normalise_traj_norm(value: Any) -> str | float:
-    """Force the infinity norm to the STRING "inf".
-
-    YAML `inf` parses as a string but `.inf` parses as float infinity, and the overrides dict
-    round-trips through JSON, which cannot represent Infinity. Both spellings land here as
-    the one form tiptop's resolve_traj_length_norm accepts.
-    """
-    if isinstance(value, str):
-        if value.strip().lower() in tamp_keys.INFINITY_ALIASES:
-            return "inf"
-        try:
-            return float(value)
-        except ValueError as exc:
+    moved = [key for key in LEGACY_PLANNER_SECTIONS if key in data]
+    if not moved:
+        if int(data.get("version") or 0) < LAYOUT_VERSION:
+            data = {**data, "version": LAYOUT_VERSION}
+        return data, []
+    data = dict(data)
+    sections = {key: data.pop(key) for key in moved}
+    planner = dict(data.get("planner") or {})
+    backend = planner.get("backend") or LEGACY_PLANNER
+    if backend == LEGACY_PLANNER:
+        options = dict(planner.get("options") or {})
+        both = [key for key in moved if key in options]
+        if both:
             raise ValueError(
-                f"traj_length_norm must be a number or 'inf' (got {value!r})"
-            ) from exc
-    if isinstance(value, (int, float)):
-        if math.isinf(float(value)):
-            return "inf"
-        return float(value)
-    raise ValueError(f"traj_length_norm must be a number or 'inf' (got {value!r})")
+                f"{', '.join(both)} is set both at the top level (the layout before profile version "
+                f"{LAYOUT_VERSION}) and under planner.options; keep only the planner.options one"
+            )
+        planner["options"] = {**sections, **options}
+        planner["backend"] = backend
+        data["planner"] = planner
+        moved = [f"{key} under planner.options" for key in moved]
+    else:
+        moved = [f"{key} dropped ({LEGACY_PLANNER}'s setting; this profile plans with {backend})" for key in moved]
+    data["version"] = LAYOUT_VERSION
+    return data, moved
 
 
-def _validate_blend_ops(key: str, value: Any) -> list[str]:
-    if not isinstance(value, (list, tuple)):
-        raise ValueError(f"{key} must be a list of operation names")
-    ops = [str(x).strip() for x in value]
-    unknown = [o for o in ops if o not in tamp_keys.BLEND_OPS]
-    if unknown:
-        # The source shipped a config with `MoveFree. MoveHolding` -- a typo'd '.' that YAML
-        # folded into one token and the planner silently ignored. Catch that class here.
-        raise ValueError(
-            f"{key} names unknown operations {unknown}; valid: {', '.join(tamp_keys.BLEND_OPS)}"
-        )
-    return ops
-
-
-def _validate_index_map(key: str, value: Any) -> dict[str, float]:
-    if not isinstance(value, dict):
-        raise ValueError(f"{key} must be a mapping of index -> value, e.g. {{0: 1.0}}")
-    out: dict[str, float] = {}
-    for idx, val in value.items():
-        try:
-            out[str(int(idx))] = float(val)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"{key}[{idx!r}] = {val!r} is not an index -> number pair") from exc
-    return out
-
-
-def _coerce_scalar(key: str, value: Any) -> Any:
-    expected = tamp_keys.SCALAR_KEYS[key]
-    try:
-        if expected is bool:
-            if isinstance(value, bool):
-                return value
-            raise ValueError
-        if expected is int:
-            if isinstance(value, bool):
-                raise ValueError
-            return int(value)
-        if expected is float:
-            if isinstance(value, bool):
-                raise ValueError
-            return float(value)
-        return str(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{key} must be a {expected.__name__} (got {value!r})") from exc
-
-
-def _check_enums(cfg: dict) -> None:
-    for key, allowed in tamp_keys.ENUMS.items():
-        if key in cfg and str(cfg[key]).lower() not in allowed:
-            raise ValueError(f"{key} must be one of {sorted(allowed)} (got {cfg[key]!r})")
-
-
-def _check_positives(cfg: dict) -> None:
-    for key in tamp_keys.POSITIVE_KEYS:
-        if key in cfg and cfg[key] <= 0:
-            raise ValueError(f"{key} must be > 0 (got {cfg[key]})")
-    for key in tamp_keys.NON_NEGATIVE_KEYS:
-        if key in cfg and cfg[key] < 0:
-            raise ValueError(f"{key} must be >= 0 (got {cfg[key]})")
-    tdf = cfg.get("time_dilation_factor_literal")
-    if tdf is not None and not 0.0 < tdf <= 1.0:
-        raise ValueError(f"time_dilation_factor_literal must be in (0, 1] (got {tdf})")
+def _notice_migrated(name: str, moved: list[str], source: str | None) -> None:
+    key = source or name
+    if key in _noticed:
+        return
+    _noticed.add(key)
+    where = source or f"profile {name!r}"
+    _log.warning(
+        "%s is in the layout before profile version %s, and was read with %s; "
+        "`tandem profile migrate %s` rewrites it",
+        where,
+        LAYOUT_VERSION,
+        ", ".join(moved),
+        name,
+    )
 
 
 # --------------------------------------------------------------------------- store
@@ -725,14 +615,18 @@ def load_file(path: Path, *, name: str | None = None) -> Profile:
             # run dirs and HF slugs disagree with where the data actually lives.
             data["name"] = name
     try:
-        return Profile.model_validate(data)
+        return Profile.model_validate(data, context={"source": str(path)})
     except Exception as exc:
         raise ProfileError(f"{path} is not a valid profile:\n{format_errors(exc)}") from exc
 
 
 def save(profile: Profile) -> Path:
-    """Write a profile, creating its directory tree. Round-trips through validation first."""
-    Profile.model_validate(profile.model_dump())
+    """Write a profile, creating its directory tree. Round-trips through validation first.
+
+    What is written is the validated copy, so a planner's options reach the file as the planner
+    normalised them, and a profile read in the older layout is written in the current one.
+    """
+    profile = Profile.model_validate(profile.model_dump())
     pdir = profile.dir()
     pdir.mkdir(parents=True, exist_ok=True)
     for status in STATUSES:
@@ -752,8 +646,6 @@ def _dump_dict(profile: Profile) -> dict:
     for key in ("hand", "external", "external_2"):
         if cams.get(key) is None:
             cams.pop(key, None)
-    if not data.get("tamp"):
-        data["tamp"] = {}
     return data
 
 
@@ -811,8 +703,8 @@ def calibration(profile: Profile) -> dict:
 def missing_calibration(profile: Profile) -> list[str]:
     """Configured camera serials with no extrinsics entry.
 
-    Extrinsics are keyed by serial, and tiptop raises at warmup for a serial it cannot find —
-    better to say so before a session starts.
+    Extrinsics are keyed by serial, and a planner that localises from them (TiPToP raises at warm-up
+    for a serial it cannot find) is better told before a session starts.
     """
     known = set(calibration(profile))
     return [cam.serial for cam in profile.cameras.configured().values() if cam.serial not in known]

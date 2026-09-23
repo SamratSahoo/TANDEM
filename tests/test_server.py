@@ -34,16 +34,19 @@ def test_list_profiles(client, profile):
 def test_get_profile_includes_the_resolved_overrides(client, profile):
     payload = client.get(f"/api/profiles/{profile.name}").json()
     assert payload["profile"]["name"] == profile.name
-    # Exactly what the planner will receive — the answer to "did my override apply?".
-    assert payload["tamp_overrides"]["traj_length_norm"] == "inf"
+    # Exactly what the planner will receive — the answer to "did my override apply?" -- as the
+    # planner itself describes it: the page knows no planner's schema.
+    assert payload["planner_view"]["receives"]["traj_length_norm"] == "inf"
+    assert payload["planner_view"]["summary"].startswith("fr3_robotiq at ")
+    assert payload["planner"] == "tiptop"
 
 
 def test_update_profile_rejects_an_unknown_tamp_key(client, profile):
     body = profile.model_dump(mode="json")
-    body["tamp"] = {"nonsense_weight": 1}
+    body["planner"]["options"]["tamp"] = {"nonsense_weight": 1}
     response = client.put(f"/api/profiles/{profile.name}", json=body)
     assert response.status_code == 400
-    assert "nonsense_weight" in response.json()["error"]
+    assert "options.tamp: unknown TAMP setting 'nonsense_weight'" in response.json()["error"]
 
 
 def test_update_profile_persists(client, profile):

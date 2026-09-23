@@ -1,4 +1,11 @@
-"""`tandem doctor` — is everything tandem needs present and working?"""
+"""`tandem doctor` — is everything tandem needs present and working?
+
+What tandem needs is checked here: Python, ffmpeg, the runtime of the planner the profile uses (and
+the disk and pixi, when that runtime is one to build), the profile, its cameras, phase planning and its
+human executor. What that PLANNER needs -- a GPU, a key for its perception, a robot shim, a grasp
+server -- only the planner knows, so it is asked (its factory's ``doctor_checks``, through the
+registry), and a profile that plans with another planner is shown that planner's rows instead.
+"""
 
 from __future__ import annotations
 
@@ -8,11 +15,9 @@ from pathlib import Path
 import typer
 
 from tandem.cli import theme
-from tandem.core import probe, profiles
+from tandem.core import probe, profiles, secrets
 from tandem.core import settings as settings_mod
 from tandem.core.errors import ProfileError, TandemError
-from tandem.planners.tiptop import probe as tiptop_probe
-from tandem.planners.tiptop import render
 
 GROUP_TITLES = {
     "core": "environment",
@@ -23,100 +28,109 @@ GROUP_TITLES = {
     "profile": "profile",
 }
 
+#: The row naming the runtime of the planner the profile uses, whichever planner that is.
+RUNTIME_ROW = "planner runtime"
+
 
 def collect_checks(*, profile_name: str | None = None, probe_hardware: bool = True) -> list[probe.Check]:
+    from tandem.planners import registry
+
     cfg = settings_mod.load()
     checks: list[probe.Check] = [probe.check_python(), probe.check_platform()]
 
     runtime_check, runtime_ready, runtime_root, active = _runtime_check(profile_name, cfg)
-    checks.append(probe.check_disk(runtime_root or cfg.resolved_runtime_dir()))
-    checks.append(probe.check_pixi())
+    builds, solves = _what_the_runtime_needs(active, cfg)
+    if builds:
+        checks.append(probe.check_disk(runtime_root or cfg.resolved_runtime_dir()))
+    if solves:
+        checks.append(probe.check_pixi())
+    else:
+        checks.append(
+            probe.Check(
+                "pixi", probe.SKIP, f"not needed · {active}'s runtime is no pixi environment", group="runtime"
+            )
+        )
     checks.append(probe.check_ffmpeg())
     checks.append(runtime_check)
     checks.extend(_other_planner_checks(active, cfg))
-
-    checks.append(probe.check_nvidia_driver())
-    checks.append(probe.check_cuda_runtime())
-    checks.append(probe.check_nvcc())
-
-    # A missing key blocks collection, but on a machine that cannot collect anyway it is only
-    # worth a note — a visualization-only install should not report a failure it cannot act on.
-    gemini = probe.check_gemini_key()
-    if gemini.state == probe.FAIL and not runtime_ready:
-        gemini.state = probe.WARN
-        gemini.detail = "not set (only needed to collect)"
-    checks.append(gemini)
 
     # Profile-specific checks: the settings that decide whether a session can even start.
     try:
         profile = profiles.load(profile_name)
     except ProfileError as exc:
+        checks.append(_gemini_check(None, runtime_ready))
         checks.append(
             probe.Check("profile", probe.FAIL, exc.message.split("\n")[0], exc.hint or "", group="profile")
         )
         return checks
 
-    checks.append(probe.Check("profile", probe.OK, f"{profile.name} · {profile.robot.type}", group="profile"))
-
-    configured = profile.cameras.configured()
-    missing = profiles.missing_calibration(profile)
-    if not configured:
-        checks.append(
-            probe.Check(
-                "cameras",
-                probe.SKIP,
-                "none configured — this profile can be browsed but not collected into",
-                group="profile",
-            )
-        )
-    elif missing:
-        checks.append(
-            probe.Check(
-                "camera calibration",
-                probe.FAIL,
-                f"no extrinsics for {', '.join(missing)}",
-                f"Extrinsics are keyed by serial. Add them to {profile.calibration_file()}.",
-                group="profile",
-            )
-        )
-    else:
-        checks.append(
-            probe.Check(
-                "camera calibration",
-                probe.OK,
-                f"{len(configured)} camera(s) calibrated",
-                group="profile",
-            )
-        )
-
-    warnings = render.check_assets(profile, runtime_dir=cfg.resolved_runtime_dir())
-    # missing-calibration is already its own row above; do not say it twice.
-    warnings = [w for w in warnings if not w.startswith("no camera extrinsics")]
-    for warning in warnings:
-        checks.append(probe.Check("tamp settings", probe.WARN, warning, group="profile"))
-    if not warnings:
-        n = len(profile.tamp)
-        checks.append(
-            probe.Check(
-                "tamp settings",
-                probe.OK,
-                f"{n} override(s)" if n else "stock settings",
-                group="profile",
-            )
-        )
-
+    backend = profile.planner.backend
+    checks.append(_gemini_check(profile, runtime_ready))
+    checks.append(probe.Check("profile", probe.OK, f"{profile.name} · plans with {backend}", group="profile"))
+    checks.append(_cameras_check(profile))
     checks.append(_phase_planning_check(profile))
     executor_check = _human_executor_check(profile)
     if executor_check is not None:
         checks.append(executor_check)
 
-    if probe_hardware:
-        checks.append(tiptop_probe.check_zed_sdk())
-        checks.append(tiptop_probe.check_robot(profile.robot.host, profile.robot.port))
-        checks.append(tiptop_probe.check_robot_state_port(profile.robot.host, profile.robot.state_port))
-        checks.append(tiptop_probe.check_m2t2(profile.perception.m2t2.url))
-
+    # What only the planner knows it needs. Never raises: a planner whose own checks break is one row.
+    checks.extend(registry.doctor_checks(backend, profile, settings=cfg, probe_hardware=probe_hardware))
     return checks
+
+
+def _gemini_check(profile, runtime_ready: bool) -> probe.Check:
+    """The Gemini key, as far as tandem itself is concerned: phase planning calls Gemini, and nothing
+    else of tandem's does. A planner that calls it too (TiPToP's perception) says so in its own row."""
+    check = probe.check_gemini_key()
+    if check.state == probe.OK:
+        return check
+    if profile is None:
+        check.state, check.detail = probe.WARN, "not set (phase planning needs it)"
+    elif not profile.hitl.enabled:
+        check.state = probe.SKIP
+        check.detail = "not set · phase planning is off, so tandem itself does not need it"
+    elif not runtime_ready:
+        # A missing key blocks collection, but on a machine that cannot collect anyway it is only
+        # worth a note — a visualization-only install should not report a failure it cannot act on.
+        check.state, check.detail = probe.WARN, "not set (only needed to collect)"
+    else:
+        check.detail = "not set, and phase planning is on"
+    return check
+
+
+def _cameras_check(profile) -> probe.Check:
+    """Whether the profile has a rig to record from. The teleop legs record from these cameras whichever
+    planner runs, so they are tandem's to check; whether a planner can also localise from them (its
+    calibration) is the planner's."""
+    configured = profile.cameras.configured()
+    if not configured:
+        return probe.Check(
+            "cameras",
+            probe.SKIP,
+            "none configured — this profile can be browsed but not collected into",
+            group="profile",
+        )
+    return probe.Check("cameras", probe.OK, ", ".join(configured), group="profile")
+
+
+def _what_the_runtime_needs(active: str | None, cfg) -> tuple[bool, bool]:
+    """Whether the planner in use has a runtime to build, so the disk it takes matters, and whether
+    building it solves a pixi environment, so pixi matters. A pure-Python planner needs neither, and a
+    missing pixi is no failure on a machine that will never build anything. Both True when there is no
+    telling which planner that is: the rows then show, as they always have.
+    """
+    if active is None:
+        return True, True
+    from tandem.cli import runtime as runtime_cli
+    from tandem.planners import registry
+
+    try:
+        rt = registry.runtime(active, cfg)
+    except Exception:
+        return True, True
+    if rt is None:
+        return False, False
+    return True, runtime_cli.needs_pixi(rt)
 
 
 def _runtime_check(profile_name: str | None, cfg) -> tuple[probe.Check, bool, Path | None, str | None]:
@@ -131,14 +145,14 @@ def _runtime_check(profile_name: str | None, cfg) -> tuple[probe.Check, bool, Pa
         # The profile row below says what is wrong with the profile; this one only says that without
         # it, there is no telling whose runtime to look at.
         return (
-            probe.Check("gpu runtime", probe.WARN, "unknown: " + exc.message.split("\n")[0], group="runtime"),
+            probe.Check(RUNTIME_ROW, probe.WARN, "unknown: " + exc.message.split("\n")[0], group="runtime"),
             False,
             None,
             None,
         )
     if runtime is None:
         return (
-            probe.Check("gpu runtime", probe.OK, f"{planner} is pure Python", group="runtime"),
+            probe.Check(RUNTIME_ROW, probe.OK, f"{planner} is pure Python", group="runtime"),
             True,
             None,
             planner,
@@ -151,10 +165,10 @@ def _runtime_check(profile_name: str | None, cfg) -> tuple[probe.Check, bool, Pa
         built = runtime.inspect().built_at if isinstance(runtime, RecipeRuntime) else None
         if built:
             detail += f"  · built {built}"
-        return probe.Check("gpu runtime", probe.OK, detail, group="runtime"), True, root, planner
+        return probe.Check(RUNTIME_ROW, probe.OK, detail, group="runtime"), True, root, planner
     return (
         probe.Check(
-            "gpu runtime",
+            RUNTIME_ROW,
             probe.WARN,
             f"{planner}: " + "; ".join(status.problems or ["not built"]),
             f"Run `tandem planners install {planner}` (`tandem init` does too). Not needed to visualize "
@@ -199,7 +213,9 @@ def _other_planner_checks(active: str | None, cfg) -> list[probe.Check]:
         state = planners_cli.runtime_state(entry.name, entry.info, cfg)
         status = state["status"]
         if status == planners_cli.INSTALLED:
-            checks.append(probe.Check(label, probe.OK, "installed · not used by this profile", group="runtime"))
+            checks.append(
+                probe.Check(label, probe.OK, "installed · not used by this profile", group="runtime")
+            )
         elif status == planners_cli.OUTDATED:
             checks.append(
                 probe.Check(
@@ -215,7 +231,9 @@ def _other_planner_checks(active: str | None, cfg) -> list[probe.Check]:
             checks.append(probe.Check(label, probe.WARN, state["detail"], group="runtime"))
         else:
             what = "pure Python" if status == planners_cli.NO_RUNTIME else "not installed"
-            checks.append(probe.Check(label, probe.SKIP, f"{what} · not used by this profile", group="runtime"))
+            checks.append(
+                probe.Check(label, probe.SKIP, f"{what} · not used by this profile", group="runtime")
+            )
     return checks
 
 
@@ -226,7 +244,6 @@ def _phase_planning_check(profile) -> probe.Check:
     Before, "will this work?" needed a warm cuRobo, an open camera and an arm, so the answer arrived
     with an operator already standing next to one.
     """
-    from tandem.core import secrets
     from tandem.planners import registry
 
     backend = profile.planner.backend
@@ -316,7 +333,9 @@ def _human_executor_check(profile) -> probe.Check | None:
 
 
 def doctor(
-    profile_name: str = typer.Option(None, "--profile", "-p", help="Check this profile instead of the active one."),
+    profile_name: str = typer.Option(
+        None, "--profile", "-p", help="Check this profile instead of the active one."
+    ),
     as_json: bool = typer.Option(False, "--json", help="Machine-readable output."),
     skip_hardware: bool = typer.Option(
         False, "--no-hardware", help="Skip the robot / camera / grasp-server probes."
@@ -360,7 +379,7 @@ def doctor(
         theme.blank()
 
     counts = _summary(checks)
-    runtime_ready = any(c.name == "gpu runtime" and c.state == probe.OK for c in checks)
+    runtime_ready = any(c.name == RUNTIME_ROW and c.state == probe.OK for c in checks)
 
     if counts["fail"]:
         theme.fail(f"{counts['fail']} check(s) failed", f"{counts['warn']} warning(s)")

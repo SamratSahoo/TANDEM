@@ -1,14 +1,16 @@
 # ─────────────────────────────────────────────────────────────────────────────────────────
 #  tandem profile
 #
-#  A profile is one collection setup — the robot, the cameras, the task, the TAMP settings —
+#  A profile is one collection setup — the task, the cameras, the planner and its settings —
 #  together with every trajectory collected under it. Trajectories live beside this file in
 #  trajectories/{eval,success,failure}/<timestamp>/.
 #
 #  Edit with `tandem profile edit <name>`; it re-validates on save and refuses to write a
 #  file that would fail at session start.
 # ─────────────────────────────────────────────────────────────────────────────────────────
-version: 1
+# 2: the planner's own settings are under planner.options. A version-1 profile (robot:,
+# perception: and tamp: at the top level) still loads, and `tandem profile migrate` rewrites it.
+version: 2
 name: default
 description: Franka FR3 + Robotiq 2F-85
 
@@ -21,20 +23,8 @@ task:
   goal: null
   target_episodes: 20
 
-robot:
-  type: fr3_robotiq           # fr3_robotiq | ur5 | franka | panda_robotiq
-  dof: 7
-  host: 172.16.0.2            # the NUC running the bamboo-polymetis shim
-  port: 5555                  # control
-  gripper_port: 5559
-  # The shim's --state-port. Encoders are read here while the control thread is parked in a
-  # blocking move; without it, capture aborts rather than falling back to plan positions.
-  state_port: 5557
-  # BE CAUTIOUS. 0.2 is 20% speed. Raise it only once you trust the setup.
-  time_dilation_factor: 0.2
-  q_home: [0.0, -0.628, 0.0, -2.513, 0.0, 1.885, 0.0]
-  q_capture: [-0.034, 0.09, 0.08, -1.319, -0.003, 1.253, 0.03]
-
+# The rig's cameras, by role. Every leg is recorded from them — the planner's and yours, when
+# you teleoperate — so they belong to the profile, not to any one planner.
 cameras:
   # Which camera perception reads.
   #   external  a static third-person camera. Its pose comes straight from calibration, so
@@ -64,49 +54,77 @@ cameras:
   #   resolution: HD720
   #   fps: 15
 
-perception:
-  gemini:
-    model: gemini-robotics-er-2-preview
-    temperature: null
-  m2t2:
-    url: http://localhost:8123
-    apply_bounds: true
-  sam_mode: local
-  # Frames grabbed back-to-back at the capture pose and per-pixel median-fused to suppress
-  # depth noise. 1 disables smoothing.
-  depth_smoothing_frames: 5
-  # Padding on the robot's collision spheres before they are projected out of a third-person
-  # point cloud. Raise it if a rim of arm survives in the cloud.
-  robot_mask_margin_m: 0.02
-  depth_trunc_m: 5.0
-  voxel_downsample_size: 0.0075
-  contact_threshold_m: 0.01
-  mask_erosion_pixels: 3
-
 # ─────────────────────────────────────────────────────────────────────────────────────────
-#  TAMP settings
+#  planner  —  which task and motion planner tandem calls, and its own settings
 #
-#  These are passed straight through to the planner. The key names are tiptop's own, so
-#  anything documented upstream works here verbatim and an existing cfg/tamp/*.yml can be
-#  pasted in unchanged. Unknown keys are rejected at load time — a silently ignored override
-#  is the one failure mode that looks like success.
+#  tandem plans the task itself: it decides the phases, which are yours and which are the
+#  robot's, runs your legs as teleop, and asks a planner only for "achieve this goal in this
+#  scene". Which planner that is, is a setting — an unknown name is an error, never a silent
+#  fallback, because a dataset collected against a different planner from the one the config
+#  named is a dataset nobody can interpret afterwards. `tandem planners list` shows them all.
 #
-#  Run `tandem profile show <name> --tamp` to see exactly what the planner will receive.
+#  `options` is the planner's own block, and the planner checks it when the profile loads:
+#  a key it does not read is refused, not ignored. `tandem planners info <name>` lists what
+#  a planner reads; `tandem profile show <name> --planner` shows what it will receive.
+#  The options below are TiPToP's. Switching planner (`tandem planners use`) replaces them.
 # ─────────────────────────────────────────────────────────────────────────────────────────
-tamp:
-  # Solver effort. More particles cover the grasp/placement space better per skeleton; more
-  # steps optimize each skeleton harder. Both cost GPU memory and planning time.
-  num_particles: 256
-  opt_steps_per_skeleton: 250
+planner:
+  backend: tiptop
+  options:
+    robot:
+      type: fr3_robotiq           # fr3_robotiq | ur5 | franka | panda_robotiq
+      dof: 7
+      host: 172.16.0.2            # the NUC running the bamboo-polymetis shim
+      port: 5555                  # control
+      gripper_port: 5559
+      # The shim's --state-port. Encoders are read here while the control thread is parked
+      # in a blocking move; without it, capture aborts rather than falling back to plan
+      # positions.
+      state_port: 5557
+      # BE CAUTIOUS. 0.2 is 20% speed. Raise it only once you trust the setup.
+      time_dilation_factor: 0.2
+      q_home: [0.0, -0.628, 0.0, -2.513, 0.0, 1.885, 0.0]
+      q_capture: [-0.034, 0.09, 0.08, -1.319, -0.003, 1.253, 0.03]
 
-  # Charge each move the infinity-norm ||q1 - q2||_inf (max joint displacement) instead of
-  # the default Euclidean distance. Must be the string "inf" — this round-trips through JSON,
-  # which has no Infinity literal. tandem accepts `inf`, `.inf` or `infinity` and normalises.
-  traj_length_norm: inf
+    perception:
+      gemini:
+        model: gemini-robotics-er-2-preview
+        temperature: null
+      m2t2:
+        url: http://localhost:8123
+        apply_bounds: true
+      sam_mode: local
+      # Frames grabbed back-to-back at the capture pose and per-pixel median-fused to suppress
+      # depth noise. 1 disables smoothing.
+      depth_smoothing_frames: 5
+      # Padding on the robot's collision spheres before they are projected out of a
+      # third-person point cloud. Raise it if a rim of arm survives in the cloud.
+      robot_mask_margin_m: 0.02
+      depth_trunc_m: 5.0
+      voxel_downsample_size: 0.0075
+      contact_threshold_m: 0.01
+      mask_erosion_pixels: 3
 
-  # Prefer grasps that reorient the wrist less: weight on the geodesic angle between each
-  # grasp's EE orientation and the arm's initial one. Absent or 0 disables it.
-  grasp_pose_change_weight: 0.1
+    # ── TAMP settings ────────────────────────────────────────────────────────────────────
+    # Passed straight through to cuTAMP and cuRobo. The key names are tiptop's own, so
+    # anything documented upstream works here verbatim and an existing cfg/tamp/*.yml can be
+    # pasted in unchanged. Unknown keys are rejected at load time — a silently ignored
+    # override is the one failure mode that looks like success.
+    tamp:
+      # Solver effort. More particles cover the grasp/placement space better per skeleton;
+      # more steps optimize each skeleton harder. Both cost GPU memory and planning time.
+      num_particles: 256
+      opt_steps_per_skeleton: 250
+
+      # Charge each move the infinity-norm ||q1 - q2||_inf (max joint displacement) instead
+      # of the default Euclidean distance. Must be the string "inf" — this round-trips
+      # through JSON, which has no Infinity literal. tandem accepts `inf`, `.inf` or
+      # `infinity` and normalises.
+      traj_length_norm: inf
+
+      # Prefer grasps that reorient the wrist less: weight on the geodesic angle between
+      # each grasp's EE orientation and the arm's initial one. Absent or 0 disables it.
+      grasp_pose_change_weight: 0.1
 
 # ─────────────────────────────────────────────────────────────────────────────────────────
 #  Phase planning  —  the deep human-in-the-loop mode
@@ -224,18 +242,6 @@ hitl:
   # SQLite cache for proposals only, useful while iterating on prompts. Never applied to
   # grounding or verification.
   cache_path: null
-
-# ─────────────────────────────────────────────────────────────────────────────────────────
-#  planner  —  which task and motion planner tandem calls
-#
-#  tandem plans the task itself: it decides the phases, which are yours and which are the
-#  robot's, runs your legs as teleop, and asks a planner only for "achieve this goal in this
-#  scene". Which planner that is, is a setting — an unknown name is an error, never a silent
-#  fallback, because a dataset collected against a different planner from the one the config
-#  named is a dataset nobody can interpret afterwards.
-# ─────────────────────────────────────────────────────────────────────────────────────────
-planner:
-  backend: tiptop
 
 # recording: whether camera video is captured during execution, and at what rate.
 recording:

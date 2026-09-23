@@ -64,7 +64,9 @@ def check_m2t2(url: str, *, timeout: float = 1.5) -> probe.Check:
         host = parsed.hostname
     except ValueError as exc:
         return probe.Check(
-            "m2t2 grasp server", probe.FAIL, f"{url} — {exc}",
+            "m2t2 grasp server",
+            probe.FAIL,
+            f"{url} — {exc}",
             "That is not a usable address. An unresolved ${oc.env:...} here means an import "
             "left OmegaConf's own syntax behind; set perception.m2t2.url to a plain URL with "
             "`tandem profile edit`.",
@@ -72,11 +74,16 @@ def check_m2t2(url: str, *, timeout: float = 1.5) -> probe.Check:
         )
     if not host:
         return probe.Check(
-            "m2t2 grasp server", probe.FAIL, f"{url or '(empty)'} — no host",
+            "m2t2 grasp server",
+            probe.FAIL,
+            f"{url or '(empty)'} — no host",
             "Set perception.m2t2.url to something like http://localhost:8123.",
             group="hardware",
         )
     return probe.check_port(
-        "m2t2 grasp server", host, port, timeout=timeout,
+        "m2t2 grasp server",
+        host,
+        port,
+        timeout=timeout,
         hint="Start the M2T2 server; perception asks it for grasps every rollout.",
     )

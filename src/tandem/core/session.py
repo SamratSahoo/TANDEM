@@ -256,13 +256,18 @@ class Session:
         """Preflight, build the planner backend, and hand the session to its own thread.
 
         The planner's own preflight -- whether its runtime is built, whether its assets and
-        calibration are in place -- is the planner's, run by its factory and its ``require_ready``.
-        The session checks only what it needs itself whichever planner is named.
+        calibration are in place, whether it has the credentials its perception calls -- is the
+        planner's, run by its factory and its ``require_ready``. The session checks only what it
+        needs itself whichever planner is named.
         """
-        if not secrets.gemini_api_key():
+        # Phase planning is tandem's own use of Gemini: a model splits every task and checks every
+        # human step. A planner that calls Gemini itself (TiPToP's perception does) asks for the key
+        # when its factory builds it; one that does not, never needs one.
+        if self.hitl_enabled and not secrets.gemini_api_key():
             raise TandemError(
-                "No Gemini API key is set, and perception needs one every rollout.",
-                hint="Run `tandem config set-gemini-key`.",
+                "No Gemini API key is set, and phase planning (hitl.enabled) asks Gemini to split every "
+                "task into steps and to check every human one.",
+                hint="Run `tandem config set-gemini-key`, or turn hitl.enabled off.",
             )
 
         # The teleop legs record from these as well, so they are the session's to insist on.

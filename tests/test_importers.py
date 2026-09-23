@@ -14,6 +14,7 @@ from tandem.core import probe
 from tandem.core.profiles import Profile
 from tandem.planners.tiptop import probe as tiptop_probe
 from tandem.planners.tiptop.importers import _deref
+from tandem.planners.tiptop.options import options_of
 
 
 class TestDeref:
@@ -63,7 +64,9 @@ class TestUrlValidation:
         with pytest.raises(ValidationError) as excinfo:
             Profile.model_validate({
                 "name": "x",
-                "perception": {"m2t2": {"url": "http://localhost:${oc.env:TIPTOP_M2T2_PORT,8123}"}},
+                "planner": {
+                    "options": {"perception": {"m2t2": {"url": "http://localhost:${oc.env:TIPTOP_M2T2_PORT,8123}"}}}
+                },
             })
         message = str(excinfo.value)
         assert "m2t2" in message
@@ -71,13 +74,15 @@ class TestUrlValidation:
 
     def test_a_url_without_a_host_is_rejected(self):
         with pytest.raises(ValidationError):
-            Profile.model_validate({"name": "x", "perception": {"m2t2": {"url": "not-a-url"}}})
+            Profile.model_validate(
+                {"name": "x", "planner": {"options": {"perception": {"m2t2": {"url": "not-a-url"}}}}}
+            )
 
     def test_a_good_url_passes(self):
         profile = Profile.model_validate({
-            "name": "x", "perception": {"m2t2": {"url": "http://10.0.0.4:8123"}}
+            "name": "x", "planner": {"options": {"perception": {"m2t2": {"url": "http://10.0.0.4:8123"}}}}
         })
-        assert profile.perception.m2t2.url == "http://10.0.0.4:8123"
+        assert options_of(profile).perception.m2t2.url == "http://10.0.0.4:8123"
 
 
 class TestProbeRobustness:
@@ -115,7 +120,7 @@ class TestStoredProfilesSelfHeal:
         profile.profile_file().write_text(text)
 
         loaded = profiles.load(profile.name)
-        assert loaded.perception.m2t2.url == "http://localhost:8123"
+        assert options_of(loaded).perception.m2t2.url == "http://localhost:8123"
 
     def test_saving_writes_the_resolved_value_back(self, profile):
         from tandem.core import profiles

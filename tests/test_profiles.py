@@ -15,22 +15,24 @@ from pydantic import ValidationError
 from tandem import resources
 from tandem.core import profiles
 from tandem.core.errors import ProfileError
-from tandem.core.profiles import Profile, validate_tamp
+from tandem.core.profiles import Profile
 from tandem.planners.tiptop import render
+from tandem.planners.tiptop.options import options_of, validate_tamp
 
 
 def test_template_is_valid():
     """The shipped template must load, or `tandem init` fails on a fresh machine."""
     profile = profiles.load_file(resources.path("profile_template.yml"), name="default")
     assert profile.name == "default"
-    assert profile.robot.dof == 7
+    assert options_of(profile).robot.dof == 7
+    assert profile.planner.backend == "tiptop"
     assert profile.cameras.perception in {"hand", "external"}
 
 
 def test_save_and_load_roundtrip(profile):
     loaded = profiles.load("test")
     assert loaded.task.prompt == profile.task.prompt
-    assert loaded.tamp == profile.tamp
+    assert loaded.planner.options == profile.planner.options
     for status in profiles.STATUSES:
         assert loaded.status_dir(status).is_dir()
 
@@ -98,8 +100,8 @@ def test_profile_name_must_be_a_safe_path_segment():
 
 def test_joint_vector_length_must_match_dof():
     with pytest.raises(ValidationError) as excinfo:
-        Profile.model_validate({"name": "x", "robot": {"dof": 7, "q_home": [0.0, 0.0]}})
-    assert "q_home" in str(excinfo.value)
+        Profile.model_validate({"name": "x", "planner": {"options": {"robot": {"dof": 7, "q_home": [0.0, 0.0]}}}})
+    assert "options.robot: q_home has 2 values" in str(excinfo.value)
 
 
 def test_perception_camera_must_be_configured_when_there_are_cameras():
@@ -119,9 +121,9 @@ def test_a_profile_with_no_cameras_is_valid():
 
 def test_time_dilation_factor_bounds():
     with pytest.raises(ValidationError):
-        Profile.model_validate({"name": "x", "robot": {"time_dilation_factor": 0.0}})
+        Profile.model_validate({"name": "x", "planner": {"options": {"robot": {"time_dilation_factor": 0.0}}}})
     with pytest.raises(ValidationError):
-        Profile.model_validate({"name": "x", "robot": {"time_dilation_factor": 2.0}})
+        Profile.model_validate({"name": "x", "planner": {"options": {"robot": {"time_dilation_factor": 2.0}}}})
 
 
 def test_missing_profile_names_the_alternatives(profile):
@@ -144,7 +146,7 @@ def test_render_env_sets_the_contract_variables(profile, tmp_path):
     env = render.render_env(profile, events_file=events, task="do the thing", base={})
     assert env["TIPTOP_TASK"] == "do the thing"
     assert env["TIPTOP_EVENTS_FILE"] == str(events)
-    assert env["TIPTOP_STATE_PORT"] == str(profile.robot.state_port)
+    assert env["TIPTOP_STATE_PORT"] == str(options_of(profile).robot.state_port)
     assert env["TIPTOP_CALIBRATION"] == str(profile.calibration_file())
     assert env["DC_WORKSPACE"] == profile.name
     # opencv's LAPACK and torch share one libmkl_core; the threaded path corrupts a pivot
@@ -166,7 +168,7 @@ def test_render_env_only_splits_instruction_when_the_goal_differs(profile, tmp_p
 def test_render_tiptop_config_shape(profile):
     config = render.render_tiptop_config(profile)
     assert set(config) == {"robot", "cameras", "perception"}
-    assert config["robot"]["type"] == profile.robot.type
+    assert config["robot"]["type"] == options_of(profile).robot.type
     assert config["cameras"]["perception"] == profile.cameras.perception
     assert "depth_smoothing" in config["perception"]
 
@@ -174,14 +176,14 @@ def test_render_tiptop_config_shape(profile):
 def test_no_overrides_file_when_the_profile_sets_nothing(profile, tmp_path):
     """Passing an empty --curobo-overrides is not the same as passing none; stock behaviour
     must stay exactly stock."""
-    profile.tamp = {}
+    profile.planner.options["tamp"] = {}
     assert render.write_tamp_overrides(profile, tmp_path / "o.json") is None
 
 
 def test_overrides_json_is_written_when_set(profile, tmp_path):
     import json
 
-    profile.tamp = {"num_particles": 64, "traj_length_norm": "inf"}
+    profile.planner.options["tamp"] = {"num_particles": 64, "traj_length_norm": "inf"}
     path = render.write_tamp_overrides(profile, tmp_path / "o.json")
     assert path is not None
     written = json.loads(path.read_text())
