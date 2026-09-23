@@ -70,6 +70,56 @@ ACHIEVABLE = frozenset(
     | {"HasNotPickedUp", "IsMovable", "IsSurface"}
 )
 
+# The paragraphs of the evaluated phase-segmentation prompt (the paper's Appendix B, LJ tiptop
+# cf75a68) that are statements about cuTAMP's goal language, VERBATIM -- tests/test_prompts.py holds
+# the render to that prompt byte for byte, so a word changed here is a change to the method. The slot
+# contract is tandem.planning.prompts.PROMPT_SLOTS. Every slot is filled: a generic paragraph in any
+# of them would be a prompt nobody evaluated this planner with.
+PROMPT_FRAGMENTS = {
+    # What replaced the worked examples: the loose-placement / precise-fit line, stated as a rule.
+    "placement_semantics": (
+        "WHAT On MEANS. On({0}, {1}) means {0} has been let go of and is RESTING somewhere on or inside "
+        "{1}, and nothing more. That covers setting something down on a surface AND dropping it into "
+        "anything with an opening it fits through -- a bin, a basket, a pot, a drawer that is pulled "
+        'out. Words like "in", "into" and "inside" in an instruction usually mean exactly this: if the '
+        "object only has to end up loosely somewhere within the container, it is On(object, container) "
+        "and it is the robot's job -- including when a human phase first had to open, uncover or empty "
+        "the container to make room for it. What On CANNOT say is a precise fit. The robot places by "
+        "opening its gripper above a spot, so it cannot fit, insert, slot, thread, plug, screw, seat, "
+        "close, or align one thing to another. If a clause needs the object in one particular position "
+        "or orientation -- a key in a lock, a plug in a socket, a lid seated on a jar, a peg in its "
+        "matching hole -- that is a HUMAN phase, however much it looks like a pick-and-place. The same "
+        "goes for anything soft that has to be spread, draped, wrapped or folded over something: that "
+        "is manipulation, not placement. Say either with an invented predicate, not with On."
+    ),
+    "precondition_vocabulary": (
+        "Write them with On, Holding, HandEmpty or a predicate you invented. HandEmpty() belongs here "
+        "whenever the person needs the robot to be out of the way -- which is almost always."
+    ),
+    "delete_effect_example": (
+        "If the person moves something off a surface, the old On(...) is a delete effect; if they "
+        "unplug what an earlier phase plugged in, the IsPluggedIn(...) is."
+    ),
+    "work_division": (
+        "- Give the robot every pick-and-place. A human phase that includes moving an object from A to "
+        "B is taking the robot's work away from it."
+    ),
+    "intermediate_state_example": (
+        '- Intermediate states are fine and often necessary. "Take the mug off the notebook, sign the '
+        'notebook, put the mug back" is three phases, and the first one ends with the mug somewhere '
+        "else -- On(mug, table). Each robot phase is planned fresh, so an object may be picked up in "
+        "more than one phase."
+    ),
+    "robot_phase_rules": (
+        "- Give a whole pick-and-place ONE phase, ending with On(?obj, ?surface). Do not split it into "
+        'a "pick it up" phase and a "put it down" phase; the robot does both as one piece of work.\n'
+        "- Two ROBOT phases in a row must not move the same object twice. The second placement throws "
+        "the first one away, so the first is wasted motion -- and it almost always means a step that "
+        "is not really a pick-and-place was given to the robot. If a human phase belongs between them, "
+        "put it there; if the second phase is the one the robot cannot do, make IT the human phase."
+    ),
+}
+
 CAPABILITIES = Capabilities(
     name="tiptop",
     goal_predicates={"On": ON, "Holding": HOLDING, "HandEmpty": HAND_EMPTY},
@@ -102,10 +152,8 @@ CAPABILITIES = Capabilities(
     # Upstream cuTAMP has no reuse_plan_skeleton and never did; the vendored tree's copy was a local
     # commit that was never pushed. Every leg pays a fresh symbolic search.
     supports_skeleton_reuse=False,
-    # Empty for now: the paragraphs of the evaluated prompt that spell out what On means for cuTAMP
-    # arrive together with that prompt in tandem.planning.prompts. Empty, every slot renders its
-    # generic paragraph.
-    prompt_fragments={},
+    # The Appendix-B paragraphs that spell out cuTAMP's goal language; see PROMPT_FRAGMENTS above.
+    prompt_fragments=PROMPT_FRAGMENTS,
     # An object rests on one thing at a time. cuTAMP's Place deletes no On atom -- its initial state
     # has none to delete -- but in the world the toy is no longer where it was, and the contract check
     # reasons about the world across legs, not about one leg's plan.

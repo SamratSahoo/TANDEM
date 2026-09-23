@@ -90,12 +90,7 @@ def test_the_prompt_actually_contains_the_instruction():
     # the response parses, validates, and plans perfectly well; it is just answering another question.
     from tandem.planning.prompts import plan_prompt
 
-    prompt = plan_prompt(
-        "open the box and put the toy in it",
-        ["blue_toy", "white_box"],
-        predicate_menu=CAPS.predicate_menu(),
-        robot_description=CAPS.robot_description,
-    )
+    prompt = plan_prompt("open the box and put the toy in it", ["blue_toy", "white_box"], caps=CAPS)
     assert "open the box and put the toy in it" in prompt
     assert "blue_toy" in prompt and "white_box" in prompt
 
