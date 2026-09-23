@@ -96,6 +96,7 @@ jobs:
               "tandem/planners/runtime.py",
               "tandem/planners/tiptop/recipe.py",
               "tandem/planners/tiptop/sidecar.py",
+              "tandem/planners/sidecar_kit/tandem_sidecar.py",
               "tandem/planners/tiptop/patches/0001-tiptop-config-from-env.patch",
               "tandem/planners/tiptop/patches/0002-tiptop-optional-realsense.patch",
               "tandem/planners/tiptop/assets/vae_full_v2.pt",

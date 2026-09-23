@@ -199,14 +199,23 @@ def test_the_sidecar_takes_stdout_away_from_the_libraries_it_imports():
     """The single thing that must be right or nothing works.
 
     A real planner's process prints on import -- CUDA banners, warp's version line, a stray print in
-    a vendored tree. Any one of those on fd 1 lands in the middle of a JSON reply. The sidecar dups
-    the real stdout for itself and points fd 1 at stderr before importing anything.
+    a vendored tree. Any one of those on fd 1 lands in the middle of a JSON reply. The sidecar kit
+    dups the real stdout for itself and points fd 1 at stderr as it is imported, and the sidecar
+    imports the kit before anything else. (Both halves used to be in the sidecar itself; the kit is
+    where every planner's sidecar gets them now.)
     """
+    from tandem.planners import sidecar_kit
+
+    kit = sidecar_kit.path().read_text()
+    protocol_line = kit.index("_PROTOCOL_OUT = os.fdopen(os.dup(1)")
+    assert "os.dup2(2, 1)" in kit
+    # At import, not inside a function someone has to remember to call.
+    assert protocol_line < kit.index("\ndef "), "the kit must take stdout when it is imported"
     source = _sidecar_source()
-    protocol_line = source.index("_PROTOCOL_OUT = os.fdopen(os.dup(1)")
-    assert "os.dup2(2, 1)" in source
     # Before any planner import, not merely somewhere in the file.
-    assert protocol_line < source.index("from tiptop"), "stdout must be secured before tiptop is imported"
+    assert source.index("from tandem_sidecar import") < source.index("from tiptop"), (
+        "stdout must be secured before tiptop is imported"
+    )
 
 
 # --- the channel ----------------------------------------------------------------------------------

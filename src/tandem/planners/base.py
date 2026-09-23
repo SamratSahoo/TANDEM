@@ -344,6 +344,11 @@ class TampBackend(Protocol):
     The lifecycle is: ``require_ready`` → ``warm`` → (``perceive`` → ``plan`` → ``execute``)* →
     ``close``, with ``release_hardware``/``reacquire_hardware`` bracketing every teleop leg because
     the robot and the cameras admit exactly one owner.
+
+    A new planner does not implement this by hand: it subclasses ``tandem.planners.Planner`` (or
+    ``SidecarPlanner``, for one that runs in an environment of its own), which supplies every verb
+    but ``perceive``, ``plan`` and ``execute`` and is its own factory. ``tandem.planners.testing``
+    checks an implementation of this protocol, however it was written.
     """
 
     name: str
@@ -664,8 +669,9 @@ class BackendFactory(Protocol):
 
 
 # Verbs a hosted backend answers, and the only strings that cross the wire. Kept here so the one
-# canonical list lives beside the protocol it mirrors; `tandem/planners/tiptop/sidecar.py` repeats
-# them because it must not import tandem, and a test pins the two together.
+# canonical list lives beside the protocol it mirrors; `tandem/planners/sidecar_kit/tandem_sidecar.py`
+# and `tandem/planners/tiptop/sidecar.py` repeat them because neither may import tandem, and tests pin
+# every copy to this one.
 VERBS: tuple[str, ...] = (
     "capabilities",
     "warm",

@@ -64,6 +64,13 @@ LIGHT_MODULES = [
     # A planner's runtime recipe is read to list planners, so fetching and building stay behind calls.
     "tandem.planners.runtime",
     "tandem.planners.tiptop.recipe",
+    # The planner SDK: a planner class is imported to list planners, and a plugin's test suite imports
+    # the conformance kit on a laptop. (Not tandem_sidecar: it is not a tandem module, and importing
+    # it takes over stdout -- it runs only inside a planner's sidecar.)
+    "tandem.planners.sdk",
+    "tandem.planners.sidecar",
+    "tandem.planners.sidecar_kit",
+    "tandem.planners.testing",
     "tandem.cli.runtime",
     "tandem.cli.plan",
 ]
@@ -163,6 +170,26 @@ def test_tiptops_patches_and_checkpoints_ship_as_package_data():
         )
     sizes = {a.source.name: a.source.stat().st_size for a in RECIPE.assets}
     assert 1e6 < sizes["vae_full_v2.pt"] < 2e6 and 2e6 < sizes["rnd_droid.pt"] < 4e6
+
+
+def test_the_sidecar_kit_ships_as_a_file_a_planners_environment_can_import():
+    """Every sidecar imports tandem_sidecar from the directory tandem puts on its path, so it has to be
+    in the wheel as a plain file -- and must import nothing a planner's environment might not have."""
+    import ast
+
+    from tandem.planners import sidecar_kit
+
+    kit = sidecar_kit.path()
+    assert kit.is_file() and kit.parent == SRC / "planners" / "sidecar_kit"
+    # A module of a package that setuptools finds, so the wheel carries it without a package-data glob.
+    assert (kit.parent / "__init__.py").is_file()
+    roots = set()
+    for node in ast.walk(ast.parse(kit.read_text())):
+        if isinstance(node, ast.Import):
+            roots.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            roots.add(node.module.split(".")[0])
+    assert roots <= set(sys.stdlib_module_names) | {"__future__"}, sorted(roots)
 
 
 def test_tiptops_patches_are_plain_diffs():

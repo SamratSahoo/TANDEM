@@ -205,18 +205,18 @@ class FakeBackend:
         assert self.holds_hardware, "the arm was driven while it was handed away"
         save_dir = Path(save_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
-        # The backend is what stamps the leg's identity, because merging keys on it.
-        (save_dir / "_meta.json").write_text(
-            json.dumps(
-                {
-                    "n_frames": self.n_frames,
-                    "instruction": leg.instruction,
-                    "trajectory_id": leg.trajectory_id,
-                    "segment_source": leg.segment_source,
-                    "phase_index": leg.phase_index,
-                }
-            )
-        )
+        # The backend is what stamps the leg's identity, because merging keys on it -- the phase
+        # keys too, as the real sidecar does, since the merged segments[] map each leg to its phase.
+        meta = {
+            "n_frames": self.n_frames,
+            "instruction": leg.instruction,
+            "trajectory_id": leg.trajectory_id,
+            "segment_source": leg.segment_source,
+            "phase_index": leg.phase_index,
+        }
+        if leg.phase_index is not None:
+            meta.update(n_phases=leg.n_phases, phase_description=leg.phase_description)
+        (save_dir / "_meta.json").write_text(json.dumps(meta))
         self.legs.append({"leg": leg, "dir": str(save_dir)})
         return ExecuteResult(ok=True, n_frames=self.n_frames, rollout_dir=str(save_dir))
 

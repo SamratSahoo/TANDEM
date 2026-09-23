@@ -442,6 +442,10 @@ src/tandem/
 ├── core/          profiles, trajectories, the session state machine, the runtime
 ├── planning/      phase planning: proposal, invented predicates, verification
 ├── planners/      the planner backends, behind one narrow protocol
+│   ├── sdk.py     Planner: the base class a new planner is written against
+│   ├── sidecar.py SidecarPlanner: a planner that runs in its own environment, over JSON lines
+│   ├── sidecar_kit/  tandem_sidecar, the stdlib-only helper every such sidecar is written with
+│   ├── testing.py a conformance kit a planner's own test suite subclasses
 │   ├── runtime.py a planner's runtime from a recipe: pinned sources, an environment, build steps
 │   └── tiptop/    a capability declaration, a runtime recipe, a client, and a sidecar
 ├── server/        FastAPI + a no-build single-page app
@@ -484,7 +488,9 @@ from `tandem`, and every line of it is a call to a **public function of an unmod
 planner**. Goals reach cuTAMP through `run_perception`'s existing `goal_builder` hook, so
 there is no planner-side change to keep alive. That is the difference from the design this
 replaces, where the phase planner lived inside a fork of the planner and every planner tandem
-wanted to drive had to be forked with it.
+wanted to drive had to be forked with it. None of the plumbing is TiPToP's: `TiptopBackend` is a
+`SidecarPlanner`, and `sidecar.py` answers through `tandem_sidecar`, so another planner is a
+`Planner` (or `SidecarPlanner`) subclass plus, for the latter, a script of handler functions.
 
 With phase planning off there is nothing to decompose, so the goal is the one the planner's own
 translator made of the instruction during perception — the same translator, the same atoms, one

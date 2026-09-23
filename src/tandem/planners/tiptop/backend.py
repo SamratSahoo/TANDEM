@@ -1,6 +1,11 @@
 """TiPToP as a tandem backend: the parent-process half.
 
-All this does is turn protocol calls into requests on a child that runs inside the GPU runtime.
+A ``SidecarPlanner``: every protocol call becomes a request on a child that runs inside the GPU
+runtime, and everything generic about that -- launching, the wire, timeouts, crashes, custody -- is
+the base class's. What is TiPToP's is only how it is launched and warmed: through the runtime's
+``pixi run`` from the tiptop tree, with the ``TIPTOP_*`` environment the factory rendered, and
+handed the cuRobo cost overrides when it warms.
+
 The child is ``sidecar.py``, which lives in this package -- it is TANDEM's code executed in TiPToP's
 environment, not TiPToP's code. That is the whole trick, and it is why the planner repositories stay
 untouched: everything tandem needs from TiPToP is a call to a public function of it, made from a file
@@ -13,21 +18,16 @@ Nothing in this module imports torch, cuTAMP or tiptop, and nothing ever will. I
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from tandem.core.runtime import Runtime
-from tandem.planners.base import (
-    Capabilities,
-    ExecuteResult,
-    GoalAtom,
-    LegSpec,
-    PlanResult,
-    SceneView,
-)
-from tandem.planners.rpc import HostedBackendChannel
+from tandem.planners.base import BackendContext
+from tandem.planners.sidecar import SidecarPlanner
 from tandem.planners.tiptop.capabilities import CAPABILITIES
+from tandem.planners.tiptop.factory import INFO
+from tandem.planners.tiptop.recipe import RECIPE
 
 _log = logging.getLogger(__name__)
 
@@ -49,15 +49,35 @@ def sidecar_path() -> Path:
     Passed by path rather than imported as a module: the runtime environment has tiptop and cuTAMP on
     its path but not tandem, and adding tandem to it would mean installing tandem's own dependencies
     into the planner's environment for no reason. The sidecar is written to need nothing but the
-    standard library and what tiptop already has.
+    standard library, ``tandem_sidecar`` (which the launch puts on its path) and what tiptop has.
     """
-    return Path(__file__).resolve().parent / "sidecar.py"
+    return TiptopBackend.sidecar_script()
 
 
-class TiptopBackend:
-    """Drives TiPToP for one collection session."""
+class TiptopBackend(SidecarPlanner):
+    """Drives TiPToP for one collection session.
 
+    ``execute`` ignores ``should_stop``: upstream's execute_cutamp_plan takes a whole trajectory and
+    has no mid-plan seam, which is exactly what ``supports_cooperative_stop=False`` says, and what
+    keeps the base class from offering the sidecar a stop file. ``movables`` and ``return_home`` go
+    on the wire because the capabilities declare both; the sidecar honours them (see ``Sidecar.plan``).
+    """
+
+    info = INFO
+    CAPABILITIES = CAPABILITIES
+    recipe = RECIPE
     name = "tiptop"
+    SIDECAR = "sidecar.py"
+    TIMEOUTS = {
+        "warm": WARM_TIMEOUT,
+        "perceive": PERCEIVE_TIMEOUT,
+        "plan": PLAN_TIMEOUT,
+        "execute": EXECUTE_TIMEOUT,
+        "capture_frame": HARDWARE_TIMEOUT,
+        "home": HARDWARE_TIMEOUT,
+        "release_hardware": HARDWARE_TIMEOUT,
+        "reacquire_hardware": HARDWARE_TIMEOUT,
+    }
 
     def __init__(
         self,
@@ -70,134 +90,39 @@ class TiptopBackend:
         cost_overrides_file: Path | None = None,
         on_log: Callable[[str, str], None] | None = None,
     ) -> None:
-        self._runtime = runtime
-        self._env = env
+        # Built by the factory, which has already located the runtime and rendered the environment
+        # from the profile; see factory.TiptopFactory.create.
+        super().__init__(None, runtime=runtime, env=env, on_log=on_log)
         self._output_dir = Path(output_dir)
         self._execute = execute
         self._record = record
         self._cost_overrides_file = cost_overrides_file
-        self._on_log = on_log
-        self._channel: HostedBackendChannel | None = None
 
-    # ---- what this planner is ----------------------------------------------
+    # ---- the class as a factory: TiPToP's lives in factory.py, so both routes build the same thing ----
 
-    def capabilities(self) -> Capabilities:
-        return CAPABILITIES
+    @classmethod
+    def create(cls, ctx: BackendContext) -> TiptopBackend:
+        from tandem.planners.tiptop.factory import FACTORY
 
-    def require_ready(self) -> None:
-        self._runtime.require_ready()
+        return FACTORY.create(ctx)
 
-    # ---- lifecycle ---------------------------------------------------------
+    @classmethod
+    def runtime(cls, settings: Any = None):
+        from tandem.planners.tiptop.factory import FACTORY
 
-    def warm(self) -> None:
-        if self._channel is None:
-            argv = self._runtime.command(["python", str(sidecar_path())])
-            self._on_log and self._on_log("tandem", "$ " + " ".join(argv))
-            self._channel = HostedBackendChannel(
-                argv,
-                cwd=self._runtime.tiptop_dir,
-                env=self._env,
-                on_log=self._on_log,
-            ).start()
-        self._call(
-            "warm",
-            timeout=WARM_TIMEOUT,
-            output_dir=str(self._output_dir),
-            execute=self._execute,
-            record=self._record,
-            cost_overrides=str(self._cost_overrides_file) if self._cost_overrides_file else None,
-        )
+        return FACTORY.runtime(settings)
 
-    def close(self) -> None:
-        channel, self._channel = self._channel, None
-        if channel is not None:
-            channel.stop()
+    # ---- how TiPToP's sidecar is started -----------------------------------
 
-    # ---- hardware custody --------------------------------------------------
+    def launch_cwd(self) -> Path | None:
+        # The tiptop tree, where its pixi manifest is and where tiptop resolves its relative paths.
+        return self._runtime.tiptop_dir
 
-    def release_hardware(self) -> None:
-        self._call("release_hardware", timeout=HARDWARE_TIMEOUT)
-
-    def reacquire_hardware(self) -> None:
-        self._call("reacquire_hardware", timeout=HARDWARE_TIMEOUT)
-
-    def capture_frame(self, *, camera: str = "external") -> str:
-        return str(self._call("capture_frame", timeout=HARDWARE_TIMEOUT, camera=camera)["path"])
-
-    def home(self) -> None:
-        self._call("home", timeout=HARDWARE_TIMEOUT)
-
-    # ---- the sub-goal cycle ------------------------------------------------
-
-    def perceive(
-        self,
-        *,
-        task_hint: str,
-        save_dir: Path,
-        reset_arm: bool = True,
-        open_gripper: bool = False,
-    ) -> SceneView:
-        data = self._call(
-            "perceive",
-            timeout=PERCEIVE_TIMEOUT,
-            task_hint=task_hint,
-            save_dir=str(save_dir),
-            reset_arm=reset_arm,
-            open_gripper=open_gripper,
-        )
-        return SceneView.from_dict(data)
-
-    def plan(
-        self,
-        scene_id: str,
-        goal: Sequence[GoalAtom],
-        *,
-        surfaces: frozenset[str] = frozenset(),
-        movables: frozenset[str] | None = None,
-        return_home: bool = True,
-        save_dir: Path,
-        reuse_skeleton: Any = None,
-    ) -> PlanResult:
-        # Both are honoured in the sidecar (see Sidecar.plan), which is what CAPABILITIES declares.
-        # None and an empty set are different requests -- "anything may be picked" against "nothing
-        # may" -- so the None survives the wire as null rather than becoming [].
-        data = self._call(
-            "plan",
-            timeout=PLAN_TIMEOUT,
-            scene_id=scene_id,
-            goal=[a.to_dict() for a in goal],
-            surfaces=sorted(surfaces),
-            movables=sorted(movables) if movables is not None else None,
-            return_home=bool(return_home),
-            save_dir=str(save_dir),
-        )
-        return PlanResult.from_dict(data)
-
-    def execute(
-        self,
-        plan_handle: Any,
-        leg: LegSpec,
-        *,
-        save_dir: Path,
-        should_stop: Callable[[], bool] | None = None,
-    ) -> ExecuteResult:
-        # should_stop is ignored: upstream's execute_cutamp_plan takes a whole trajectory and has no
-        # mid-plan seam, which is exactly what capabilities().supports_cooperative_stop says. The
-        # parameter stays on the protocol because a backend that CAN stop should be able to.
-        data = self._call(
-            "execute",
-            timeout=EXECUTE_TIMEOUT,
-            plan_handle=plan_handle,
-            leg=leg.to_dict(),
-            save_dir=str(save_dir),
-        )
-        return ExecuteResult.from_dict(data)
-
-    # ---- plumbing ----------------------------------------------------------
-
-    def _call(self, verb: str, *, timeout: float, **args: Any) -> Any:
-        from tandem.planners.base import BackendError
-
-        if self._channel is None:
-            raise BackendError("the tiptop backend has not been warmed")
-        return self._channel.call(verb, timeout=timeout, **args)
+    def warm_args(self) -> dict[str, Any]:
+        # The cost overrides are the same file an ordinary tiptop-run reads its knobs from.
+        return {
+            "output_dir": str(self._output_dir),
+            "execute": self._execute,
+            "record": self._record,
+            "cost_overrides": str(self._cost_overrides_file) if self._cost_overrides_file else None,
+        }
