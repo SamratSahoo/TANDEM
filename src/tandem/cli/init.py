@@ -17,7 +17,6 @@ from tandem import resources
 from tandem.cli import runtime as runtime_cli
 from tandem.cli import theme
 from tandem.core import importers, paths, probe, profiles, secrets
-from tandem.core import runtime as runtime_mod
 from tandem.core import settings as settings_mod
 from tandem.core.errors import TandemError
 
@@ -97,30 +96,7 @@ def init(
     # ---- 4. the GPU runtime -------------------------------------------------
     if not viz_only:
         theme.rule("gpu runtime")
-        runtime = runtime_mod.Runtime(cfg.resolved_runtime_dir())
-        status = runtime.status()
-
-        if status.ready and not repair:
-            theme.ok("Runtime is already built", str(runtime.root))
-        else:
-            if probe.find_pixi() is None:
-                theme.info("pixi is the environment manager the planner stack needs.")
-                theme.info("It installs to ~/.pixi and touches nothing else.")
-                if interactive and not typer.confirm("  Install pixi now?", default=True):
-                    raise TandemError(
-                        "pixi is required to build the runtime.",
-                        hint="Install it from https://pixi.sh, then re-run `tandem init`.",
-                    )
-                theme.busy("Installing pixi")
-                runtime_cli.install_pixi(log=lambda _line: None)
-                theme.ok("pixi installed")
-
-            theme.info("Building the planner stack: torch, cuRobo (CUDA kernels), cuTAMP, tiptop.")
-            theme.info("The first build compiles 5 CUDA extensions and takes 5–20 minutes.")
-            if interactive and not typer.confirm("  Build it now?", default=True):
-                theme.warn("Skipped", "run `tandem runtime build` when you are ready")
-            else:
-                runtime_cli.run_build(runtime, force=repair)
+        _build_runtime(profile_name, interactive=interactive, repair=repair)
         theme.blank()
 
     # ---- 5. the Gemini key --------------------------------------------------
@@ -169,6 +145,44 @@ def init(
 
 
 # --------------------------------------------------------------------------- steps
+
+
+def _build_runtime(profile_name: str, *, interactive: bool, repair: bool) -> None:
+    """Build the runtime of the planner this profile uses -- the one a new profile gets, before it exists."""
+    from tandem.planners import registry
+    from tandem.planners.runtime import RecipeRuntime
+
+    planner, runtime = runtime_cli.planner_runtime(profile_name=profile_name)
+    title = registry.info(planner).title
+    if runtime is None:
+        theme.ok(f"{title} is pure Python", "there is no runtime to build")
+        return
+    status = runtime.status()
+
+    if status.installed and not repair:
+        theme.ok("Runtime is already built", str(status.path))
+        return
+
+    needs_pixi = isinstance(runtime, RecipeRuntime) and runtime.recipe.environment is not None
+    if needs_pixi and probe.find_pixi() is None:
+        theme.info(f"pixi is the environment manager {title}'s planner stack needs.")
+        theme.info("It installs to ~/.pixi and touches nothing else.")
+        if interactive and not typer.confirm("  Install pixi now?", default=True):
+            raise TandemError(
+                "pixi is required to build the runtime.",
+                hint="Install it from https://pixi.sh, then re-run `tandem init`.",
+            )
+        theme.busy("Installing pixi")
+        runtime_cli.install_pixi(log=lambda _line: None)
+        theme.ok("pixi installed")
+
+    for note in runtime.recipe.notes if isinstance(runtime, RecipeRuntime) else ():
+        theme.info(note)
+    if interactive and not typer.confirm("  Build it now?", default=True):
+        theme.warn("Skipped", "run `tandem runtime build` when you are ready")
+    else:
+        runtime_cli.run_build(runtime, force=repair)
+
 
 
 def _preflight(*, viz_only: bool) -> list[probe.Check]:

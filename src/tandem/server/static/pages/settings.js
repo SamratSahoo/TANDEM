@@ -87,20 +87,22 @@ function pathsCard(payload) {
 function runtimeCard() {
   const body = h("div", h("div.row", h("span.spin"), h("span.faint.small", "checking…")));
   api.runtime().then((runtime) => {
+    // The rows are the planner's own (sources, its environment, each build step), so this card
+    // shows whichever planner the active profile uses without knowing any of them.
     const rows = [
-      ["sources", runtime.sources_present ? "present" : "missing"],
-      ["pixi env", runtime.env_built ? "built" : "not built"],
-      ["curobo kernels", runtime.kernels_built ? "compiled" : "not compiled"],
-      ["built", runtime.built_at || "—"],
-      ["root", runtime.root],
+      ["planner", runtime.title || runtime.planner || "—"],
+      ...((runtime.rows && runtime.rows.length) ? runtime.rows : [["detail", runtime.detail || "—"]]),
+      ["root", runtime.root || "—"],
     ];
-    const vendor = runtime.vendor || {};
-    const vendorRows = Object.entries(vendor)
-      .filter(([, meta]) => meta && typeof meta === "object")
-      .map(([name, meta]) =>
-        h("tr", h("td", name), h("td.faint", meta.version || ""),
-          h("td.mono.faint", String(meta.commit || "").slice(0, 12)),
-          h("td.faint.small", meta.url || "")));
+    const sourceRows = (runtime.sources || []).map((source) => {
+      const installed = source.installed
+        ? String(source.installed).slice(0, 12) + (source.installed === source.commit ? "" : " (not the pin)")
+        : "—";
+      return h("tr", h("td", source.name),
+        h("td.mono.faint", String(source.commit || "").slice(0, 12)),
+        h("td.mono.faint", installed),
+        h("td.faint.small", source.url || ""));
+    });
 
     clear(body);
     if (!runtime.ready) {
@@ -113,11 +115,11 @@ function runtimeCard() {
     body.appendChild(h("dl.kv", ...rows.flatMap(([key, value]) => [
       h("dt", key), h("dd", key === "root" ? h("span.mono.faint", value) : String(value)),
     ])));
-    if (vendorRows.length) {
-      body.appendChild(h("div.section-title", { style: { marginTop: "16px" } }, "vendored sources"));
+    if (sourceRows.length) {
+      body.appendChild(h("div.section-title", { style: { marginTop: "16px" } }, "sources"));
       body.appendChild(h("table",
-        h("thead", h("tr", h("th", "component"), h("th", "version"), h("th", "commit"), h("th", "upstream"))),
-        h("tbody", ...vendorRows)));
+        h("thead", h("tr", h("th", "source"), h("th", "pinned"), h("th", "installed"), h("th", "upstream"))),
+        h("tbody", ...sourceRows)));
     }
   }).catch((error) => mount(body, h("div.alert.err", error.message)));
 

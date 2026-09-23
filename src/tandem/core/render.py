@@ -100,9 +100,9 @@ def render_tamp_overrides(profile: Profile, *, runtime_dir: Path | None = None) 
 def _resolve_asset(profile: Profile, value: str, key: str, runtime_dir: Path | None) -> Path:
     """Resolve a checkpoint path: absolute wins, then the profile dir, then the runtime dir.
 
-    The runtime dir is included because the vendored checkpoints live there under the same
-    relative layout the source monorepo used (vae/checkpoints/..., rnd/checkpoints/...), so
-    an imported legacy config keeps working unchanged.
+    The runtime dir is included because TiPToP's runtime recipe puts the DATAFARM checkpoints there
+    under the same relative layout the source monorepo used (vae/checkpoints/...,
+    rnd/checkpoints/...), so an imported legacy config keeps working unchanged.
     """
     candidate = Path(os.path.expanduser(value))
     if candidate.is_absolute():
@@ -194,7 +194,7 @@ def render_env(
 ) -> dict[str, str]:
     """The environment the planner backend's process runs in.
 
-    Every name here is read by code in the vendored tree; nothing is aspirational. tandem no longer
+    Every name here is read by code in the planner's pinned tree; nothing is aspirational. tandem no longer
     spawns the planner's own CLI — it runs its own sidecar inside the same environment (see
     ``tandem.planners.tiptop``) — but that sidecar calls the same functions, which read the same
     variables.
@@ -217,7 +217,7 @@ def render_env(
     env["TIPTOP_CONFIG"] = str(_session_config_path(profile))
     env["TIPTOP_CALIBRATION"] = str(profile.calibration_file())
     # The source scoped per-robot data with DC_WORKSPACE and keyed extrinsics off it; a
-    # tandem profile plays that role, and setting it keeps the vendored code's own
+    # tandem profile plays that role, and setting it keeps the planner's own
     # workspace-aware paths pointing somewhere sane.
     env["DC_WORKSPACE"] = profile.name
     env["TANDEM_PROFILE"] = profile.name

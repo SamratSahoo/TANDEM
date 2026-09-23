@@ -73,26 +73,21 @@ teleop = "tandem.executors.teleop:FACTORY"
 where = ["src"]
 include = ["tandem*"]
 
+# No planner sources ship in the wheel: a planner's runtime recipe fetches them, pinned, at install
+# (tandem/planners/runtime.py). What a planner package does ship is small and its own -- the patches its
+# recipe applies to the fetched trees, and files no public repository has (TiPToP's two checkpoints).
 [tool.setuptools.package-data]
 tandem = [
     "resources/**/*",
     "server/static/**/*",
-    "_vendor/VENDOR.toml",
-    "_vendor/patches/*",
-    "_vendor/tiptop/**/*",
-    "_vendor/cuTAMP/**/*",
-    "_vendor/curobo/**/*",
-    "_vendor/vae/**/*",
-    "_vendor/rnd/**/*",
+    "planners/*/patches/*",
+    "planners/*/assets/**/*",
 ]
 
 [tool.ruff]
 line-length = 110
 target-version = "py310"
-# Third-party sources we vendor verbatim. Reformatting them would make every upstream diff
-# unreadable, which is the opposite of what vendoring with pinned commits is for.
 extend-exclude = [
-    "src/tandem/_vendor",
     "src/tandem/export/lerobot_v3.py",
     "src/tandem/teleop/driver.py",
     "src/tandem/teleop/spacemouse.py",

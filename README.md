@@ -137,8 +137,11 @@ prefer uv.
 
 That is the whole install. `tandem` itself is pure Python — the heavy stack (torch, cuRobo's
 compiled CUDA kernels, cuTAMP, tiptop) is built by `tandem init` into a self-contained
-runtime under `~/.local/share/tandem/`. The sources for all three ship inside the package, so
-that build needs no network and no `git`.
+runtime under `~/.local/share/tandem/`. The planner's sources are not in the package: the build
+fetches them at the exact commits this version of tandem pins (with `git`, or GitHub's archive of
+the commit where there is no `git`). A workstation with no network installs from a bundle made
+elsewhere — `python tools/bundle.py --planner tiptop --out DIR`, then
+`tandem runtime build --sources DIR`.
 
 <table>
 <tr><td width="50%">
@@ -439,12 +442,12 @@ src/tandem/
 ├── core/          profiles, trajectories, the session state machine, the runtime
 ├── planning/      phase planning: proposal, invented predicates, verification
 ├── planners/      the planner backends, behind one narrow protocol
-│   └── tiptop/    a capability declaration, a client, and a sidecar
+│   ├── runtime.py a planner's runtime from a recipe: pinned sources, an environment, build steps
+│   └── tiptop/    a capability declaration, a runtime recipe, a client, and a sidecar
 ├── server/        FastAPI + a no-build single-page app
 ├── export/        LeRobot v3.0 writer
 ├── teleop/        the hand-off driver, run under a DROID environment
-├── resources/     the annotated profile template
-└── _vendor/       tiptop · cuTAMP · cuRobo, pinned and trimmed
+└── resources/     the annotated profile template
 ```
 
 The **session engine** (`core/session.py`, with the walk itself in `core/phase_loop.py`) walks a
@@ -493,12 +496,17 @@ modules resolve default asset paths by walking up from `__file__` to what they a
 repo root; reproducing that shape makes them all resolve correctly with no patching, and
 means an imported legacy config works unchanged.
 
-Vendored sources are pinned by commit in `src/tandem/_vendor/VENDOR.toml`, with the trimmed
-paths and applied patches recorded alongside. Re-vendor with:
-
-```bash
-python tools/vendor.py --source /path/to/hitl-tamp-vla
-```
+A planner's runtime is **declared, not shipped**. TiPToP's recipe
+(`src/tandem/planners/tiptop/recipe.py`) pins tiptop, cuTAMP and cuRobo to exact commits, lists
+what to trim from each and the two patches to apply, names tiptop's own pixi manifest, and the
+build step that compiles cuRobo's kernels. `planners/runtime.py` does the rest, for any planner
+that declares a recipe: it fetches each commit with `git fetch --depth 1` and `git archive`,
+checks it is the commit it asked for, applies the patches (a patch that no longer applies stops
+the install), and records what it installed in `<runtime>/.tandem-runtime.json`. The pixi
+environment lives beside the sources rather than inside them, so moving a pin replaces a tree
+without re-solving 20 GB of torch and CUDA. `tandem runtime status` compares the record with the
+pins and says when a tandem upgrade needs a rebuild. A bump is an edit of the commits in the
+recipe; CI checks the sidecar against the newly pinned trees before anything ships.
 
 ---
 

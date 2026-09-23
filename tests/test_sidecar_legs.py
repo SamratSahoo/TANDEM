@@ -29,6 +29,7 @@ from pathlib import Path
 
 import pytest
 from fake_backend import FakeBackend
+from planner_sources import planner_sources
 from ruamel.yaml import YAML
 
 from tandem.planners.base import GoalAtom, PlanResult, TampBackend
@@ -394,16 +395,12 @@ def test_the_tiptop_backend_puts_the_leg_semantics_on_the_wire(tmp_path):
 
 
 def _planner_sources() -> Path:
-    """Where tiptop and cuTAMP's sources are: the vendored tree, or ``TANDEM_PLANNER_SOURCES``.
+    """Where tiptop and cuTAMP's sources are, found the one way every static check finds them.
 
-    The override is a directory holding ``tiptop/`` and ``cuTAMP/`` checkouts, for checking the sidecar
-    against the commits a re-vendor or a fetched runtime is about to switch to, before switching.
+    ``$TANDEM_PLANNER_SOURCES`` pointed at other commits checks the sidecar against a bump before the
+    pins move (see tests/planner_sources.py).
     """
-    override = os.environ.get("TANDEM_PLANNER_SOURCES")
-    root = Path(override) if override else Path(__file__).resolve().parents[1] / "src" / "tandem" / "_vendor"
-    if not (root / "tiptop" / "tiptop" / "tiptop_run.py").is_file():
-        pytest.skip(f"no planner sources at {root} to check the sidecar against")
-    return root
+    return planner_sources("tiptop/tiptop/tiptop_run.py", "cuTAMP/cutamp")
 
 
 def _function(path: Path, name: str, *, cls: str | None = None) -> ast.FunctionDef:
