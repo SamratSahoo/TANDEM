@@ -15,11 +15,11 @@ from rich.text import Text
 from tandem.cli import theme
 from tandem.cli.keys import KeyReader
 from tandem.core import profiles
-from tandem.core import runtime as runtime_mod
 from tandem.core import session as session_mod
 from tandem.core import settings as settings_mod
 from tandem.core.errors import SessionConflict, TandemError
 from tandem.core.session import State
+from tandem.planners.tiptop import runtime as runtime_mod
 
 # The stages a rollout moves through, as the operator experiences them.
 PIPELINE = [

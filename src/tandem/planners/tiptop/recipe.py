@@ -53,7 +53,7 @@ ASSETS = _HERE / "assets"
 # everything these two call on it (IKSolver.solve_batch(return_seeds=), the VAE cost's retiming).
 # The sidecar is checked against these exact trees (tests/test_planners.py, tests/test_sidecar_legs.py,
 # tests/test_tiptop_bump.py, run by CI with the pinned sources fetched), and so is the set of `tamp:`
-# keys a profile may set (core/tamp_keys.py): move the pins and those checks together.
+# keys a profile may set (tamp_keys.py): move the pins and those checks together.
 TIPTOP = Source(
     SourcePin(
         "tiptop", "https://github.com/SamratSahoo/tiptop.git", "1c6daf3f5d1ab822a0787c40ec0ed6b6caa472de"
@@ -118,7 +118,7 @@ RECIPE = RuntimeRecipe(
     # The DATAFARM checkpoints for the cuRobo fork's VAE-manifold and RND-novelty costs. Their source
     # repository is private, so these two small files (1.4 MB and 2.8 MB) are the only planner files
     # still shipped inside tandem. They go where those costs look by default (parents[5] above);
-    # tandem also points VAE_MANIFOLD_CKPT / RND_NOVELTY_CKPT at them (core/render.py).
+    # tandem also points VAE_MANIFOLD_CKPT / RND_NOVELTY_CKPT at them (render.py).
     assets=(
         Asset(ASSETS / "vae_full_v2.pt", "vae/checkpoints/vae_full_v2.pt"),
         Asset(ASSETS / "rnd_droid.pt", "rnd/checkpoints/rnd_droid.pt"),

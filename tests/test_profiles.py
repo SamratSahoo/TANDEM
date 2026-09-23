@@ -13,9 +13,10 @@ import pytest
 from pydantic import ValidationError
 
 from tandem import resources
-from tandem.core import profiles, render
+from tandem.core import profiles
 from tandem.core.errors import ProfileError
 from tandem.core.profiles import Profile, validate_tamp
+from tandem.planners.tiptop import render
 
 
 def test_template_is_valid():

@@ -64,13 +64,13 @@ from enum import Enum
 from pathlib import Path
 
 from tandem import executors
-from tandem.core import episodes, paths, render, secrets
+from tandem.core import episodes, paths, profiles, secrets
 from tandem.core import settings as settings_mod
 from tandem.core.errors import SessionConflict, TandemError
 from tandem.core.phase_loop import TELEOP, HumanPhase, PhaseLoop, TrialOutcome
 from tandem.core.profiles import Profile
-from tandem.core.runtime import Runtime
 from tandem.executors.base import CustodyError, ExecutorContext
+from tandem.planners.tiptop.runtime import Runtime
 
 LOG_BUFFER = 4000
 # How long a caller should wait for `stop()` to finish. It has to cover the session thread
@@ -633,7 +633,7 @@ class Session:
     def _planning_config(self):
         if self._planning_cfg is None:
             self._planning_cfg = self.profile.hitl.to_planning_config(
-                cache_path=render.resolve_cache_path(self.profile)
+                cache_path=profiles.resolve_cache_path(self.profile)
             )
         return self._planning_cfg
 

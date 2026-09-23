@@ -215,10 +215,10 @@ def _config_for(profile_name: str | None):
     if not profile_name:
         return PlanningConfig(enabled=True)
 
-    from tandem.core import profiles, render
+    from tandem.core import profiles
 
     profile = profiles.load(profile_name)
-    # Through render, so this reads the same file a collection session would rather than one
+    # Through the profile, so this reads the same file a collection session would rather than one
     # relative to wherever the command was run.
-    cache = render.resolve_cache_path(profile)
+    cache = profiles.resolve_cache_path(profile)
     return dataclasses.replace(profile.hitl.to_planning_config(cache_path=cache), enabled=True)

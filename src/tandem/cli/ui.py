@@ -10,9 +10,9 @@ import typer
 
 from tandem.cli import theme
 from tandem.core import profiles
-from tandem.core import runtime as runtime_mod
 from tandem.core import settings as settings_mod
 from tandem.core.errors import TandemError
+from tandem.planners.tiptop import runtime as runtime_mod
 
 
 def ui(

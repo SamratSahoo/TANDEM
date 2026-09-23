@@ -176,7 +176,7 @@ def open_(
 ) -> None:
     """Runs tiptop's viz-tiptop-run inside the built runtime — it needs cuRobo and cuTAMP to
     load the robot model and the saved TAMP environment."""
-    from tandem.core import runtime as runtime_mod
+    from tandem.planners.tiptop import runtime as runtime_mod
 
     profile = profiles.load(profile_name)
     traj = trajectories.find(profile, traj_id)

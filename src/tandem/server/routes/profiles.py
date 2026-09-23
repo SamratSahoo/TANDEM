@@ -8,9 +8,10 @@ from fastapi import APIRouter, Body
 from pydantic import BaseModel
 
 from tandem.core import profiles as profiles_mod
-from tandem.core import render, trajectories
 from tandem.core import settings as settings_mod
+from tandem.core import trajectories
 from tandem.core.errors import ProfileError, TandemError
+from tandem.planners.tiptop import render
 
 router = APIRouter(tags=["profiles"])
 

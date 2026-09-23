@@ -147,7 +147,7 @@ ALL_KEYS: frozenset[str] = frozenset(
 # Knobs that retune PERCEPTION rather than the solver, and where in tiptop.yml each one lives. This
 # is tiptop's own _PERCEPTION_OVERRIDE_KEYS table: the grasp candidates perception hands cuTAMP bound
 # what any downstream cost can choose between, so a data-gen config sets them next to the solver
-# knobs. tandem writes them into the rendered tiptop.yml (core/render.py) as well as passing them on
+# knobs. tandem writes them into the rendered tiptop.yml (render.py) as well as passing them on
 # with the rest, so the tiptop.yml copied into every leg states the values that were in force --
 # upstream's copy shows the file on disk, not the override. Where the profile's `perception:` block
 # has the same setting, the `tamp:` value wins, as it does in tiptop.

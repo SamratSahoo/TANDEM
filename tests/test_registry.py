@@ -22,7 +22,6 @@ from fake_backend import FakeBackend
 from helpers import FakeFactory, FakeRuntime, isolate_registry, wait_for
 
 from tandem.core import paths, profiles, secrets
-from tandem.core import runtime as runtime_mod
 from tandem.core import settings as settings_mod
 from tandem.core.errors import RuntimeNotReady, TandemError
 from tandem.core.session import Session, State
@@ -35,6 +34,7 @@ from tandem.planners.base import (
     SourcePin,
 )
 from tandem.planners.tiptop import FACTORY as TIPTOP
+from tandem.planners.tiptop import runtime as runtime_mod
 from tandem.planners.tiptop.backend import TiptopBackend
 from tandem.planners.tiptop.capabilities import CAPABILITIES
 from tandem.planners.tiptop.factory import SOURCES

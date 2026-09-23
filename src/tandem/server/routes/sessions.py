@@ -16,9 +16,9 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from tandem.core import profiles as profiles_mod
-from tandem.core import runtime as runtime_mod
 from tandem.core import session as session_mod
 from tandem.core import settings as settings_mod
+from tandem.planners.tiptop import runtime as runtime_mod
 
 router = APIRouter(tags=["sessions"])
 

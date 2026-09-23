@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -29,8 +30,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from ruamel.yaml import YAML
 
 from tandem.core import settings as settings_mod
-from tandem.core import tamp_keys
 from tandem.core.errors import ProfileError
+from tandem.planners.tiptop import tamp_keys
 
 # Same rule the source used for DC_WORKSPACE: a safe single path segment (no traversal) that
 # is also a valid HuggingFace repo-name fragment.
@@ -496,7 +497,7 @@ class Profile(BaseModel):
     robot: RobotSpec = Field(default_factory=RobotSpec)
     cameras: CamerasSpec = Field(default_factory=CamerasSpec)
     perception: PerceptionSpec = Field(default_factory=PerceptionSpec)
-    # Flat, using tiptop's own key names -- see tandem/core/tamp_keys.py for why.
+    # Flat, using tiptop's own key names -- see tandem/planners/tiptop/tamp_keys.py for why.
     tamp: dict[str, Any] = Field(default_factory=dict)
     # Deliberately NOT part of `tamp`: that dict is a solver-cost funnel read by a hand-written
     # if-ladder, and this changes what a dataset CONTAINS rather than how the arm moves.
@@ -769,6 +770,32 @@ def delete(name: str, *, keep_data: bool = True) -> Path:
     else:
         shutil.rmtree(pdir)
     return pdir
+
+
+def resolve_path(profile: Profile, value: str) -> Path:
+    """A path a profile names, as the profile's author meant it: absolute as written, else beside the profile.
+
+    One reading for every path a profile holds, so a relative path means "next to profile.yml" and not
+    "wherever the command happened to be started from".
+    """
+    candidate = Path(os.path.expanduser(str(value)))
+    if candidate.is_absolute():
+        return candidate
+    return (profile.dir() / candidate).resolve()
+
+
+def resolve_cache_path(profile: Profile) -> str | None:
+    """The proposal cache's absolute path, or None when the profile sets none.
+
+    A relative cache path means "beside the profile" (``resolve_path``). One reading, because three
+    different commands read this key: a collection session, `tandem plan --profile`, and `tandem
+    doctor`. Resolving it differently in any of them means they open DIFFERENT SQLite files, so the
+    cache never hits across them -- and since opening one creates its parent directories, the odd one
+    out silently litters a second cache wherever it was run from.
+    """
+    if not profile.hitl.cache_path:
+        return None
+    return str(resolve_path(profile, str(profile.hitl.cache_path)))
 
 
 def calibration(profile: Profile) -> dict:

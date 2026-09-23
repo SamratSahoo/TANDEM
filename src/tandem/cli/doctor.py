@@ -8,9 +8,11 @@ from pathlib import Path
 import typer
 
 from tandem.cli import theme
-from tandem.core import probe, profiles, render
+from tandem.core import probe, profiles
 from tandem.core import settings as settings_mod
 from tandem.core.errors import ProfileError, TandemError
+from tandem.planners.tiptop import probe as tiptop_probe
+from tandem.planners.tiptop import render
 
 GROUP_TITLES = {
     "core": "environment",
@@ -109,10 +111,10 @@ def collect_checks(*, profile_name: str | None = None, probe_hardware: bool = Tr
         checks.append(executor_check)
 
     if probe_hardware:
-        checks.append(probe.check_zed_sdk())
-        checks.append(probe.check_robot(profile.robot.host, profile.robot.port))
-        checks.append(probe.check_robot_state_port(profile.robot.host, profile.robot.state_port))
-        checks.append(probe.check_m2t2(profile.perception.m2t2.url))
+        checks.append(tiptop_probe.check_zed_sdk())
+        checks.append(tiptop_probe.check_robot(profile.robot.host, profile.robot.port))
+        checks.append(tiptop_probe.check_robot_state_port(profile.robot.host, profile.robot.state_port))
+        checks.append(tiptop_probe.check_m2t2(profile.perception.m2t2.url))
 
     return checks
 
@@ -251,9 +253,9 @@ def _phase_planning_check(profile) -> probe.Check:
             group="profile",
         )
 
-    # Through render, so this names the file a session would actually use rather than one relative
+    # Through the profile, so this names the file a session would actually use rather than one relative
     # to wherever doctor was run from.
-    cache = render.resolve_cache_path(profile)
+    cache = profiles.resolve_cache_path(profile)
     if cache:
         parent = Path(cache).parent
         if not parent.is_dir():

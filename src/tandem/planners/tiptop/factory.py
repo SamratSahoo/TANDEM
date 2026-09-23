@@ -23,9 +23,9 @@ from tandem.planners.base import (
     PlannerInfo,
     SourcePin,
 )
-from tandem.planners.runtime import RecipeRuntime
 from tandem.planners.tiptop.capabilities import CAPABILITIES
 from tandem.planners.tiptop.recipe import RECIPE
+from tandem.planners.tiptop.runtime import TiptopRuntime
 
 # What an install builds the runtime from: the commits the recipe fetches. Read from the recipe rather
 # than restated, because a catalog that names a commit the install does not deliver is a false
@@ -69,8 +69,7 @@ class TiptopFactory:
         What ``Session._build_backend`` and part of ``Session.start`` used to do inline, moved here
         unchanged so the session no longer knows any of it is TiPToP's.
         """
-        from tandem.core import render
-        from tandem.core.runtime import Runtime
+        from tandem.planners.tiptop import render
         from tandem.planners.tiptop.backend import TiptopBackend
 
         if ctx.options:
@@ -87,7 +86,7 @@ class TiptopFactory:
         # The runtime the caller already resolved wins, so a session and its planner can never be
         # looking at two different runtimes.
         root = ctx.runtime_dir if ctx.runtime_dir is not None else _settings(ctx.settings).resolved_runtime_dir()
-        runtime = Runtime(Path(root))
+        runtime = TiptopRuntime(Path(root))
         profile = ctx.profile
 
         # Problems that would otherwise surface minutes into a warmed session: a checkpoint the VAE
@@ -123,18 +122,6 @@ class TiptopFactory:
             cost_overrides_file=files.get("overrides_file"),
             on_log=ctx.on_log,
         )
-
-
-class TiptopRuntime(RecipeRuntime):
-    """TiPToP's runtime: the generic recipe runtime, bound to TiPToP's recipe.
-
-    Its root is the ``runtime_dir`` setting rather than a directory of its own under the runtimes
-    root, because TiPToP's runtime lived there before tandem drove more than one planner, and a built
-    pixi environment cannot be moved: its own absolute path is baked into it.
-    """
-
-    def __init__(self, root: Path) -> None:
-        super().__init__(RECIPE, root)
 
 
 def _settings(settings: Any):

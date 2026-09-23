@@ -16,9 +16,11 @@ import typer
 from tandem import resources
 from tandem.cli import runtime as runtime_cli
 from tandem.cli import theme
-from tandem.core import importers, paths, probe, profiles, secrets
+from tandem.core import paths, probe, profiles, secrets
 from tandem.core import settings as settings_mod
 from tandem.core.errors import TandemError
+from tandem.planners.tiptop import importers
+from tandem.planners.tiptop import probe as tiptop_probe
 
 
 def init(
@@ -263,7 +265,7 @@ def _preflight(*, viz_only: bool) -> list[probe.Check]:
         probe.check_disk(cfg.resolved_runtime_dir()),
         probe.check_pixi(),
         probe.check_ffmpeg(),
-        probe.check_zed_sdk(),
+        tiptop_probe.check_zed_sdk(),
     ]
     return checks
 

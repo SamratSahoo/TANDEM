@@ -20,7 +20,8 @@ import pytest
 from helpers import FakeGemini, FakeRuntime, use_fake_backend, wait_for
 from pydantic import ValidationError
 
-from tandem.core import render, secrets
+from tandem.core import profiles as profiles_mod
+from tandem.core import secrets
 from tandem.core.errors import SessionConflict
 from tandem.core.profiles import Profile
 from tandem.core.session import Session, State
@@ -106,11 +107,11 @@ def test_a_relative_cache_path_reads_the_same_from_every_command(profile):
     profile.hitl.enabled = True
     profile.hitl.cache_path = "caches/proposals.sqlite"
 
-    resolved = render.resolve_cache_path(profile)
+    resolved = profiles_mod.resolve_cache_path(profile)
     assert Path(resolved).is_absolute()
     assert Path(resolved).parent.parent == profile.dir()
     assert profile.hitl.to_planning_config(cache_path=resolved).cache_path == resolved
-    assert render.resolve_cache_path(Profile(name="none")) is None
+    assert profiles_mod.resolve_cache_path(Profile(name="none")) is None
 
 
 # --- walking a phase plan -------------------------------------------------------------------------

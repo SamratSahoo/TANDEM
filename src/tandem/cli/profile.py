@@ -13,9 +13,10 @@ from rich.syntax import Syntax
 
 from tandem import resources
 from tandem.cli import theme
-from tandem.core import importers, profiles, render
+from tandem.core import profiles
 from tandem.core import settings as settings_mod
 from tandem.core.errors import ProfileError
+from tandem.planners.tiptop import importers, render
 
 app = typer.Typer(no_args_is_help=True, help="Create and manage collection profiles.")
 

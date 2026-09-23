@@ -18,9 +18,10 @@ from typing import Any
 
 from ruamel.yaml import YAML
 
-from tandem.core import paths, profiles, secrets, tamp_keys
+from tandem.core import paths, profiles, secrets
 from tandem.core.errors import ProfileError
 from tandem.core.profiles import Profile
+from tandem.planners.tiptop import tamp_keys
 
 _yaml = YAML()
 _yaml.default_flow_style = False
@@ -143,21 +144,6 @@ def write_tamp_overrides(profile: Profile, dest: Path, *, runtime_dir: Path | No
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(json.dumps(overrides, indent=2, sort_keys=True) + "\n")
     return dest
-
-
-def resolve_cache_path(profile: Profile) -> str | None:
-    """The proposal cache's absolute path, or None when the profile sets none.
-
-    A relative cache path means "beside the profile", the same rule the checkpoint paths follow —
-    not "wherever the command happened to be started from". One reading, because three different
-    commands read this key: a collection session, `tandem plan --profile`, and `tandem doctor`.
-    Resolving it differently in any of them means they open DIFFERENT SQLite files, so the cache
-    never hits across them — and since opening one creates its parent directories, the odd one out
-    silently litters a second cache wherever it was run from.
-    """
-    if not profile.hitl.cache_path:
-        return None
-    return str(_resolve_asset(profile, str(profile.hitl.cache_path), "cache_path", None))
 
 
 def check_assets(profile: Profile, *, runtime_dir: Path | None = None) -> list[str]:

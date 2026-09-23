@@ -2,10 +2,10 @@
 
 A bump of the planner changes three things on tandem's side, and each can go wrong without an error:
 
-- the ``tamp:`` keys a profile may set (core/tamp_keys.py). A key tiptop reads that tandem rejects
+- the ``tamp:`` keys a profile may set (planners/tiptop/tamp_keys.py). A key tiptop reads that tandem rejects
   makes a real config fail to import; a key tandem accepts that tiptop no longer reads -- or reads
   only in its own interactive loop, which tandem does not run -- is a setting that does nothing.
-- where the perception knobs land in the tiptop.yml tandem renders (core/render.py).
+- where the perception knobs land in the tiptop.yml tandem renders (planners/tiptop/render.py).
 - the TAMP config the sidecar builds at warm-up (planners/tiptop/sidecar.py). A knob tiptop's own
   entrypoint threads into ``build_tamp_config`` and the sidecar does not is validated, passed on,
   and then quietly ignored by every plan.
@@ -26,8 +26,8 @@ import pytest
 from planner_sources import planner_sources
 from ruamel.yaml import YAML
 
-from tandem.core import render, tamp_keys
 from tandem.core.profiles import validate_tamp
+from tandem.planners.tiptop import render, tamp_keys
 from tandem.planners.tiptop.backend import sidecar_path
 
 FIXTURES = Path(__file__).parent / "fixtures" / "cfg_tamp"

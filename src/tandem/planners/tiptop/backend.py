@@ -22,12 +22,12 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from tandem.core.runtime import Runtime
 from tandem.planners.base import BackendContext
 from tandem.planners.sidecar import SidecarPlanner
 from tandem.planners.tiptop.capabilities import CAPABILITIES
 from tandem.planners.tiptop.factory import INFO
 from tandem.planners.tiptop.recipe import RECIPE
+from tandem.planners.tiptop.runtime import TiptopRuntime
 
 _log = logging.getLogger(__name__)
 
@@ -81,7 +81,7 @@ class TiptopBackend(SidecarPlanner):
 
     def __init__(
         self,
-        runtime: Runtime,
+        runtime: TiptopRuntime,
         *,
         env: dict[str, str],
         output_dir: Path,
