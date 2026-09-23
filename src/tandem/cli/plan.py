@@ -2,8 +2,9 @@
 
 The cheapest way to find out whether an instruction decomposes the way you meant, and the one to
 reach for when a session produces a plan that looks wrong. It prints the ordered phases, who does
-each, the sub-goal handed to the planner, the invented predicates and their classifiers, and
-anything the proposer could not express.
+each, the sub-goal handed to the planner, each human phase's operator (what it needs, makes true
+and undoes), whether those contracts hang together across the plan, the invented predicates and
+their classifiers, and anything the proposer could not express.
 
 This command is only possible because the phase planner is tandem's own now. It used to live inside
 the planner's process, so answering "is this decomposition right?" meant a warm cuRobo, an open
@@ -103,9 +104,14 @@ def plan(
             theme.console().print(f"        [faint]{theme.DOT}[/faint] {describe(atom, descriptions)}")
         if phase.is_human:
             theme.console().print(f"        [faint]{phase.instructions}[/faint]")
+            if phase.operator is not None:
+                _print_operator(phase.operator)
         else:
             rendered = [a.to_dict() for a in _goal_of(phase, caps)]
             theme.console().print(f"        [faint]goal: {json.dumps(rendered)}[/faint]")
+
+    theme.blank()
+    _print_contract_check(spec, cfg, caps)
 
     if spec.invented:
         theme.blank()
@@ -125,6 +131,51 @@ def plan(
     elif not spec.needs_human:
         theme.blank()
         theme.info("no human phases", "the planner can do this whole task on its own")
+
+
+def _print_operator(operator) -> None:
+    """A human phase's magic operator: the lifted signature, then its whole contract.
+
+    All three lists are printed, empty ones included. "Deletes nothing" is a statement the model made
+    about the step, and the one most often got wrong -- a missing line would hide exactly that.
+    """
+    from rich.markup import escape
+
+    def atoms(found) -> str:
+        return escape(", ".join(sorted(str(a) for a in found))) or "none"
+
+    console = theme.console()
+    console.print(
+        f"        [violet]operator[/violet] {escape(operator.signature)}  "
+        f"[faint]as {escape(operator.display)}[/faint]"
+    )
+    console.print(f"          [faint]preconditions [/faint] {atoms(operator.preconditions)}")
+    console.print(f"          [faint]add effects   [/faint] {atoms(operator.add_effects)}")
+    console.print(f"          [faint]delete effects[/faint] {atoms(operator.delete_effects)}")
+
+
+def _print_contract_check(spec, cfg, caps) -> None:
+    """Whether the phases hang together as a plan, as the proposal stage judged it.
+
+    An accepted plan has already passed ``check_plan_effects`` inside the repair loop when the
+    profile has it on, so this re-runs it -- it is set arithmetic, no model call -- to say so rather
+    than leave the reader to infer it. With it off, the same check is still reported, because
+    "would this have been refused?" is the question this command exists to answer before the arm
+    moves. A repeated robot move is only ever a warning (see ``contracts.wasted_robot_move``).
+    """
+    from tandem.planning import contracts
+
+    broken = contracts.check_plan_effects(spec, caps=caps)
+    if broken is None:
+        detail = "checked in the repair loop" if cfg.check_plan_effects else "check_plan_effects is off"
+        theme.ok("the phases' contracts hang together", detail)
+    elif cfg.check_plan_effects:  # pragma: no cover - the repair loop refuses such a plan
+        theme.fail("the phases' contracts do not hang together", broken)
+    else:
+        theme.warn("the phases' contracts do not hang together (check_plan_effects is off)", broken)
+    wasted = contracts.wasted_robot_move(spec.phases, caps=caps)
+    if wasted:
+        theme.warn("this plan repeats work", wasted)
 
 
 def _status(as_json: bool, printer, *args) -> None:

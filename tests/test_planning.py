@@ -51,6 +51,13 @@ PLAN_RESPONSE = {
             "description": "open the box",
             "instructions": "Open the white_box and fold its flaps back.",
             "atoms": [{"predicate": "IsOpen", "args": ["white_box"]}],
+            "operator": {
+                "name": "Open",
+                "args": ["white_box"],
+                "preconditions": [{"predicate": "HandEmpty", "args": []}],
+                "add_effects": [{"predicate": "IsOpen", "args": ["white_box"]}],
+                "delete_effects": [],
+            },
         },
         {
             "executor": "robot",
@@ -441,6 +448,15 @@ SORT_RESPONSE = {
             "description": "cover both bowls with the cloth",
             "instructions": "Drape the blue_cloth over both bowls.",
             "atoms": [{"predicate": "AreCoveredBy", "args": ["blue_bowl", "green_bowl", "blue_cloth"]}],
+            "operator": {
+                "name": "Drape",
+                "args": ["blue_cloth", "blue_bowl", "green_bowl"],
+                "preconditions": [{"predicate": "HandEmpty", "args": []}],
+                "add_effects": [
+                    {"predicate": "AreCoveredBy", "args": ["blue_bowl", "green_bowl", "blue_cloth"]}
+                ],
+                "delete_effects": [],
+            },
         },
     ],
 }
@@ -614,6 +630,17 @@ def test_only_camera_settleable_atoms_are_put_to_the_model():
                     {"predicate": "On", "args": ["blue_toy", "table"]},
                     {"predicate": "HandEmpty", "args": []},
                 ],
+                "operator": {
+                    "name": "Open",
+                    "args": ["white_box"],
+                    "preconditions": [{"predicate": "HandEmpty", "args": []}],
+                    "add_effects": [
+                        {"predicate": "IsOpen", "args": ["white_box"]},
+                        {"predicate": "On", "args": ["blue_toy", "table"]},
+                        {"predicate": "HandEmpty", "args": []},
+                    ],
+                    "delete_effects": [],
+                },
             }
         ]
     )
