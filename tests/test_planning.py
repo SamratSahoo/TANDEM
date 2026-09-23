@@ -621,9 +621,9 @@ def test_only_camera_settleable_atoms_are_put_to_the_model():
     phase = spec.phases[0]
     asked = []
 
-    async def fake_classify_all(image, atoms, descriptions, cfg):
+    async def fake_classify_all(image, atoms, descriptions, cfg, *, expected=True, role="effect"):
         asked.extend(atoms)
-        return [Verdict(a, describe(a, descriptions), True, "") for a in atoms]
+        return [Verdict(a, describe(a, descriptions), True, "", expected=expected, role=role) for a in atoms]
 
     with mock.patch.object(grounding, "classify_all", fake_classify_all):
         ok, _ = asyncio.run(grounding.verify_phase(None, phase, spec.invented, CFG, CAPS))
