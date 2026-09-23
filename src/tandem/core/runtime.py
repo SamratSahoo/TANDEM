@@ -2,9 +2,10 @@
 
 This path is kept, and only re-exports, because it was the one way a script built a session before
 tandem drove more than one planner (``Session(profile, Runtime(...))``) or found the GPU runtime
-(``runtime.default()``). A session now builds its planner's runtime itself, through the registry,
-and a script that wants one asks ``tandem.planners.registry.runtime(name, settings)``, which is
-right whichever planner a profile names. Nothing in tandem imports this module.
+(``runtime.default()``). A session now builds its planner's runtime itself, through the registry
+(it still accepts a runtime, deprecated, and hands its root to the planner), and a script that wants
+one asks ``tandem.planners.registry.runtime(name, settings)``, which is right whichever planner a
+profile names. Nothing in tandem imports this module.
 """
 
 from __future__ import annotations

@@ -19,7 +19,7 @@ from tandem.core import session as session_mod
 from tandem.core import settings as settings_mod
 from tandem.core.errors import SessionConflict, TandemError
 from tandem.core.session import State
-from tandem.planners.tiptop import runtime as runtime_mod
+from tandem.planners import registry
 
 # The stages a rollout moves through, as the operator experiences them.
 PIPELINE = [
@@ -62,9 +62,9 @@ def collect(
         serve(profile_name=profile.name)
         return
 
-    runtime = runtime_mod.Runtime(cfg.resolved_runtime_dir())
+    backend = profile.planner.backend
     # Fail before printing a session header for a session that cannot start.
-    runtime.require_ready()
+    registry.require_runtime(backend, cfg)
 
     theme.blank()
     theme.heading(f"collect · {profile.name}", profile.description)
@@ -92,10 +92,9 @@ def collect(
     theme.blank()
 
     manager = session_mod.manager()
-    theme.busy("Warming up", "cuRobo, SAM2, cameras and the robot — this takes a minute")
+    theme.busy("Warming up", "the planner, the cameras and the robot — this takes a minute")
     session = manager.create(
         profile,
-        runtime,
         task=task,
         execute=not no_execute,
         record=not no_record,

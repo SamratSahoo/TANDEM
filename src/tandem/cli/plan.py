@@ -39,7 +39,11 @@ def plan(
         "reproduce a session's decomposition from the labels its perception actually produced.",
     ),
     backend: str = typer.Option(
-        "tiptop", "--backend", "-b", help=f"Whose goal language to plan in. One of: {', '.join(registry.available())}."
+        None,
+        "--backend",
+        "-b",
+        help="Whose goal language to plan in: by default --profile's planner, else the machine's default "
+        f"planner. One of: {', '.join(registry.available())}.",
     ),
     profile_name: str = typer.Option(
         None, "--profile", "-p", help="Take the planning settings from this profile."
@@ -61,6 +65,7 @@ def plan(
     except ImportError as exc:  # pragma: no cover - Pillow is a base dependency
         raise TandemError("Pillow is needed to read the workspace photo.", hint="pip install pillow") from exc
 
+    backend = backend or _planner_for(profile_name)
     caps = registry.capabilities(backend)
     cfg = _config_for(profile_name)
     picture = to_pil(Image.open(image).convert("RGB"))
@@ -200,6 +205,16 @@ def _goal_of(phase, caps):
     from tandem.planners.base import to_goal_atoms
 
     return to_goal_atoms(sorted(phase.atoms, key=str), caps)
+
+
+def _planner_for(profile_name: str | None) -> str:
+    """The planner a plan is proposed for when --backend does not say: the profile's, or the machine's default."""
+    from tandem.core import profiles
+    from tandem.core import settings as settings_mod
+
+    if profile_name:
+        return profiles.load(profile_name).planner.backend
+    return settings_mod.load().default_planner
 
 
 def _config_for(profile_name: str | None):

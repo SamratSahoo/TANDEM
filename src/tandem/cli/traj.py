@@ -213,6 +213,7 @@ def merge(
     """Normally automatic — a session merges as soon as you label the trajectory. Use this to
     retry after a failure; the merge never partially writes, so the legs are always intact."""
     from tandem.core import merge as merge_mod
+    from tandem.planners import registry
 
     profile = profiles.load(profile_name)
     cfg = settings_mod.load()
@@ -225,7 +226,7 @@ def merge(
     for target in targets:
         try:
             result = merge_mod.merge(
-                profile, target, status=status, runtime_dir=cfg.resolved_runtime_dir()
+                profile, target, status=status, tools_dir=registry.tools_dir(profile.planner.backend, cfg)
             )
         except merge_mod.MergeError as exc:
             raise TandemError(

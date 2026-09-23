@@ -17,7 +17,7 @@ import json
 from pathlib import Path
 
 import pytest
-from helpers import FakeGemini, FakeRuntime, use_fake_backend, wait_for
+from helpers import FakeGemini, use_fake_backend, wait_for
 from pydantic import ValidationError
 
 from tandem.core import profiles as profiles_mod
@@ -136,7 +136,7 @@ def phase_session(profile, tmp_path, monkeypatch):
         monkeypatch.setattr(llm, "gemini_client", lambda: client)
         backends = use_fake_backend(monkeypatch, **(backend_kwargs or {}))
 
-        session = Session(profile, FakeRuntime(tmp_path / "runtime"), task="put the toy in the box")
+        session = Session(profile, task="put the toy in the box")
         session.start()
         assert wait_for(lambda: session.state is State.AWAITING_TASK), f"stuck in {session.state}"
         made.append(session)
@@ -321,7 +321,7 @@ def test_the_audit_record_lands_beside_the_finished_episode(phase_session, monke
 
     from tandem.core import merge as merge_mod
 
-    def fake_merge(profile, trajectory_id, *, status=None, runtime_dir=None):
+    def fake_merge(profile, trajectory_id, *, status=None, tools_dir=None):
         directory = Path(profile.status_dir(status or "success")) / trajectory_id
         directory.mkdir(parents=True, exist_ok=True)
         merged["dir"] = directory
@@ -349,7 +349,7 @@ def test_a_disabled_profile_never_reaches_a_human_phase(profile, tmp_path, monke
     use_fake_backend(monkeypatch)
     assert profile.hitl.enabled is False
 
-    session = Session(profile, FakeRuntime(tmp_path / "runtime"), task="pick up the block")
+    session = Session(profile, task="pick up the block")
     session.start()
     try:
         assert wait_for(lambda: session.state is State.AWAITING_TASK)

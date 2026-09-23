@@ -12,7 +12,6 @@ from tandem.cli import theme
 from tandem.core import profiles
 from tandem.core import settings as settings_mod
 from tandem.core.errors import TandemError
-from tandem.planners.tiptop import runtime as runtime_mod
 
 
 def ui(
@@ -59,7 +58,7 @@ def serve(
         [
             ("profile", active),
             ("data root", cfg.resolved_data_root()),
-            ("runtime", _runtime_note(cfg)),
+            ("runtime", _runtime_note(cfg, active)),
         ]
     )
     theme.blank()
@@ -76,11 +75,20 @@ def serve(
     uvicorn.run(app, host=host, port=port, log_level="warning", access_log=False)
 
 
-def _runtime_note(cfg) -> str:
-    status = runtime_mod.Runtime(cfg.resolved_runtime_dir()).status()
-    if status.ready:
-        return "ready — collection available"
-    return "not built — visualization only"
+def _runtime_note(cfg, profile_name: str) -> str:
+    """Whether the runtime of the planner this profile uses is there: the difference between a
+    workstation that can collect and a laptop that can only look."""
+    from tandem.cli.runtime import planner_runtime
+
+    try:
+        planner, runtime = planner_runtime(profile_name=profile_name, settings=cfg)
+    except TandemError as exc:
+        return f"unknown — {exc.message.splitlines()[0]}"
+    if runtime is None:
+        return f"{planner} is pure Python — collection available"
+    if runtime.status().installed:
+        return f"{planner} ready — collection available"
+    return f"{planner} not built — visualization only"
 
 
 def _free_port(host: str, port: int, tries: int = 20) -> int:

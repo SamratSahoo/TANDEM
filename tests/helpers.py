@@ -14,28 +14,6 @@ another's fixtures and module-level state as a side effect.
 from __future__ import annotations
 
 import time
-from pathlib import Path
-
-
-class FakeRuntime:
-    """A runtime that is ready and refuses to launch anything.
-
-    The session drives a planner BACKEND now, not a subprocess, so a runtime in a test exists only
-    to satisfy the readiness preflight. `command` raises rather than returning something plausible:
-    reaching it means something is still trying to spawn a planner, which is exactly the thing this
-    design removed.
-    """
-
-    def __init__(self, root: Path) -> None:
-        self.root = root
-        self.tiptop_dir = root
-        root.mkdir(parents=True, exist_ok=True)
-
-    def require_ready(self) -> None:
-        return None
-
-    def command(self, args: list[str]) -> list[str]:
-        raise AssertionError(f"nothing should be spawning a planner in a test: {args}")
 
 
 class FakeFactory:

@@ -17,8 +17,6 @@ from pydantic import BaseModel
 
 from tandem.core import profiles as profiles_mod
 from tandem.core import session as session_mod
-from tandem.core import settings as settings_mod
-from tandem.planners.tiptop import runtime as runtime_mod
 
 router = APIRouter(tags=["sessions"])
 
@@ -43,11 +41,9 @@ class ContinueBody(BaseModel):
 @router.post("/sessions")
 async def create_session(body: CreateBody) -> dict:
     profile = profiles_mod.load(body.profile)
-    cfg = settings_mod.load()
-    runtime = runtime_mod.Runtime(cfg.resolved_runtime_dir())
+    # The session builds whichever planner the profile names, runtime and all, through the registry.
     session = session_mod.manager().create(
         profile,
-        runtime,
         task=body.task,
         execute=body.execute,
         record=body.record,

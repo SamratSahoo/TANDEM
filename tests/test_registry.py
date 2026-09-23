@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 from fake_backend import FakeBackend
-from helpers import FakeFactory, FakeRuntime, isolate_registry, wait_for
+from helpers import FakeFactory, isolate_registry, wait_for
 
 from tandem.core import paths, profiles, secrets
 from tandem.core import settings as settings_mod
@@ -109,22 +109,18 @@ def test_options_survive_a_profile_round_trip(profile):
     assert profiles.PlannerSpec().options == {}
 
 
-class _UnbuiltRuntime(FakeRuntime):
-    """TiPToP's runtime, never built. A session driving a different planner must not care."""
-
-    def require_ready(self) -> None:
-        raise RuntimeNotReady("the GPU runtime has not been built")
-
-
 def test_the_session_builds_a_registered_planner_from_one_context(profile, tmp_path, monkeypatch):
-    """The whole point of the factory seam: the session has no idea which planner it is driving."""
+    """The whole point of the factory seam: the session has no idea which planner it is driving.
+
+    Nor which runtime: it holds none. TiPToP's is never built on this machine, and a session driving a
+    different planner does not look at it.
+    """
     monkeypatch.setattr(secrets, "gemini_api_key", lambda: "test-key")
     factory = FakeFactory("toy")
     registry.register_backend("toy", factory)
     profile.planner = profiles.PlannerSpec(backend="toy", options={"bins": ["red"]})
-    runtime = _UnbuiltRuntime(tmp_path / "runtime")
 
-    session = Session(profile, runtime, task="put the red block in the red bin")
+    session = Session(profile, task="put the red block in the red bin")
     session.start()
     try:
         assert wait_for(lambda: session.state is State.AWAITING_TASK), f"stuck in {session.state}"
@@ -135,7 +131,7 @@ def test_the_session_builds_a_registered_planner_from_one_context(profile, tmp_p
         assert ctx.session_id == session.id
         assert ctx.task == "put the red block in the red bin"
         assert ctx.execute is True and ctx.record == session.record
-        assert ctx.runtime_dir == runtime.root
+        assert ctx.runtime_dir is None, "the factory finds its own runtime, as every command does"
         assert ctx.settings is not None
         assert ctx.session_dir.is_dir()
         assert ctx.events_file == ctx.session_dir / "events.jsonl" and ctx.events_file.is_file()
@@ -171,7 +167,7 @@ def test_a_planner_that_is_not_ready_is_closed_and_the_session_never_starts(prof
     registry.register_backend("toy", factory)
     profile.planner = profiles.PlannerSpec(backend="toy")
 
-    session = Session(profile, FakeRuntime(tmp_path / "runtime"), task="x")
+    session = Session(profile, task="x")
     with pytest.raises(RuntimeNotReady, match="toy planner's runtime is missing"):
         session.start()
     assert session.state is State.SPAWNING

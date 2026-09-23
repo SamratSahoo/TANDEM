@@ -86,10 +86,14 @@ class MergeError(RuntimeError):
 # --------------------------------------------------------------------------- ffmpeg
 
 
-def _tool(name: str, runtime_dir: Path | None) -> str:
-    """Prefer the runtime's ffmpeg — it is the build that recorded these clips."""
-    if runtime_dir is not None:
-        candidate = runtime_dir / "tiptop" / ".pixi" / "envs" / "default" / "bin" / name
+def _tool(name: str, tools_dir: Path | None) -> str:
+    """Prefer the planner runtime's ffmpeg, in ``tools_dir`` -- it is the build that recorded these clips.
+
+    ``tools_dir`` is that runtime's environment's bin directory (``registry.tools_dir``), or None for a
+    planner with no environment of its own, and then PATH's ffmpeg is the only one there is.
+    """
+    if tools_dir is not None:
+        candidate = Path(tools_dir) / name
         if candidate.is_file():
             return str(candidate)
     found = shutil.which(name)
@@ -98,11 +102,11 @@ def _tool(name: str, runtime_dir: Path | None) -> str:
     return found
 
 
-def _probe(path: Path, runtime_dir: Path | None) -> dict:
+def _probe(path: Path, tools_dir: Path | None) -> dict:
     """Frame count and codec parameters for one mp4. The parameters gate the stream copy."""
     result = subprocess.run(
         [
-            _tool("ffprobe", runtime_dir), "-v", "error", "-select_streams", "v:0", "-count_packets",
+            _tool("ffprobe", tools_dir), "-v", "error", "-select_streams", "v:0", "-count_packets",
             "-show_entries", "stream=nb_read_packets,codec_name,width,height,pix_fmt,r_frame_rate",
             "-of", "json", str(path),
         ],
@@ -118,11 +122,11 @@ def _probe(path: Path, runtime_dir: Path | None) -> dict:
     }
 
 
-def _trim(src: Path, dest: Path, n_frames: int, runtime_dir: Path | None) -> None:
+def _trim(src: Path, dest: Path, n_frames: int, tools_dir: Path | None) -> None:
     """Stream-copy the first ``n_frames`` of ``src``. Cutting only the tail drops trailing
     packets, so this decodes cleanly even with B-frames left on."""
     subprocess.run(
-        [_tool("ffmpeg", runtime_dir), "-y", "-loglevel", "error", "-i", str(src),
+        [_tool("ffmpeg", tools_dir), "-y", "-loglevel", "error", "-i", str(src),
          "-frames:v", str(n_frames), "-c", "copy", str(dest)],
         check=True, capture_output=True, text=True,
     )
@@ -257,7 +261,7 @@ _DERIVE_MISSING = {"action_joint_velocity": _derive_action_joint_velocity}
 # --------------------------------------------------------------------------- concatenation
 
 
-def _leg_video_frames(leg: dict, cameras: list[str], runtime_dir: Path | None) -> tuple[int, dict]:
+def _leg_video_frames(leg: dict, cameras: list[str], tools_dir: Path | None) -> tuple[int, dict]:
     """The common length of this leg's clips, and the per-camera counts behind it.
 
     Two ZEDs stop a frame or so apart, so a leg's cameras routinely differ in length.
@@ -266,26 +270,26 @@ def _leg_video_frames(leg: dict, cameras: list[str], runtime_dir: Path | None) -
     length is the minimum; what gets cut is trailing camera padding recorded after execution
     ended, which has no state frame behind it.
     """
-    counts = {cam: _probe(leg["dir"] / cam, runtime_dir)["n_frames"] for cam in cameras}
+    counts = {cam: _probe(leg["dir"] / cam, tools_dir)["n_frames"] for cam in cameras}
     if min(counts.values()) <= 0:
         raise MergeError(f"{leg['dir'].name}: a camera clip has no frames ({counts})")
     return min(counts.values()), counts
 
 
 def _concat_videos(
-    legs: list[dict], camera: str, leg_frames: list[int], dest: Path, scratch: Path, runtime_dir: Path | None
+    legs: list[dict], camera: str, leg_frames: list[int], dest: Path, scratch: Path, tools_dir: Path | None
 ) -> int:
     inputs: list[Path] = []
     for i, (leg, want) in enumerate(zip(legs, leg_frames, strict=True)):
         src = leg["dir"] / camera
-        if _probe(src, runtime_dir)["n_frames"] == want:
+        if _probe(src, tools_dir)["n_frames"] == want:
             inputs.append(src)
         else:
             trimmed = scratch / f"{i:02d}_{camera}"
-            _trim(src, trimmed, want, runtime_dir)
+            _trim(src, trimmed, want, tools_dir)
             inputs.append(trimmed)
 
-    params = {_probe(path, runtime_dir)["params"] for path in inputs}
+    params = {_probe(path, tools_dir)["params"] for path in inputs}
     if len(params) > 1:
         # -c copy cannot join streams that disagree, and silently re-encoding here would be a
         # surprise: minutes of CPU and a quality loss nobody asked for.
@@ -298,11 +302,11 @@ def _concat_videos(
     quote = "'" + "\\'" + "'"
     listing.write_text("".join(f"file '{str(p).replace(chr(39), quote)}'\n" for p in inputs))
     subprocess.run(
-        [_tool("ffmpeg", runtime_dir), "-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
+        [_tool("ffmpeg", tools_dir), "-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
          "-i", str(listing), "-c", "copy", str(dest)],
         check=True, capture_output=True, text=True,
     )
-    return _probe(dest, runtime_dir)["n_frames"]
+    return _probe(dest, tools_dir)["n_frames"]
 
 
 def _concat_state(legs: list[dict], leg_frames: list[int], fps: int) -> dict:
@@ -404,7 +408,7 @@ def merge(
     trajectory_id: str,
     *,
     status: str | None = None,
-    runtime_dir: Path | None = None,
+    tools_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Join every leg of ``trajectory_id`` into the first TAMP leg's directory."""
     legs = find_legs(profile, trajectory_id)
@@ -452,7 +456,7 @@ def merge(
         raise MergeError(f"Trajectory {trajectory_id}: no camera is present in all {len(legs)} legs.")
 
     fps = int(primary["meta"].get("fps") or 15)
-    probed = [_leg_video_frames(leg, cameras, runtime_dir) for leg in legs]
+    probed = [_leg_video_frames(leg, cameras, tools_dir) for leg in legs]
     leg_frames = [n for n, _ in probed]
     trimmed = {
         leg["dir"].name: {cam: count - n for cam, count in counts.items() if count != n}
@@ -474,7 +478,7 @@ def merge(
 
     try:
         joined = {
-            cam: _concat_videos(legs, cam, leg_frames, work / cam, scratch, runtime_dir)
+            cam: _concat_videos(legs, cam, leg_frames, work / cam, scratch, tools_dir)
             for cam in cameras
         }
         expected = sum(leg_frames)
@@ -569,11 +573,11 @@ def merge(
         # down with it. Surface them at the top so the merged directory reads like the rollout it
         # grew from — `tandem traj replay` looks for the plan there. Logs stay with the leg that
         # produced them: the primary's is still being written when this runs, so a copy would be
-        # truncated.
-        replaced = {STATE_FILE, META_FILE, "tiptop_run.log", "postprocess.log", *CAMERA_FILES}
+        # truncated. Any `*.log`, whatever the planner that recorded the leg calls its own.
+        replaced = {STATE_FILE, META_FILE, *CAMERA_FILES}
         if primary_parked is not None:
             for item in sorted(primary_parked.iterdir()):
-                if item.name in replaced or (work / item.name).exists():
+                if item.name in replaced or item.suffix == ".log" or (work / item.name).exists():
                     continue
                 if item.is_dir():
                     shutil.copytree(item, work / item.name)

@@ -140,7 +140,7 @@ async function refreshShell() {
     runtimeChip.className = `chip ${runtime.ready ? "success" : ""}`;
     runtimeChip.title = runtime.ready
       ? `Runtime ready at ${runtime.root}`
-      : (runtime.problems || []).join("; ") || "The GPU runtime is not built";
+      : (runtime.problems || []).join("; ") || "The planner's runtime is not built";
     runtimeChip.appendChild(h("span.dot" + (runtime.ready ? ".live" : ".warn")));
     runtimeChip.appendChild(document.createTextNode(runtime.ready ? "runtime ready" : "visualize only"));
   } catch {
