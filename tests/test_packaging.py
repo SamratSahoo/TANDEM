@@ -28,8 +28,9 @@ LIGHT_MODULES = [
     "tandem.core.nonidle",
     "tandem.core.merge",
     "tandem.core.events",
-    # The rig: `tandem rig show` runs on a laptop.
+    # The rig and moving old profiles: `tandem rig show` and `tandem profile migrate` run on a laptop.
     "tandem.core.rig",
+    "tandem.core.layout",
     "tandem.cli.rig",
     "tandem.core.session",
     "tandem.core.probe",

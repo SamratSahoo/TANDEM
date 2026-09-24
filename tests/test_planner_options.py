@@ -3,8 +3,8 @@
 Until profile version 2 TiPToP's settings were top-level sections of every profile (robot:,
 perception:, tamp:) and core validated them against TiPToP's schema, so every profile -- whichever
 planner it named -- was a TiPToP profile. Since version 3 the task's half of them is the profile's and
-the machine's half is the rig's (tests/test_planner_rig_options.py, tests/test_tiptop_rig.py). These
-tests hold:
+the machine's half is the rig's (tests/test_planner_rig_options.py, tests/test_tiptop_rig.py); moving an
+older profile is tests/test_layout_migration.py. These tests hold:
 
 - TiPToP's settings in a profile are its task settings, and what they were before is refused or flagged;
 - a planner that is not TiPToP has its options checked by itself, never by TiPToP's schema;
@@ -55,13 +55,14 @@ def _write_profile(name: str, text: str) -> Path:
 # --- (a) the older layout ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("fixture", ["v1_ef1411f.yml", "v1_68076df.yml"])
+@pytest.mark.parametrize("fixture", ["v1_ef1411f.yml", "v1_68076df.yml", "v2_2797491.yml"])
 def test_a_profile_file_in_a_layout_before_version_3_is_refused_with_the_way_out(isolated_env, fixture):
-    """A real profile of an older layout, put where a profile file goes: refused -- its robot and cameras
-    would otherwise be read as a task's -- saying where they go now."""
+    """A real profile of each older layout, put where a profile file goes: refused -- its robot and cameras
+    would otherwise be read as a task's -- with the command that moves it (test_layout_migration.py)."""
     _write_profile("legacy", (FIXTURES / fixture).read_text())
     with pytest.raises(ProfileError) as excinfo:
         profiles.load("legacy")
+    assert "tandem profile migrate" in excinfo.value.message
     assert "rig.yml" in excinfo.value.message
 
 

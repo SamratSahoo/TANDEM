@@ -186,6 +186,56 @@ def test_profile_create_warns_about_extrinsics_only_for_a_planner_that_reads_the
     assert "no extrinsics" in tiptop.output
 
 
+# --- profile migrate ------------------------------------------------------------------------------------------
+
+
+def _write_old(name: str, text: str) -> Path:
+    """A profile in the layout before version 3: a directory, with its profile.yml."""
+    path = profiles.profiles_root() / name / "profile.yml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return path
+
+
+def test_migrate_with_nothing_to_move_says_so(profile):
+    result = _run("profile", "migrate")
+    assert result.exit_code == 0, result.output
+    assert "No profiles in the old layout" in result.output
+    # It moves every old profile or none: there is no one profile to name.
+    assert _run("profile", "migrate", "test").exit_code == 2
+
+
+def test_migrate_leaves_a_current_profile_byte_for_byte(profile, monkeypatch):
+    text = profile.file().read_text()
+    text = text.replace("target_episodes: 20", "target_episodes: 20   # the lab's weekly quota")
+    assert "the lab's weekly quota" in text
+    text += "# a note at the end\n"
+    path = profiles.path_of("ctrl")
+    path.write_text(text)
+    _write_old("legacy", (FIXTURES / "v1_ef1411f.yml").read_text())
+    before = path.read_bytes()
+    monkeypatch.setenv("X_PORT", "9999")
+    result = _run("profile", "migrate")
+    assert result.exit_code == 0, result.output
+    assert "legacy: moved" in " ".join(result.output.split())
+    assert path.read_bytes() == before
+
+
+def test_migrate_goes_on_past_a_broken_profile_and_keeps_the_originals(isolated_env):
+    legacy = (FIXTURES / "v1_ef1411f.yml").read_text()
+    _write_old("legacy_a", legacy), _write_old("legacy_z", legacy)
+    broken = _write_old("broken", "version: 2\ntask:\n  bogus_key: 1\n")
+    result = _run("profile", "migrate")
+    assert result.exit_code != 0
+    assert "broken" in result.output
+    for name in ("legacy_a", "legacy_z"):
+        written = profiles.path_of(name).read_text()
+        assert "robot:" not in written and "cameras:" not in written, "migrated"
+        archived = profiles.profiles_root() / ".migrated" / name / "profile.yml"
+        assert archived.read_text() == legacy, "the original is kept whole"
+    assert broken.read_text() == "version: 2\ntask:\n  bogus_key: 1\n", "left exactly as it was"
+
+
 # --- $EDITOR with arguments -------------------------------------------------------------------------------------
 
 

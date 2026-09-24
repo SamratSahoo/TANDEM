@@ -216,6 +216,7 @@ def test_the_layout_before_version_3_is_refused_with_the_way_out(isolated_env, t
         profiles.load("old")
     message = excinfo.value.message
     assert found in message
+    assert "tandem profile migrate" in message
     assert "rig.yml" in message
 
 
@@ -244,13 +245,19 @@ def test_list_names_is_the_valid_yml_files_only(profile, isolated_env):
     assert profiles.list_names() == ["second", "test"]
 
 
-def test_an_old_layout_profile_directory_is_not_a_profile(isolated_env):
+def test_an_old_layout_profile_is_not_listed_but_said_to_be_there(isolated_env, caplog):
     root = isolated_env / "data" / "profiles"
     (root / "legacy").mkdir(parents=True)
     (root / "legacy" / "profile.yml").write_text("version: 2\n")
-    assert profiles.list_names() == []
-    with pytest.raises(ProfileError, match="not found"):
+    with caplog.at_level("WARNING", logger="tandem.core.profiles"):
+        assert profiles.list_names() == []
+        assert profiles.list_names() == []
+    notices = [r.getMessage() for r in caplog.records if "old layout" in r.getMessage()]
+    assert len(notices) == 1, "said once per process, however often the profiles are listed"
+    assert "legacy" in notices[0] and "tandem init" in notices[0]
+    with pytest.raises(ProfileError) as excinfo:
         profiles.load("legacy")
+    assert "tandem profile migrate" in (excinfo.value.hint or "")
 
 
 def test_delete_keeps_the_trajectories_and_purge_removes_them(profile):

@@ -67,12 +67,17 @@ def _view(profile, cfg=None):
 
 @router.get("/profiles")
 async def list_profiles() -> dict:
+    from tandem.core import layout
+
     cfg = settings_mod.load(force=True)
     names = profiles_mod.list_names()
     return {
         "active": cfg.active_profile,
         "data_root": str(cfg.resolved_data_root()),
         "profiles": [_card(name, cfg.active_profile) for name in names],
+        # Profiles written before version 3, not loaded until `tandem init` (or `tandem profile migrate`)
+        # moves them: the page says so rather than show fewer profiles than there are.
+        "old_layout": layout.pending(),
     }
 
 

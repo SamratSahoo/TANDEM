@@ -87,6 +87,7 @@ def isolated_env(tmp_path, monkeypatch):
 
     # These modules cache what they loaded (the settings, the rig) and say some things once per
     # process; a stale cache leaks one test's config into the next.
+    from tandem.core import profiles
     from tandem.core import rig as rig_mod
     from tandem.core import settings as settings_mod
 
@@ -95,6 +96,7 @@ def isolated_env(tmp_path, monkeypatch):
         rig_mod._cache = None
         rig_mod._stamp = None
         rig_mod._noticed.clear()
+        profiles._noticed_old_layout = False
 
     forget()
     yield tmp_path

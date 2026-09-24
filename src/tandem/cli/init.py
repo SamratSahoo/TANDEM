@@ -15,7 +15,7 @@ import typer
 from tandem import resources
 from tandem.cli import runtime as runtime_cli
 from tandem.cli import theme
-from tandem.core import paths, probe, profiles, secrets
+from tandem.core import layout, paths, probe, profiles, secrets
 from tandem.core import settings as settings_mod
 from tandem.core.errors import TandemError, one_line
 from tandem.planners import registry
@@ -87,6 +87,21 @@ def init(
     settings_mod.save(cfg)
     theme.ok("Data root", str(data_root))
     theme.blank()
+
+    # ---- 3b. profiles in the layout before version 3 ------------------------
+    # Before anything reads the profiles: until they are moved they are not loaded at all, and the rig
+    # this machine needs is set up from them when it has none yet.
+    if layout.pending():
+        from tandem.cli import profile as profile_cli
+
+        theme.rule("profiles in the old layout")
+        report = profile_cli.run_migration()
+        if report is not None and report.failed:
+            theme.warn(
+                f"{len(report.failed)} profile(s) were left as they were",
+                "`tandem profile migrate` again once each is fixed",
+            )
+        theme.blank()
 
     # ---- 4. the planner -----------------------------------------------------
     # Chosen before anything is built: the runtime step builds THIS planner's runtime, and the profile

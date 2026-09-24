@@ -15,12 +15,14 @@ On disk::
         failure/<ts>/
 
 Profiles written before version 3 were directories (``profiles/<name>/profile.yml``, with the cameras,
-the robot and a calibration.json of their own), and are not read as profiles.
+the robot and a calibration.json of their own). ``tandem.core.layout`` moves them into this layout and
+their machine settings into the rig; until it has, they are said to be there and are not loaded.
 """
 
 from __future__ import annotations
 
 import io
+import logging
 import os
 import re
 from collections.abc import Collection, Mapping
@@ -525,8 +527,9 @@ class Profile(BaseModel):
             found = f" (it has {', '.join(older)} at the top)" if older else f" (version {version})"
             raise ValueError(
                 f"this profile is in the layout before version {LAYOUT_VERSION}{found}: its robot and cameras "
-                "are this machine's rig now. Move those sections into rig.yml (`tandem rig edit`) and set "
-                f"version: {LAYOUT_VERSION}"
+                "are this machine's rig now. `tandem profile migrate` converts old profile directories; for a "
+                "file, move those sections into rig.yml (`tandem rig edit`) and set version: "
+                f"{LAYOUT_VERSION}"
             )
         return data
 
@@ -587,6 +590,11 @@ class Profile(BaseModel):
         return self.task.goal or self.task.prompt
 
 
+_log = logging.getLogger(__name__)
+# Whether the old-layout notice was given in this process: a command that lists profiles ten times says it once.
+_noticed_old_layout = False
+
+
 # --------------------------------------------------------------------------- store
 
 
@@ -601,9 +609,29 @@ def trajectories_root() -> Path:
 def list_names() -> list[str]:
     """Every profile here: the names of the ``<name>.yml`` files in profiles/, sorted."""
     root = profiles_root()
+    _notice_old_layout(root)
     if not root.is_dir():
         return []
     return sorted(p.stem for p in root.iterdir() if p.suffix == ".yml" and is_name(p.stem) and p.is_file())
+
+
+def _notice_old_layout(root: Path) -> None:
+    """Say, once per process, that profiles in the layout before version 3 are here and not listed."""
+    global _noticed_old_layout
+    if _noticed_old_layout:
+        return
+    from tandem.core import layout
+
+    pending = layout.pending(root)
+    if not pending:
+        return
+    _noticed_old_layout = True
+    _log.warning(
+        "%d profile(s) are in the old layout (%s): `tandem init` moves them, and sets up the rig from them "
+        "(or `tandem profile migrate`)",
+        len(pending),
+        ", ".join(pending),
+    )
 
 
 def is_name(name: object) -> bool:
@@ -634,6 +662,12 @@ def path_of(name: str) -> Path:
 
 
 def _not_found(name: str, path: Path) -> ProfileError:
+    if (profiles_root() / name / "profile.yml").is_file():
+        return ProfileError(
+            f"Profile {name!r} is in the layout before version {LAYOUT_VERSION} "
+            f"({profiles_root() / name / 'profile.yml'}), and has not been moved yet.",
+            hint="`tandem init` moves it, and sets up this machine's rig from it (or `tandem profile migrate`).",
+        )
     known = list_names()
     hint = (
         f"Known profiles: {', '.join(known)}."

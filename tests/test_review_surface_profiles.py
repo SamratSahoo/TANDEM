@@ -179,6 +179,47 @@ def test_the_conformance_kit_refuses_options_that_are_not_plain_data():
         kit().test_its_options_check_accepts_what_it_returns()
 
 
+# --- a version-1 profile's teleop default is said, not carried over silently ----------------------------
+
+
+def _write_old(name: str, text: str) -> Path:
+    """A profile in the layout before version 3: a directory, with its profile.yml."""
+    path = profiles.profiles_root() / name / "profile.yml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return path
+
+
+def test_a_version_1_profiles_teleop_default_is_named_when_it_is_migrated(isolated_env):
+    text = (FIXTURES / "v1_ef1411f.yml").read_text()
+    assert "on_robot_phase_failure: teleop" in text
+    _write_old("old", text)
+
+    migrated = CliRunner().invoke(app, ["profile", "migrate"])
+    assert migrated.exit_code == 0, migrated.output
+    output = " ".join(migrated.output.split())
+    assert "on_robot_phase_failure kept at teleop" in output and "abort" in output
+    loaded = profiles.load("old")
+    assert loaded.hitl.on_robot_phase_failure == "teleop", "kept: a migration cannot tell a choice from a default"
+
+
+def test_a_version_1_profile_that_chose_abort_or_a_current_teleop_is_not_mentioned(isolated_env, caplog):
+    _write_old(
+        "chose",
+        (FIXTURES / "v1_ef1411f.yml").read_text().replace("on_robot_phase_failure: teleop", "on_robot_phase_failure: abort"),
+    )
+    migrated = CliRunner().invoke(app, ["profile", "migrate"])
+    assert migrated.exit_code == 0, migrated.output
+    assert "on_robot_phase_failure" not in migrated.output
+    current = profiles.load_file(Path(profiles.__file__).parents[1] / "resources" / "profile_template.yml", name="cur")
+    current.hitl.on_robot_phase_failure = "teleop"
+    profiles.save(current)
+    with caplog.at_level("WARNING"):
+        profiles.load("chose")
+        profiles.load("cur")
+    assert "on_robot_phase_failure" not in caplog.text
+
+
 # --- an executor's own settings ------------------------------------------------------------------------
 
 

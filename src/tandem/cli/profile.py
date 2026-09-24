@@ -386,6 +386,60 @@ def list_presets(
     )
 
 
+@app.command(
+    "migrate",
+    help="Move profiles written before version 3 (a directory each) into the current layout, and their "
+    "robot and cameras into this machine's rig. `tandem init` does it too.",
+)
+def migrate() -> None:
+    """Every old-layout profile, moved: see ``tandem.core.layout``. Nothing is deleted; one profile that
+    cannot be moved does not stop the others, and the command fails at the end if any could not."""
+    from tandem.core import layout
+
+    report = run_migration()
+    if report is None:
+        theme.info("No profiles in the old layout.", str(profiles.profiles_root()))
+        return
+    if report.failed:
+        raise ProfileError(
+            f"{len(report.failed)} profile(s) could not be moved: {', '.join(m.name for m in report.failed)}.",
+            hint="Each one is left exactly as it was; what is wrong with it is said above. "
+            f"`tandem profile migrate` again once it is fixed. (The rest are in the archive, "
+            f"{profiles.profiles_root() / layout.ARCHIVE_DIR}.)",
+        )
+
+
+def run_migration():
+    """Move the old-layout profiles, saying what happened to each. None when there were none. For `init` too."""
+    from tandem.core import layout
+
+    if not layout.pending():
+        return None
+    report = layout.migrate_all(active=settings_mod.load().active_profile)
+    if report.rig:
+        theme.ok("Rig written from the old profiles", report.rig)
+    for note in report.notes:
+        theme.warn(note)
+    for moved in report.profiles:
+        if not moved.ok:
+            theme.fail(f"{moved.name}: not moved", _one_line(moved.error or ""))
+            continue
+        if moved.file:
+            theme.ok(f"{moved.name}: moved", moved.file)
+        else:
+            theme.ok(f"{moved.name}: its trajectories moved", "the profile itself had been deleted")
+        theme.info(f"  the original is in {moved.archive}")
+        for note in moved.notes:
+            theme.info(f"  {note}")
+    return report
+
+
+def _one_line(message: str) -> str:
+    from tandem.core.errors import one_line
+
+    return one_line(message)
+
+
 def _planner_title(backend: str) -> str:
     try:
         return registry.info(backend).title
