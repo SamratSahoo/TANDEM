@@ -21,7 +21,8 @@
 #      "Solve Constrained Puzzle" and "Store Bread in Closed Box" only). Import the task's
 #      config with --tamp-config to get them; the import also names the three switches
 #      LJ1356's tiptop always had on for those runs (table_plane_support_vote,
-#      disjoint_object_masks, blend_stretch_to_caps), which tandem leaves to you.
+#      disjoint_object_masks, blend_stretch_to_caps). This preset sets all three ([LJ] below),
+#      since every v3 run had them; a plain --tamp-config import leaves them to you.
 #
 #  hitl-tamp-vla pins LJ1356/tiptop cf75a68 and its cuTAMP. TiPToP here pins the TANDEM branches
 #  of SamratSahoo/tiptop and cuTAMP (planners/tiptop/recipe.py: main plus LJ1356's placement
@@ -97,3 +98,15 @@ profile:
         # slower perception.
         m2t2_num_runs: 60                     # [v3]
         require_m2t2_grasps: false            # [v3]
+
+        # ── what LJ1356's tiptop always did ─────────────────────────────────────────────
+        # [LJ] marks behaviour the v3 configs never name because, in the tiptop they ran on
+        # (LJ1356/tiptop cf75a68, which carries @37b9678 and @ffe370a), it was the code rather
+        # than a setting -- for every task, not only the two placement ones. The TANDEM branch
+        # ports each behind a switch that is off by default, so the paper's runs need them on.
+        table_plane_support_vote: true        # [LJ] pick the table plane by the objects resting on it
+        disjoint_object_masks: true           # [LJ] meshes and point clouds from disjoint masks
+        # Slow a stroke the VAE timing cannot fit under the velocity/acceleration caps, instead of
+        # falling back to cuRobo's raw segments at the plan's own speed. It can make that one
+        # stroke several times slower; the alternative is the fastest, least-checked motion.
+        blend_stretch_to_caps: true           # [LJ]

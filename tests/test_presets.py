@@ -27,7 +27,7 @@ from tandem.core.profiles import HitlSpec, Profile
 from tandem.planners import registry
 from tandem.planners.testing import ConformanceError, check_presets
 from tandem.planners.tiptop import tamp_keys
-from tandem.planners.tiptop.importers import HITL_KEYS, IMPORTER
+from tandem.planners.tiptop.importers import HITL_KEYS, IMPORTER, LJ_BEHAVIOURS
 from tandem.planners.tiptop.options import options_of, validate_tamp
 from tandem.planners.tiptop.recipe import RECIPE
 
@@ -125,8 +125,14 @@ def test_tandems_half_states_every_phase_planning_setting():
     assert set(tandem_half.settings["hitl"]) == set(HitlSpec.model_fields)
 
 
-def test_the_tamp_half_is_what_all_five_v3_configs_share():
-    # Derived, not restated: the keys every v3 config sets to the same value, less what tandem refuses.
+# What the paper's runs had that no v3 config names: LJ1356's tiptop did each unconditionally, and the
+# pinned TANDEM branch does each only when asked (importers.LJ_BEHAVIOURS). The preset asks.
+LJ_ON = {key: True for key in LJ_BEHAVIOURS}
+
+
+def test_the_tamp_half_is_what_all_five_v3_configs_share_plus_what_their_tiptop_always_did():
+    # Derived, not restated: the keys every v3 config sets to the same value, less what tandem refuses,
+    # plus the switches for what the tiptop those configs ran on did without being asked.
     assert [p.name for p in V3] == [
         "1_toy_puzzle_v3.yml",
         "2_bread_fruit_bowl_cloth_v3.yml",
@@ -137,7 +143,7 @@ def test_the_tamp_half_is_what_all_five_v3_configs_share():
     blocks = [_raw(path)["tamp_overrides"] for path in V3]
     shared = {k: v for k, v in blocks[0].items() if all(k in b and b[k] == v for b in blocks[1:])}
     shared = {k: v for k, v in shared.items() if k not in tamp_keys.REFUSED}
-    assert options_of(_paper()).tamp == validate_tamp(shared)
+    assert options_of(_paper()).tamp == validate_tamp({**shared, **LJ_ON})
     # The DATAFARM alignment the paper describes, spelled out.
     tamp = options_of(_paper()).tamp
     assert tamp["vae_manifold_weight"] == 25000 and tamp["blend_mode"] == "vae" and tamp["blend_trajectory"]
@@ -163,7 +169,10 @@ def test_importing_a_v3_config_gives_the_paper_preset_plus_that_tasks_own_settin
     own = {"grasp_center_weight", "grasp_threshold", "voxel_downsample_size", "placement_support"}
     assert extra <= own | set(tamp_keys.PLACEMENT_GATED)
     shared = {k: v for k, v in options_of(imported).tamp.items() if k not in extra}
-    assert shared == options_of(paper).tamp
+    # A plain import keeps exactly what the file says, so it lacks only the preset's LJ switches
+    # (named in the import's notes instead -- test_import_hitl).
+    assert shared == {k: v for k, v in options_of(paper).tamp.items() if k not in LJ_ON}
+    assert set(options_of(paper).tamp) - set(options_of(imported).tamp) == set(LJ_ON)
 
 
 def test_the_vae_checkpoint_is_the_one_tandem_ships_where_the_runtime_puts_it(tmp_path):

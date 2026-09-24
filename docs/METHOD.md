@@ -607,10 +607,11 @@ empties the gripper): no frame is taken, and it is recorded as unchecked, not pa
 rebound to the new labels when the match is unambiguous (`drift.match_drifted_names`). Otherwise the
 trial ends at `tamp_planning`.
 
-**Not implemented here:** the offline prompt evaluation, a learned-policy human executor (the
-HITL-TAMP baseline; the executor registry is where it would plug in), and exporting the DROID
-joint-velocity action (the merge carries `action_joint_velocity` when a leg recorded it; the export
-still reads `cmd_joint_velocity`).
+**Not part of tandem:** the offline prompt evaluation, a learned-policy human executor (the paper's
+HITL-TAMP baseline), and exporting the DROID joint-velocity action. The export writes
+`cmd_joint_velocity`; the merge keeps `action_joint_velocity` when a leg recorded one. Anyone who
+wants a policy to carry out human phases can still write one as a plugin, through the executor
+registry ([ADDING_A_HUMAN_EXECUTOR.md](ADDING_A_HUMAN_EXECUTOR.md)).
 
 ### Known limitations
 

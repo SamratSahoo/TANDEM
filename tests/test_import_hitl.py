@@ -246,7 +246,7 @@ def test_a_config_whose_human_phases_a_policy_does_is_refused_and_pointed_at_the
     with pytest.raises(TandemError) as caught:
         _import(FIXTURES / "3_pen_open_book_diffusion.yml")
     error = caught.value
-    assert "learned diffusion policy" in error.message and "no executor for that yet" in error.message
+    assert "learned diffusion policy" in error.message and "no executor for that" in error.message
     assert "3_pen_open_book_diffusion" in error.message, "it names the dataset it would have mislabelled"
     assert "3_pen_open_book_v3.yml" in error.hint and "--tamp-config" in error.hint
     assert "8c_pp" not in error.hint, "a twin is the same task"

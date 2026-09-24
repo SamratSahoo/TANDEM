@@ -268,4 +268,4 @@ behaviours are deliberate:
 ## Known gaps
 
 - `ExecutorContext.options` carries only the profile's `hitl.human_executor_options.<name>`; the
-  importer does not yet map a monorepo config's `policy_*` keys into it.
+  importer never fills it from a monorepo config's `policy_*` keys (it refuses those configs).

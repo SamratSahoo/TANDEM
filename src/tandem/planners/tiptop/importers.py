@@ -339,8 +339,8 @@ def _note_lj_behaviours(overrides: dict, notes: list[str]) -> None:
 
 #: What a learned policy's own settings become: nothing. See ``policy_type``.
 _POLICY_ONLY = (
-    "a setting of the learned-policy executor that policy_type selects. tandem has no such executor "
-    "yet, so there is nothing for it to configure"
+    "a setting of the learned-policy executor that policy_type selects. tandem has no such executor, "
+    "so there is nothing for it to configure"
 )
 
 #: monorepo ``hitl`` key -> (the tandem ``hitl`` key it becomes, or None for none; why).
@@ -498,15 +498,15 @@ def _refuse_policy(source: Path, raw: dict, policy_type: str) -> tuple[str, str]
     baseline, where the policy's legs are the data: each has its own dataset slug
     (``3_pen_open_book_diffusion``). Imported as teleop, it would collect a person's legs under that
     name, and the dataset would say it is something it is not -- a mistake a warning scrolled past
-    at import cannot undo once episodes are pushed. The learned-policy executor is not part of tandem
-    yet. And every such config in hitl-tamp-vla has a twin a person runs, with the same task and TAMP
+    at import cannot undo once episodes are pushed. A learned-policy executor is not part of
+    tandem. And every such config in hitl-tamp-vla has a twin a person runs, with the same task and TAMP
     settings, so the right import is one file away. The refusal names it.
     """
     slug = raw.get("hugginface_slug") or raw.get("huggingface_slug")
     dataset = f" (dataset {slug})" if slug else ""
     message = (
         f"{source.name} hands its human phases to a learned {policy_type} policy (hitl.policy_type: "
-        f"{policy_type}), and tandem has no executor for that yet: only a person, through teleop. Imported "
+        f"{policy_type}), and tandem has no executor for that: only a person, through teleop. Imported "
         f"as teleop, it would collect a person's demonstrations under a config{dataset} meant for the "
         "policy's."
     )
