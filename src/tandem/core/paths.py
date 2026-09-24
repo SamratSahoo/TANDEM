@@ -80,8 +80,9 @@ def planner_sources_override() -> Path | None:
     """A directory of planner sources to install from instead of fetching them, or None.
 
     $TANDEM_PLANNER_SOURCES holds one checkout or export per source, named as the planner's recipe
-    names them (``tiptop/``, ``cuTAMP/``, ``curobo/``). It is how an air-gapped workstation installs
-    a planner, from a bundle ``tools/bundle.py`` made elsewhere. $TANDEM_VENDOR_DIR is its old name,
+    names them (``tiptop/``, ``cuTAMP/``, ``curobo/``). It is how a workstation that cannot reach GitHub
+    gets a planner's sources, from a bundle ``tandem planners bundle`` made elsewhere (the environment is
+    still downloaded from conda-forge and PyPI). $TANDEM_VENDOR_DIR is its old name,
     from when the sources shipped inside the wheel; a directory set up for that has the same shape.
     """
     return _env_path("TANDEM_PLANNER_SOURCES") or _env_path("TANDEM_VENDOR_DIR")

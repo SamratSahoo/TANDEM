@@ -22,7 +22,7 @@ class RelabelBody(BaseModel):
 
 @router.get("/trajectories")
 async def list_trajectories(profile: str | None = None, status: str | None = None) -> dict:
-    prof = profiles_mod.load(profile)
+    prof = profiles_mod.load(profile, require_installed=False)
     items = traj_mod.list_all(prof, status=status)
     return {
         "profile": prof.name,
@@ -34,7 +34,7 @@ async def list_trajectories(profile: str | None = None, status: str | None = Non
 
 @router.get("/trajectories/{profile}/{traj_id}")
 async def get_trajectory(profile: str, traj_id: str) -> dict:
-    prof = profiles_mod.load(profile)
+    prof = profiles_mod.load(profile, require_installed=False)
     traj = traj_mod.find(prof, traj_id)
     payload = traj.to_dict()
     payload["meta"] = traj.meta
@@ -44,14 +44,14 @@ async def get_trajectory(profile: str, traj_id: str) -> dict:
 
 @router.get("/trajectories/{profile}/{traj_id}/series")
 async def get_series(profile: str, traj_id: str) -> dict:
-    prof = profiles_mod.load(profile)
+    prof = profiles_mod.load(profile, require_installed=False)
     traj = traj_mod.find(prof, traj_id)
     return series_mod.series_for(traj.path)
 
 
 @router.get("/trajectories/{profile}/{traj_id}/plan")
 async def get_plan(profile: str, traj_id: str) -> dict:
-    prof = profiles_mod.load(profile)
+    prof = profiles_mod.load(profile, require_installed=False)
     traj = traj_mod.find(prof, traj_id)
     return {"plan": traj_mod.plan(traj)}
 
@@ -59,14 +59,14 @@ async def get_plan(profile: str, traj_id: str) -> dict:
 @router.get("/media/{profile}/{traj_id}/{filename}")
 async def get_media(profile: str, traj_id: str, filename: str, request: Request):
     """Range-served so the browser can scrub. Path traversal is rejected in media_path."""
-    prof = profiles_mod.load(profile)
+    prof = profiles_mod.load(profile, require_installed=False)
     traj = traj_mod.find(prof, traj_id)
     return range_response(request, traj_mod.media_path(traj, filename))
 
 
 @router.post("/trajectories/{profile}/{traj_id}/relabel")
 async def relabel(profile: str, traj_id: str, body: RelabelBody) -> dict:
-    prof = profiles_mod.load(profile)
+    prof = profiles_mod.load(profile, require_installed=False)
     traj = traj_mod.find(prof, traj_id)
     updated = traj_mod.relabel(prof, traj, body.status, force=body.force)
     return {"trajectory": updated.to_dict(), "counts": traj_mod.counts(prof)}
@@ -74,7 +74,7 @@ async def relabel(profile: str, traj_id: str, body: RelabelBody) -> dict:
 
 @router.delete("/trajectories/{profile}/{traj_id}")
 async def delete(profile: str, traj_id: str) -> dict:
-    prof = profiles_mod.load(profile)
+    prof = profiles_mod.load(profile, require_installed=False)
     traj = traj_mod.find(prof, traj_id)
     traj_mod.delete(prof, traj)
     return {"deleted": traj.id, "counts": traj_mod.counts(prof)}

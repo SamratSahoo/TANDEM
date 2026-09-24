@@ -353,7 +353,7 @@ def test_the_default_is_what_every_new_profile_plans_with(tmp_path):
     refused = _run("profile", "create", "later")
     assert refused.exit_code == 1
     assert "default_planner" in refused.exception.message
-    assert "tandem planners use NAME --default" in refused.exception.hint
+    assert "tandem planners default NAME" in refused.exception.hint
     assert not profiles.exists("later")
 
 
@@ -422,7 +422,7 @@ def test_pixi_is_never_installed_without_a_yes(active, tmp_path, monkeypatch):
 
     consented = _run("planners", "install", "heavy", "--yes")
     assert consented.exit_code == 0, consented.output
-    assert pixi["installed"] and builds == [{"force": False, "sources_dir": None}]
+    assert pixi["installed"] and builds == [{"force": False, "sources_dir": None, "planner": "heavy"}]
 
 
 def test_remove_deletes_the_runtime_only_when_told_to(active, tmp_path):

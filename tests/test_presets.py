@@ -268,7 +268,7 @@ def test_a_planners_preset_named_like_one_of_tandems_must_extend_it(tmp_path):
 
 
 def test_a_planner_preset_extending_nothing_tandem_has_is_refused(tmp_path):
-    _preset(tmp_path / "presets", "mine", "title: Mine\nextends: papr\nprofile:\n  hitl: {enabled: true}\n")
+    _preset(tmp_path / "presets", "mine", "title: Mine\nextends: papr\nprofile:\n  planner: {options: {items: [duck]}}\n")
     _toy(tmp_path / "presets")
     with pytest.raises(TandemError, match="did you mean 'paper'"):
         presets.layers("mine", "toy")

@@ -157,6 +157,13 @@ def unregister_backend(name: str) -> None:
 # --------------------------------------------------------------------------- looking up
 
 
+# The same two functions under the word everything else in tandem uses. `register_backend` stays the
+# canonical name (it is what existing plugins call); `register_planner` is what an author reading
+# "planner" everywhere else will reach for first.
+register_planner = register_backend
+unregister_planner = unregister_backend
+
+
 def available() -> list[str]:
     """Every backend name, for an error message, a ``--help`` line or a profile check.
 
@@ -223,13 +230,52 @@ def options_for(planner: Any, options: Mapping[str, Any] | None) -> dict[str, An
     if not callable(hook):
         return raw
     checked = hook(raw)
+    title = getattr(getattr(planner, "info", None), "name", None) or type(planner).__name__
     if not isinstance(checked, Mapping):
-        title = getattr(getattr(planner, "info", None), "name", None) or type(planner).__name__
         raise TandemError(
             f"The {title!r} planner's validate_options returned a {type(checked).__name__}, not the options.",
             hint="validate_options(options) returns the options as the planner will read them, or raises.",
         )
+    problems = not_plain_data(checked, "options")
+    if problems:
+        # What it returns is written into profile.yml as it stands. A Path, an Enum or a numpy value
+        # passes validation and then cannot be written as YAML -- found only by the save, too late.
+        raise TandemError(
+            f"The {title!r} planner's validate_options returned what a profile cannot store: "
+            + "; ".join(problems[:5])
+            + (f" (and {len(problems) - 5} more)" if len(problems) > 5 else ""),
+            hint="validate_options must return plain data -- mappings with string keys, lists, strings, "
+            "numbers, booleans and None. A pydantic model returns model_dump(mode='json').",
+        )
     return dict(checked)
+
+
+#: What a planner's (or an executor's) options may hold: what YAML and JSON both write back as it was.
+PLAIN_SCALARS = (str, bool, int, float, type(None))
+
+
+def not_plain_data(value: Any, path: str = "options") -> list[str]:
+    """Every place in ``value`` that is not plain data, as "<path>: <type>". Empty when it all is.
+
+    By exact type for a scalar: a ``str`` Enum or a numpy integer IS a str or an int to isinstance, and
+    is exactly what YAML refuses to write.
+    """
+    if type(value) in PLAIN_SCALARS:
+        return []
+    if isinstance(value, Mapping):
+        problems = []
+        for key, item in value.items():
+            if not isinstance(key, str):
+                problems.append(f"{path}: a {type(key).__name__} key {key!r}")
+                continue
+            problems.extend(not_plain_data(item, f"{path}.{key}"))
+        return problems
+    if isinstance(value, (list, tuple)):
+        problems = []
+        for index, item in enumerate(value):
+            problems.extend(not_plain_data(item, f"{path}[{index}]"))
+        return problems
+    return [f"{path} is a {type(value).__module__}.{type(value).__qualname__}"]
 
 
 # --------------------------------------------------------------------------- the optional hooks

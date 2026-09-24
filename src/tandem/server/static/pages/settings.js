@@ -41,15 +41,44 @@ function profileQuery(state) {
 }
 
 // Choosing a planner changes which runtime the topbar's chip and the runtime card describe, so the
-// whole shell reloads rather than just this card.
+// whole shell reloads rather than just this card. `done` returns a title, or [title, detail].
 async function choose(path, body, done, failed) {
   try {
     const result = await api.post(path, body);
-    toast.ok(done(result));
+    const said = done(result);
+    const [title, detail] = Array.isArray(said) ? said : [said, undefined];
+    toast.ok(title, detail);
     await reloadShell();
   } catch (error) {
     reportError(error, failed);
   }
+}
+
+// What a planner switch did to the profile's planner.options, said as `tandem planners use` says it:
+// the old planner's settings leave profile.yml, kept beside it and restored by a switch back.
+function switchDetail(result) {
+  const parts = [];
+  const dropped = Object.keys(result.dropped_options || {}).sort();
+  if (dropped.length) {
+    parts.push(`Removed planner.options ${dropped.join(", ")} (${result.previous}'s own settings); ` +
+      `kept beside the profile, and restored by switching back to ${result.previous}.`);
+  }
+  const restored = Object.keys(result.restored_options || {}).sort();
+  if (restored.length) parts.push(`Restored planner.options ${restored.join(", ")}.`);
+  if (result.restore_problem) parts.push(result.restore_problem);
+  return parts.join(" ") || undefined;
+}
+
+// Asked before a switch that takes settings out of the profile. The page knows them: the catalog carries
+// the profile's planner.options keys.
+function confirmSwitch(payload, row) {
+  const keys = payload.profile_options || [];
+  if (!keys.length) return true;
+  const from = payload.profile_planner || "its current planner";
+  return confirm(
+    `Switch ${payload.profile} from ${from} to ${row.name}?\n\n` +
+    `The planner.options ${keys.join(", ")} are ${from}'s own and leave the profile: they are kept ` +
+    `beside it, and come back when you switch back to ${from}.`);
 }
 
 function plannersCard(state) {
@@ -86,10 +115,17 @@ function plannerRow(row, payload) {
     about.push(h("div.mono", { style: { marginTop: "4px" } }, "$ " + row.install_command));
   }
   const actions = h("div.row", { style: { justifyContent: "flex-end" } });
-  if (row.ok && !payload.profile_problem && !row.active) {
+  // Offered for a profile that does not load too: switching its planner works from the file as written,
+  // and is how a profile naming a planner this machine no longer has is repaired.
+  const repairable = !payload.profile_problem || payload.profile_exists !== false;
+  if (row.ok && repairable && !row.active) {
     actions.appendChild(h("button.small", {
-      onclick: () => choose(`/planners/${encodeURIComponent(row.name)}/use`, { profile },
-        (result) => `${result.profile} now plans with ${result.display_name}`, "Could not switch planner"),
+      onclick: () => {
+        if (!confirmSwitch(payload, row)) return;
+        choose(`/planners/${encodeURIComponent(row.name)}/use`, { profile },
+          (result) => [`${result.profile} now plans with ${result.display_name}`, switchDetail(result)],
+          "Could not switch planner");
+      },
     }, `Use for ${profile}`));
   }
   if (row.ok && !row.default) {
@@ -137,7 +173,9 @@ function executorRow(row, payload) {
   else about.push(h("div.small", { style: { color: "var(--red)" } }, row.error || "it will not load"));
   for (const unmet of row.unmet || []) about.push(h("div.faint.small", "· " + unmet));
   const actions = h("div.row", { style: { justifyContent: "flex-end" } });
-  if (row.ok && !payload.profile_problem && !row.active) {
+  // As for planners: also offered for a profile that does not load, which this repairs.
+  const repairable = !payload.profile_problem || payload.profile_exists !== false;
+  if (row.ok && repairable && !row.active) {
     actions.appendChild(h("button.small", {
       onclick: () => choose(`/executors/${encodeURIComponent(row.name)}/use`, { profile },
         (result) => `${result.profile} hands human phases to ${result.display_name}`, "Could not switch executor"),

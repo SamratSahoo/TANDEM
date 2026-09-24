@@ -8,7 +8,9 @@ one of these; so does a test, in one line.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from typing import Any
 
 from tandem.core import names
 
@@ -160,6 +162,10 @@ class PlanningConfig:
     # is DONE, never what it asks for: the phase, its operator and the check afterwards are the same
     # whoever carries it out.
     human_executor: str = "teleop"
+    # Each executor's own settings, keyed by its name (a policy executor's checkpoint). The executor
+    # built for a phase receives its own block as ExecutorContext.options; the rest are kept for when
+    # the profile switches back. Left out of the hash: a mapping is not hashable, and nothing keys on it.
+    human_executor_options: Mapping[str, Mapping[str, Any]] = field(default_factory=dict, hash=False)
     # Accept "done" for a human phase that was never teleoperated. With recording on, that phase has
     # no leg, so the episode is missing exactly the demonstration the trial exists to capture while
     # looking complete. Always allowed when nothing is being recorded; with recording on, only when

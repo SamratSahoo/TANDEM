@@ -220,8 +220,9 @@ class ExecutorContext:
     * `on_problem(message)` reports a problem the operator has to see now and can do something about,
       such as a driver that would not start while the arm is theirs. The session shows it until the leg
       ends.
-    * `options` are executor-specific settings. Nothing fills them yet; a policy executor's checkpoint
-      would go here.
+    * `options` are this executor's own settings: the profile's
+      ``hitl.human_executor_options.<name>`` block (a policy executor's checkpoint, say), as its
+      ``validate_options`` hook returned it when the profile loaded. Empty when the profile sets none.
     """
 
     profile: Any
@@ -309,6 +310,11 @@ class ExecutorFactory:
     segment_source: str
     requirements: tuple[str, ...] = ()
     check: Callable[[Any], Sequence[str]] | None = None
+    # Checks and normalises the executor's own settings (hitl.human_executor_options.<name>) when a
+    # profile loads, the way a planner's validate_options checks planner.options: returns them as the
+    # executor will read them, or raises TandemError / ValueError naming the key. None takes them as
+    # written. What it returns is written back to profile.yml, so it must be plain YAML data.
+    validate_options: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None
 
     def __post_init__(self) -> None:
         if self.segment_source not in SEGMENT_SOURCES:
@@ -663,7 +669,47 @@ def _as_factory(name: str, obj: Any, origin: str) -> ExecutorFactory:
         summary=str(getattr(obj, "summary", "") or (doc.splitlines()[0] if doc else "")),
         segment_source=source,
         requirements=tuple(getattr(obj, "requirements", ()) or ()),
+        validate_options=getattr(obj, "validate_options", None),
     )
+
+
+def options_for(name: str, options: Mapping[str, Any] | None) -> dict[str, Any]:
+    """``options`` as the executor ``name`` reads them: its ``hitl.human_executor_options`` block.
+
+    An executor with a ``validate_options`` hook is asked, and what it returns is kept. One without the
+    hook, or one this machine does not have or cannot load, keeps its block as written: the profile is
+    still edited and browsed where the executor is not installed, and the block is checked again on the
+    machine that collects.
+    """
+    if options is None:
+        return {}
+    if not isinstance(options, Mapping):
+        raise TandemError(f"must be a mapping of settings, not a {type(options).__name__}.")
+    raw = dict(options)
+    try:
+        factory, _ = _resolve(name)
+    except TandemError:
+        return raw
+    if factory.validate_options is None:
+        return raw
+    checked = factory.validate_options(raw)
+    if not isinstance(checked, Mapping):
+        raise TandemError(
+            f"The human executor {name!r}'s validate_options returned a {type(checked).__name__}, not "
+            "the options.",
+            hint="validate_options(options) returns the options as the executor will read them, or raises.",
+        )
+    from tandem.planners.registry import not_plain_data
+
+    problems = not_plain_data(checked, "options")
+    if problems:
+        # Written into profile.yml as it stands, like a planner's (registry.options_for says why).
+        raise TandemError(
+            f"The human executor {name!r}'s validate_options returned what a profile cannot store: "
+            + "; ".join(problems[:5]),
+            hint="Return plain data: mappings, lists, strings, numbers, booleans, None.",
+        )
+    return dict(checked)
 
 
 def _machine_settings() -> Any:

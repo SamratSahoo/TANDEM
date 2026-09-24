@@ -139,16 +139,19 @@ solves tiptop's own pixi environment, and compiles cuRobo's kernels: 5–20 minu
 writes down exactly what it installed. When a tandem upgrade moves a pin, `tandem planners list`
 says the runtime is `outdated` instead of letting a session fail forty seconds into warm-up.
 
-**A workstation with no network** installs from a bundle made elsewhere. From a checkout of this
-repository, on a machine that can reach GitHub:
+**A workstation that cannot reach GitHub** takes the sources from a bundle made elsewhere, by the
+same version of tandem, on a machine that can:
 
 ```bash
-python tools/bundle.py --planner tiptop --out /media/usb/planner-sources
+tandem planners bundle tiptop --out /media/usb/planner-sources
 ```
 
 then, on the workstation, `tandem planners install tiptop --sources /media/usb/planner-sources`, or
-set `TANDEM_PLANNER_SOURCES`. With a sources directory in force nothing is fetched, and each export is
-checked against the pinned commit, and its files against the digest taken when it was bundled.
+set `TANDEM_PLANNER_SOURCES`. With a sources directory in force no source is fetched, and each export
+is checked against the pinned commit, and its files against the digest taken when it was bundled. A
+bundle carries the sources only: `pixi install` still downloads the environment from conda-forge and
+PyPI (and builds SAM-2 from GitHub), and TiPToP's first warm-up downloads the SAM-2 checkpoint, so the
+workstation still needs those.
 
 <table>
 <tr><td width="50%">
@@ -273,15 +276,17 @@ $ tandem planners list
 ●   tiptop  TiPToP  default   not installed   GPU task and motion planning with cuTAMP and cuRobo, perceiving…
 
   · profile 'default' plans with tiptop
-  · new profiles plan with tiptop  `tandem planners use NAME --default`
+  · new profiles plan with tiptop  `tandem planners default NAME`
 ```
 
 | | |
 |---|---|
 | `tandem planners list` | Every planner tandem can see: built in, or registered by an installed package. Each is `installed`, `not installed`, `outdated`, `no runtime needed` or `broken` (with why). `●` marks the one the active profile uses. |
 | `tandem planners info NAME` | What it is and needs, the commits it pins against what is installed, its goal language as the phase planner sees it, what it supports, the `planner.options` it reads, and its presets. |
-| `tandem planners install NAME` | Fetch its pinned sources and build its runtime. Safe to re-run: an installed, current runtime returns at once, and an outdated one is rebuilt. `--sources DIR` installs offline; `--force` rebuilds; `--yes` asks nothing. |
-| `tandem planners use NAME` | Make a profile plan with it (`--profile P`; `--default` for every new profile too). The old planner's `planner.options` are removed, and named. |
+| `tandem planners install NAME` | Fetch its pinned sources and build its runtime. Safe to re-run: an installed, current runtime returns at once, and an outdated one is rebuilt. `--sources DIR` takes the sources from DIR instead of GitHub; `--force` rebuilds; `--yes` asks nothing. |
+| `tandem planners use NAME` | Make a profile plan with it (`--profile P`; `--option KEY=VALUE` for a setting it needs; `--default` for every new profile too). The old planner's `planner.options` leave the profile, named, and are kept beside it in `planner-options.<planner>.yml`: switching back restores them. It also repairs a profile naming a planner this machine no longer has. |
+| `tandem planners default NAME` | The planner new profiles get. Changes no profile. |
+| `tandem planners bundle NAME --out DIR` | Its pinned sources in DIR, for `install --sources DIR` on a machine that cannot fetch them. |
 | `tandem planners remove NAME` | Delete its runtime. It stays listed and can be installed again. |
 | `tandem planners new NAME [--sidecar]` | Scaffold a package for a planner of your own. It passes tandem's conformance kit as generated. |
 | `tandem executors list` | Who can carry out a human phase (`hitl.human_executor`), whether each is ready here, and what one still needs. |
@@ -342,7 +347,7 @@ collecting.
 - `--object` / `-o LABEL`, repeated, pins the object labels. Without it, a vision model names the
   objects in the photo first.
 - `--profile P` takes the planning settings from a profile, and its planner.
-- `--backend NAME` plans in another planner's goal language.
+- `--planner NAME` plans in another planner's goal language (`--backend` is its older name).
 - `--json` prints the plan record, the same structure `hitl.json` has.
 - `--save-vlm-io DIR` keeps every image and reply.
 
@@ -364,8 +369,8 @@ for i, phase in enumerate(plan.phases):
 walk: its phases, operators, invented predicates, and `to_json()`. `plan_task_async` is the same for
 code already inside an event loop. `import tandem` imports nothing heavy: the whole public surface
 (`plan_task`, `PhasePlan`, `PlanningConfig`, the planner SDK's `Planner`, `SidecarPlanner`,
-`Capabilities`, `PlannerInfo`, `Predicate`, `Parameter` and `RuntimeRecipe`, `register_backend`,
-`register_human_executor`, `TandemError`) is resolved on first use.
+`Capabilities`, `PlannerInfo`, `Predicate`, `Parameter` and `RuntimeRecipe`, `register_backend` (or
+`register_planner`, the same function), `register_human_executor`, `TandemError`) is resolved on first use.
 
 ---
 
@@ -435,6 +440,7 @@ hitl:
   on_robot_phase_failure: abort       # abort (the paper) | teleop | replan
   conjoin_robot_phases: true          # consecutive robot phases as one goal, where sound
   human_executor: teleop              # who carries out a human phase
+  human_executor_options: {}          # each executor's own settings, under its name
   allow_unrecorded_human_phase: false # while recording, accept a human step done off the record
   verification_camera: external       # external | hand | perception
 ```
@@ -481,7 +487,10 @@ my setting apply?".
 
 Profiles written before profile version 2 had `robot:`, `perception:` and `tamp:` at the top level.
 They still load, with a one-line notice, and are written in the new layout the next time they are
-saved. `tandem profile migrate` rewrites them all at once. An older tandem cannot read a version-2
+saved. `tandem profile migrate` rewrites them all at once, keeping each old file as
+`profile.yml.v1.bak` and leaving a current profile byte for byte as it is. A version-1 profile says
+`on_robot_phase_failure: teleop` (version 1's default, whether or not anyone chose it); it is kept, and
+named in the notice, since the default is now `abort`. An older tandem cannot read a version-2
 profile.
 
 ### Machine settings
@@ -493,7 +502,7 @@ profile.
 | `active_profile` | `default` | Set by `tandem profile use`. |
 | `data_root` | `~/tandem-data` | Where profiles and trajectories live. `$TANDEM_DATA_ROOT` wins. |
 | `runtime_dir` | `~/.local/share/tandem/runtime` | TiPToP's runtime (about 25 GB). `$TANDEM_RUNTIME_DIR` wins. Other planners' live in `~/.local/share/tandem/runtimes/NAME` (`$TANDEM_RUNTIMES_DIR`). |
-| `default_planner` | `tiptop` | The planner new profiles get (`tandem planners use NAME --default`). |
+| `default_planner` | `tiptop` | The planner new profiles get (`tandem planners default NAME`). |
 | `hf_org` | | The default Hugging Face owner for `tandem export lerobot`. |
 | `teleop.enabled`, `teleop.droid_dir`, `teleop.python`, `teleop.device` (`vr` or `spacemouse`), `teleop.controller` (`right` or `left`) | off | The teleop driver: a DROID checkout and its environment's interpreter. |
 | `ui.host`, `ui.port`, `ui.open_browser` | `127.0.0.1`, `8787`, `true` | `tandem ui`. |
@@ -598,13 +607,13 @@ so what you see is what training sees.
 
 | | |
 |---|---|
-| `tandem init` | Set up this machine: checks, the planner (`--planner NAME`) and its runtime, the Gemini key, a profile (`--import-from DIR`), teleop. `--viz-only` for a laptop. Idempotent. |
+| `tandem init` | Set up this machine: checks, the planner (`--planner NAME`) and its runtime, the Gemini key, a profile (`--import-from DIR`, `--preset NAME`), teleop. `--viz-only` for a laptop. Idempotent; `--repair` redoes the runtime, key and teleop steps and never touches an existing profile. |
 | `tandem doctor` | Every check, what it found, and what to do about it. `--no-hardware` skips the robot, camera and grasp-server probes. |
 | `tandem collect [profile]` | Run a session in the terminal. `--task`, `--episodes N`, `--no-execute` (plan without moving), `--no-record`, `--web`. |
 | `tandem plan "<task>" --image photo.png` | Decompose a task into phases from a photo, with no robot and no GPU. |
 | `tandem ui` | Serve the browser UI. |
 | `tandem profile list \| show \| create \| presets \| migrate \| use \| edit \| delete \| path` | Manage profiles. `show --planner` prints what the planner receives. |
-| `tandem planners list \| info \| install \| use \| remove \| new` | The planner catalog (above). |
+| `tandem planners list \| info \| install \| use \| default \| remove \| bundle \| new` | The planner catalog (above). |
 | `tandem executors list \| use` | The human executors. |
 | `tandem traj list \| show \| open \| relabel \| rm \| merge \| copy \| path` | Inspect trajectories. `open` replays one in its planner's own viewer (TiPToP's: Rerun, inside the runtime). `merge` re-joins a trial's legs if the automatic merge failed. |
 | `tandem export lerobot \| manifest` | Build a LeRobot v3.0 dataset from `success/` (and push it to the Hub), or write a JSON index. |

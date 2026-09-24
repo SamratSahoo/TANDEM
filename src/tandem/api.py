@@ -58,7 +58,7 @@ def plan_task(
     ``planner`` is whose goal language the robot phases are stated in: a registered planner's name
     (`tandem planners list`), or a ``Capabilities`` declaration for one that is not registered. By
     default the planner of ``profile``, else the machine's default planner (``tiptop`` unless
-    `tandem planners use NAME --default` changed it). Nothing of the planner is built or installed:
+    `tandem planners default NAME` changed it). Nothing of the planner is built or installed:
     only its declaration is read.
 
     ``profile`` takes the planning settings (the profile's ``hitl:`` block: models, repair attempts,

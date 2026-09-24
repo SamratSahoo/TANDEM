@@ -36,7 +36,7 @@ def lerobot(
             ),
         ) from exc
 
-    profile = profiles.load(profile_name)
+    profile = profiles.load(profile_name, require_installed=False)
     cfg = settings_mod.load()
 
     repo_id = repo or profile.export.hf_repo
@@ -135,7 +135,7 @@ def manifest(
     out: Path = typer.Option(None, "--out", help="Where to write it (default: stdout)."),
 ) -> None:
     """A dependency-free description of what was collected — handy for custom pipelines."""
-    profile = profiles.load(profile_name)
+    profile = profiles.load(profile_name, require_installed=False)
     items = trajectories.list_all(profile, with_size=True)
     payload = {
         "profile": profile.model_dump(mode="json"),

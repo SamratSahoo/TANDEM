@@ -1471,9 +1471,14 @@ class PhaseLoop:
         """The human executor registered as ``name``, built the first time it is asked for."""
         executor = self._executors.get(name)
         if executor is None:
+            import dataclasses
+
             from tandem import executors
 
-            executor = executors.create(name, self.executor_context)
+            # Its own settings, per executor rather than per session: the same context also builds
+            # teleop for an operator's hand-off, which must not receive a policy's checkpoint.
+            options = dict((getattr(self.cfg, "human_executor_options", None) or {}).get(name) or {})
+            executor = executors.create(name, dataclasses.replace(self.executor_context, options=options))
             self._executors[name] = executor
         return executor
 

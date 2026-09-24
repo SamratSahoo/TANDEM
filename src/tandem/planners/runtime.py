@@ -19,15 +19,16 @@ artifact from anyone's working tree can ride along. A machine with no git gets G
 the same commit over HTTPS instead. Either way the commit is checked: git names the object it
 fetched, and ``git archive`` stamps the commit into the tarball it makes -- GitHub's archive included.
 
-**An offline machine installs from a directory instead.** ``TANDEM_PLANNER_SOURCES``, or
-``tandem planners install NAME --sources DIR``, names a directory holding one checkout or export per source,
-named as the recipe names them. A checkout is used as an object store: the pinned commit is exported
-out of it, whatever its working tree holds. An export made by ``tools/bundle.py`` carries a marker
-naming its commit, which has to be the pinned one, and a digest of its files, which have to be the
-ones that were bundled (``tree_digest``). A bare directory with neither is taken on trust and
-recorded as unverified. Nothing is ever fetched while a sources directory is in force: a source
-missing from it is an error, because an air-gapped rig reaching for the network is a hang, not a
-fallback.
+**A machine that cannot fetch the sources installs them from a directory instead.**
+``TANDEM_PLANNER_SOURCES``, or ``tandem planners install NAME --sources DIR``, names a directory holding
+one checkout or export per source, named as the recipe names them. A checkout is used as an object
+store: the pinned commit is exported out of it, whatever its working tree holds. An export made by
+``tandem planners bundle`` carries a marker naming its commit, which has to be the pinned one, and a
+digest of its files, which have to be the ones that were bundled (``tree_digest``). A bare directory
+with neither is taken on trust and recorded as unverified. No SOURCE is ever fetched while a sources
+directory is in force: a source missing from it is an error, not a fallback to the network.
+The environment is another matter: ``pixi install`` still solves it from conda-forge and PyPI (and
+TiPToP's lock builds SAM-2 from GitHub), so a sources directory spares GitHub, not the network.
 
 **What was installed is written down**, in ``<runtime>/.tandem-runtime.json``: each tree's URL and
 commit, where it came from, whether that commit was verified, what was trimmed from it and the
@@ -87,7 +88,7 @@ from tandem.planners.base import RuntimeStatus, SourcePin
 #: What is installed, and from where. The name is the one the runtime's stamp has always had, so a
 #: runtime built before sources were fetched is still read (see ``_read_manifest``).
 MANIFEST_FILE = ".tandem-runtime.json"
-#: Written into each export ``tools/bundle.py`` makes: the commit it is, so an offline install can
+#: Written into each export ``tandem planners bundle`` makes: the commit it is, so an offline install can
 #: check it has been handed the pinned one.
 SOURCE_MARKER = ".tandem-source.json"
 #: Scratch space inside the runtime, so a half-fetched tree never sits where a finished one belongs
@@ -664,6 +665,14 @@ class RecipeRuntime:
             env = self.recipe.environment
             if env is not None:
                 announce("environment", stages["environment"])
+                offline = sources_dir is not None or paths.planner_sources_override() is not None
+                if offline:
+                    # Said before the solve, because it is what fails next on a machine that cannot
+                    # reach the network: a sources directory spares the source fetch, and nothing else.
+                    say(
+                        "note: the sources came from a directory, but the environment is still solved "
+                        "and downloaded by pixi (conda-forge, PyPI, and any git dependency its lock names)"
+                    )
                 with self._build_stage("environment", f"{env.tool} install"):
                     self.build_environment(log=say)
             if env_only:
@@ -1252,16 +1261,16 @@ def export_from_directory(
     """Put ``pin``'s tree at ``dest`` from ``directory/<name>``: a checkout, or an export.
 
     A checkout is an object store: the PINNED commit is exported out of it, whatever its working tree
-    is at. An export is copied, its marker (from ``tools/bundle.py``) must name the pinned commit, and
-    its files must be the ones the marker's digest was taken of. One with no marker -- or with a marker
-    from before markers carried a digest -- is copied on trust and recorded as unverified.
+    is at. An export is copied, its marker (from ``tandem planners bundle``) must name the pinned commit,
+    and its files must be the ones the marker's digest was taken of. One with no marker -- or with a
+    marker from before markers carried a digest -- is copied on trust and recorded as unverified.
     """
     entry = Path(directory) / pin.name
     if not entry.is_dir():
         raise TandemError(
             f"{pin.name} is not in the planner sources directory {directory}.",
             hint=f"It needs {entry}: a checkout of {pin.url} that has commit {pin.commit}, or an export of "
-            "it. `python tools/bundle.py` makes a complete directory on a machine with network.",
+            "it. `tandem planners bundle NAME --out DIR` makes a complete directory, on a machine with network.",
         )
     return export_from_tree(pin, entry, dest, scratch=scratch, log=log)
 
@@ -1289,8 +1298,9 @@ def export_from_tree(
         if claimed != pin.commit:
             raise TandemError(
                 f"{entry} is {pin.name} at {str(claimed)[:7]}, but the recipe pins {pin.short()}.",
-                hint="The bundle is for another version of tandem. Make it again with this one's "
-                "`python tools/bundle.py`.",
+                hint=f"The bundle is for another version of tandem. Make it again with this tandem's "
+                f"`tandem planners bundle NAME --out DIR`, or replace {entry} with a git checkout of "
+                f"{pin.url} that has commit {pin.commit}.",
             )
         say(f"{pin.name}: copying the export at {entry}")
         _copy_tree(entry, dest)
@@ -1309,7 +1319,7 @@ def export_from_tree(
                 f"The export at {entry} is not the {pin.name} {pin.short()} it was bundled as: its files have "
                 "changed since.",
                 hint="The bundle was edited or damaged after it was made. Make it again with "
-                f"`python tools/bundle.py`. To install these files on purpose, delete {marker}: they are "
+                f"`tandem planners bundle`. To install these files on purpose, delete {marker}: they are "
                 "then taken on trust, and recorded as unverified.",
             )
         return {"origin": f"export {entry}", "verified": True}
@@ -1742,7 +1752,7 @@ def _busy(title: str, holder: str) -> TandemError:
 def tree_digest(root: Path) -> str:
     """sha256 of a tree's contents: each file's bytes and each symlink's target, by relative path.
 
-    What ``tools/bundle.py`` writes into an export's marker and an install from that export checks,
+    What ``tandem planners bundle`` writes into an export's marker and an install from that export checks,
     so an export recorded as verified is the commit its marker names, not merely one that says so.
     Paths and contents only, not modes or times: a bundle carried on a stick keeps neither reliably,
     and neither changes which commit a tree is. The junk an install never copies (``_copy_tree``) is
@@ -1851,7 +1861,10 @@ def _stream(cmd: list[str], *, cwd: Path, env: dict, log: Log | None, what: str)
             log(line.rstrip("\n"))
     code = proc.wait()
     if code != 0:
+        # The command to re-run, and the exact log, are added by whoever ran the build (cli/runtime.py
+        # run_build): only it knows which planner this was, and `tandem runtime build` rebuilds the
+        # ACTIVE profile's planner, which need not be the one that failed.
         raise TandemError(
             f"{what} failed (exit {code}).",
-            hint="The full build log is in " + str(paths.log_dir()) + ". Re-run `tandem runtime build`.",
+            hint="The full build log is in " + str(paths.log_dir()) + ".",
         )

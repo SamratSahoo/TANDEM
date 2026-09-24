@@ -709,14 +709,37 @@ class PlannerConformance:
         from tandem.planners.registry import options_for
 
         factory = self.factory()
-        checked = options_for(factory, self.options)
+        checked = options_for(factory, self.options)  # also refuses what is not plain data
         again = options_for(factory, checked)
         if again != checked:
             _raise(
                 "its validate_options",
                 [f"given its own output {checked!r} it returned {again!r}; it must accept it unchanged"],
             )
-        json.dumps(checked, default=str)
+        # Strictly, with no default=str: what a profile stores has to come back from JSON as it went in.
+        if json.loads(json.dumps(checked)) != json.loads(json.dumps(again)):
+            _raise("its validate_options", ["its output does not survive a JSON round trip unchanged"])
+
+    def test_its_options_check_handles_no_options(self) -> None:
+        # `tandem planners use NAME` and `tandem profile create --planner NAME` start a profile with no
+        # planner.options at all. A planner may require one (a robot's address) -- but then it must SAY
+        # so, with a TandemError or a ValueError naming the key, which tandem turns into "give it
+        # --option KEY=VALUE". A KeyError or a TypeError out of an empty block is a traceback instead.
+        from tandem.core.errors import TandemError
+        from tandem.planners.registry import options_for
+
+        try:
+            options_for(self.factory(), {})
+        except (TandemError, ValueError):
+            return
+        except Exception as exc:
+            _raise(
+                "its validate_options",
+                [
+                    f"given no options it raised {type(exc).__name__}: {exc}; with a setting it requires, "
+                    "raise TandemError (or ValueError) naming it"
+                ],
+            )
 
     def test_its_presets_are_options_it_accepts(self) -> None:
         if check_presets(self.factory(), self.options) == 0:

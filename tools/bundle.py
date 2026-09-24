@@ -1,23 +1,13 @@
 #!/usr/bin/env python3
-"""Make an offline bundle of a planner's pinned sources, for a workstation with no network.
+"""Make an offline bundle of a planner's pinned sources, from a checkout of this repository.
 
-tandem fetches a planner's sources when its runtime is installed. A machine that cannot reach GitHub
-installs from a directory instead -- ``tandem planners install NAME --sources DIR``, or
-``$TANDEM_PLANNER_SOURCES=DIR`` -- and this makes that directory, on a machine that can:
+The bundler itself is part of tandem -- ``tandem planners bundle NAME --out DIR`` (tandem/planners/
+bundle.py) -- so a pip or pipx install can make a bundle that matches its own pins. This script is the
+same thing for a checkout without an install (CI runs it): it puts the checkout's ``src`` first on the
+path, so the bundle matches THIS checkout's pins.
 
-    DIR/
-        tiptop/     exactly the pinned commit, exported with `git archive`, trimmed
-        cuTAMP/
-        curobo/
-
-Each export carries a ``.tandem-source.json`` marker naming its commit and a digest of its files, and
-an install checks both: the commit against its own pins, so a bundle made for one version of tandem is
-refused by another instead of quietly building the wrong planner, and the files against the digest,
-so a bundle edited or damaged since is not recorded as that commit. Patches are NOT applied here: the
-install applies them, the same way whether the tree came from the network or from a bundle.
-
-The pins, the trims and the fetching are the recipe's own (tandem/planners/runtime.py and the
-planner's recipe), so a bundle is byte-for-byte what an online install would fetch.
+A bundle carries the planner's sources only. The environment is still solved from conda-forge and PyPI
+at install, and TiPToP's SAM-2 comes from GitHub (see tandem/planners/bundle.py).
 
 Usage:
     python tools/bundle.py --planner tiptop --out /media/usb/planner-sources
@@ -29,87 +19,19 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
-import shutil
 import sys
-import tarfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 
 from tandem.core.errors import TandemError  # noqa: E402
-from tandem.planners import registry  # noqa: E402
-from tandem.planners.runtime import (  # noqa: E402
-    SOURCE_MARKER,
-    RecipeRuntime,
-    export_from_tree,
-    export_pinned,
-    tree_digest,
-    trim,
-)
-
-
-def recipe_of(planner: str):
-    runtime = registry.runtime(planner)
-    if runtime is None:
-        raise SystemExit(f"{planner} is pure Python; it has no sources to bundle")
-    if not isinstance(runtime, RecipeRuntime):
-        raise SystemExit(
-            f"{planner}'s runtime is not built from a recipe, so there is nothing to bundle from"
-        )
-    return runtime.recipe
+from tandem.planners.bundle import archive, bundle_sources, missing_sources, recipe_of  # noqa: E402,F401
 
 
 def bundle(planner: str, out: Path, *, only: list[str], local: dict[str, Path], log=print) -> dict:
-    recipe = recipe_of(planner)
-    names = [s.name for s in recipe.sources]
-    unknown = sorted(set(only) - set(names)) + sorted(set(local) - set(names))
-    if unknown:
-        raise SystemExit(f"{planner} has no source named {', '.join(unknown)}; it has {', '.join(names)}")
-
-    out.mkdir(parents=True, exist_ok=True)
-    scratch = out / ".bundle-scratch"
-    written = {}
-    try:
-        for source in recipe.sources:
-            if only and source.name not in only:
-                continue
-            dest = out / source.name
-            staged = scratch / source.name
-            shutil.rmtree(staged, ignore_errors=True)
-            if source.name in local:
-                # A checkout is an object store here too: the pinned commit is exported out of it,
-                # whatever its working tree holds.
-                checkout = local[source.name].expanduser().resolve()
-                origin = export_from_tree(source.pin, checkout, staged, scratch=scratch, log=log)
-                if not origin.get("verified"):
-                    raise SystemExit(
-                        f"{checkout} is not a git checkout; a bundle has to be of a verified commit"
-                    )
-            else:
-                origin = export_pinned(source.pin, staged, scratch=scratch, log=log)
-            dropped = trim(staged, source.trim, name=source.name, log=log)
-            marker = {
-                "name": source.name,
-                "url": source.pin.url,
-                "commit": source.pin.commit,
-                "planner": planner,
-                "trimmed": dropped,
-                "fetched_from": origin.get("origin"),
-                # Of the files as they leave here, trimmed. The install recomputes it, so the commit
-                # above is recorded as verified only for the files that were really exported from it.
-                "sha256": tree_digest(staged),
-            }
-            (staged / SOURCE_MARKER).write_text(json.dumps(marker, indent=2) + "\n")
-            shutil.rmtree(dest, ignore_errors=True)
-            staged.rename(dest)
-            size = sum(f.stat().st_size for f in dest.rglob("*") if f.is_file() and not f.is_symlink())
-            log(f"{source.name}: {source.pin.short()} -> {dest}  ({size / 1e6:.1f} MB)")
-            written[source.name] = marker
-    finally:
-        shutil.rmtree(scratch, ignore_errors=True)
-    return written
+    """Kept for scripts written against this file: ``tandem.planners.bundle.bundle_sources``."""
+    return bundle_sources(planner, out, only=only, local=local, log=log)
 
 
 def main() -> int:
@@ -139,17 +61,18 @@ def main() -> int:
 
     out = args.out.expanduser().resolve()
     try:
-        written = bundle(args.planner, out, only=args.only, local=local)
+        written = bundle_sources(args.planner, out, only=args.only, local=local)
+        missing = missing_sources(args.planner, out)
     except TandemError as exc:
         raise SystemExit(f"{exc.message}\n{exc.hint or ''}".strip()) from None
 
     if args.archive:
-        archive = out.with_name(out.name + ".tar.gz")
-        with tarfile.open(archive, "w:gz") as tar:
-            for name in written:
-                tar.add(out / name, arcname=name)
-        print(f"archive: {archive}  ({archive.stat().st_size / 1e6:.1f} MB)")
-    print(f"\nInstall from it with:  tandem planners install {args.planner} --sources {out}")
+        path = archive(out, written)
+        print(f"archive: {path}  ({path.stat().st_size / 1e6:.1f} MB)")
+    if missing:
+        print(f"\n{out} does not hold {', '.join(missing)} yet: an install from it needs every source.")
+    else:
+        print(f"\nInstall from it with:  tandem planners install {args.planner} --sources {out}")
     return 0
 
 

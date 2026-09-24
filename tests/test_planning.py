@@ -571,22 +571,19 @@ def test_a_leg_is_not_gated_on_an_object_only_a_later_human_phase_names():
     assert "blue_cloth" in walk.objects_needed_now()
 
 
-def test_a_name_the_plan_already_owns_is_never_a_re_binding_candidate():
-    # The re-binding pool is `detected - scene_types.all_names`, NOT `detected - objects_named()`.
-    # objects_named() covers only the phases still to come, so an object named solely by a COMPLETED
-    # phase drops out of it while remaining a plan object -- and offering it as a target lets
-    # match_drifted_names fold two objects into one, pointing this leg at the thing the robot has
-    # already put away.
+def test_a_name_the_plan_already_owns_stays_the_plans_after_its_phase_is_done():
+    # The facts the re-binding pool rests on. The pool is `detected - scene_types.all_names`, NOT
+    # `detected - objects_named()`: objects_named() covers only the phases still to come, so an object
+    # named solely by a COMPLETED phase drops out of it while remaining a plan object -- and offering it
+    # as a target lets match_drifted_names fold two objects into one, pointing this leg at the thing the
+    # robot has already put away. The pool itself is tested through the loop, in tests/test_rebind_pool.py.
     walk = _sort_walk()
     walk.advance()  # both robot phases done; only the human phase remains
 
     owned = walk.spec.scene_types.all_names
     assert {"blue_toy", "green_toy"} <= owned, "the sorted toys are still the plan's objects"
     assert not ({"blue_toy", "green_toy"} & walk.objects_named()), "but no remaining phase names them"
-
-    detected = {"blue_toy", "green_toy", "blue_bowl", "green_bowl", "table", "red_ball"}
-    assert sorted(detected - owned) == ["red_ball"]
-    # The rule the guard rests on: a nested pair would otherwise match.
+    # The rule the guard is there for: a nested pair would otherwise match.
     assert match_drifted_names(["green_toy"], ["toy"]) == {"green_toy": "toy"}
 
 

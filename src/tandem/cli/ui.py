@@ -11,7 +11,7 @@ import typer
 from tandem.cli import theme
 from tandem.core import profiles
 from tandem.core import settings as settings_mod
-from tandem.core.errors import TandemError
+from tandem.core.errors import TandemError, one_line
 
 
 def ui(
@@ -48,6 +48,15 @@ def serve(
             "There are no profiles yet, so there is nothing to show.",
             hint="Run `tandem init` (or `tandem init --viz-only` on a laptop).",
         )
+    if profile_name and profile_name != cfg.active_profile:
+        # The page works on the active profile -- its switcher, the runtime chip, the collect page's
+        # sessions all read it -- so the profile asked for is made the active one, and said to be. Only
+        # passing it to the page left `tandem collect bread --web` collecting under whichever profile was
+        # active, while saying it was collecting under bread.
+        profiles.load(profile_name, require_installed=False)  # an unknown name: the not-found error, with the known ones
+        cfg.active_profile = profile_name
+        settings_mod.save(cfg)
+        theme.info(f"Active profile is now {profile_name!r}")
 
     port = _free_port(host, port)
     url = f"http://{host if host != '0.0.0.0' else 'localhost'}:{port}"
@@ -71,7 +80,7 @@ def serve(
 
     from tandem.server.app import create_app
 
-    app = create_app(initial_profile=active)
+    app = create_app()
     uvicorn.run(app, host=host, port=port, log_level="warning", access_log=False)
 
 
@@ -83,7 +92,7 @@ def _runtime_note(cfg, profile_name: str) -> str:
     try:
         planner, runtime = planner_runtime(profile_name=profile_name, settings=cfg)
     except TandemError as exc:
-        return f"unknown — {exc.message.splitlines()[0]}"
+        return f"unknown — {one_line(exc.message)}"
     if runtime is None:
         return f"{planner} is pure Python — collection available"
     if runtime.status().installed:

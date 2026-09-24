@@ -2,6 +2,11 @@
 
 Lives in ``~/.config/tandem/config.toml``. Read on demand and cached; ``save()`` rewrites it
 with tomlkit so hand-written comments survive a programmatic edit.
+
+The cache is only as good as the file it came from: it is dropped whenever config.toml changes on
+disk (its modification time or size), so a long-lived process -- the web server -- never saves a copy
+older than what another process wrote since. The server once turned "Make default" into "and undo the
+`tandem config set` somebody ran in a terminal a minute ago".
 """
 
 from __future__ import annotations
@@ -42,7 +47,7 @@ class Settings(BaseModel):
     data_root: str = ""  # blank -> paths.default_data_root()
     runtime_dir: str = ""  # blank -> paths.default_runtime_dir()
     hf_org: str = ""
-    # The planner a NEW profile plans with (`tandem planners use NAME --default`). A profile, once it
+    # The planner a NEW profile plans with (`tandem planners default NAME`). A profile, once it
     # exists, names its own planner and this never overrides it. It is also whose runtime `tandem
     # init` builds before the first profile exists.
     default_planner: str = "tiptop"
@@ -89,14 +94,26 @@ class Settings(BaseModel):
 
 
 _cache: Settings | None = None
+# What config.toml was when _cache was read from it (None: there was no file).
+_stamp: tuple[str, int, int] | None = None
+
+
+def _file_stamp(path: Path) -> tuple[str, int, int] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (str(path), stat.st_mtime_ns, stat.st_size)
 
 
 def load(*, force: bool = False) -> Settings:
-    global _cache
-    if _cache is not None and not force:
-        return _cache
+    global _cache, _stamp
     path = paths.config_file()
-    if not path.is_file():
+    stamp = _file_stamp(path)
+    if _cache is not None and not force and stamp == _stamp:
+        return _cache
+    _stamp = stamp
+    if stamp is None:
         _cache = Settings()
         return _cache
     try:
@@ -117,15 +134,24 @@ def load(*, force: bool = False) -> Settings:
 
 
 def save(settings: Settings) -> Path:
-    """Write settings back, preserving comments and key order where possible."""
-    global _cache
+    """Write settings back, preserving comments and key order where possible.
+
+    Only what the file already has, or what differs from the default, is written. A key nobody set
+    stays out of config.toml: written anyway (``default_planner = "tiptop"`` on the first `tandem profile
+    use`), it made every older tandem on the same machine -- whose Settings refuse a key they do not
+    know -- fail every command, over a value nobody chose.
+    """
+    global _cache, _stamp
     path = paths.config_file()
     paths.ensure_dir(path.parent)
     doc = tomlkit.parse(path.read_text()) if path.is_file() else tomlkit.document()
+    defaults = Settings().model_dump(mode="python")
     for key, value in settings.model_dump(mode="python").items():
-        doc[key] = value
+        if key in doc or value != defaults.get(key):
+            doc[key] = value
     path.write_text(tomlkit.dumps(doc))
     _cache = settings
+    _stamp = _file_stamp(path)
     return path
 
 

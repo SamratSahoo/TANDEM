@@ -58,18 +58,35 @@ tandem-shelfbot/
 
 Then:
 
+Install it into the environment tandem runs in: tandem only sees the entry points of its own
+environment, and the package depends on `tandem-tamp`, which is not on PyPI, so it resolves only
+where tandem is already installed. `tandem planners new` prints the right command for the tandem that
+ran it; by install method:
+
 ```bash
 cd tandem-shelfbot
-pytest                          # green as generated: `pythonpath = ["src"]` means no install is needed
-pip install -e ".[test]"        # into the environment tandem runs in; the entry point is what tandem reads
+pipx inject tandem-tamp --editable . pytest                   # tandem installed with pipx
+uv tool install --reinstall git+https://github.com/SamratSahoo/tandem.git \
+    --with-editable . --with pytest                           # tandem installed with `uv tool`
+pip install -e ".[test]"                                      # a virtualenv tandem is installed in, active
+```
+
+Then, with that environment's Python (the path `planners new` printed; `pytest` on your PATH may be
+another environment's, which has no tandem to import):
+
+```bash
+python -m pytest                # tandem's conformance kit: green as generated
 tandem planners list            # shelfbot is listed, "no runtime needed"
 tandem planners info shelfbot   # its goal language, as the phase planner will see it
 tandem planners use shelfbot    # the active profile now plans with it
 ```
 
-`tandem planners use` switches the profile's `planner.backend` and removes the previous planner's
-`planner.options`, naming them, since the new planner would refuse them. Switching back gives the old
-planner its defaults. It warns, and does not refuse, when the planner is not installed yet.
+`tandem planners use` switches the profile's `planner.backend`. The previous planner's
+`planner.options` leave profile.yml, named, since the new planner would refuse them; they are kept
+beside it in `planner-options.<planner>.yml`, and switching back restores them (checked again by that
+planner). `--option KEY=VALUE` gives the new planner a setting it requires. It warns, and does not
+refuse, when the planner is not installed yet, and it works from the profile's file as written, so it
+also repairs a profile that names a planner this machine no longer has.
 
 Then replace each `TODO`, in the order the generated README lists them, and keep `pytest` green:
 
@@ -465,13 +482,15 @@ RECIPE = RuntimeRecipe(
 - **Status** compares `.tandem-runtime.json` with the recipe. A tandem upgrade that moves a pin shows
   the planner as `outdated` in `tandem planners list`, with the command that rebuilds it. That is
   better than an ImportError forty seconds into a warm-up.
-- **Offline installs.** A workstation with no network installs from a directory holding one
-  checkout or export per source, named as the recipe names them:
-  `tandem planners install NAME --sources DIR`, or `$TANDEM_PLANNER_SOURCES=DIR`. From a checkout of
-  the tandem repository, on a machine that can reach the sources, `python tools/bundle.py --planner
-  NAME --out DIR` makes one; each export carries a marker naming its commit and a digest of its
-  files, which the install checks. While a sources directory is in force nothing is fetched: a
-  missing source is an error, not a hang.
+- **Sources from a directory.** A workstation that cannot reach the sources takes them from a
+  directory holding one checkout or export per source, named as the recipe names them:
+  `tandem planners install NAME --sources DIR`, or `$TANDEM_PLANNER_SOURCES=DIR`. On a machine that
+  can reach them, `tandem planners bundle NAME --out DIR` makes one with the same tandem version (a
+  bundle is checked against the installing tandem's pins); each export carries a marker naming its
+  commit and a digest of its files, both of which the install checks. While a sources directory is in
+  force no source is fetched: a missing one is an error, not a hang. The environment is not in the
+  bundle: `pixi install` still solves it from conda-forge and PyPI (and any git dependency its lock
+  names), so this spares the source fetch, not the network.
 - **Assets** are small files the planner package itself ships (as package data) and the runtime
   needs at a fixed path. TiPToP ships two DATAFARM checkpoints this way, because their source
   repository is private.
@@ -491,7 +510,13 @@ when the arm is about to move. What `validate_options` returns is what the profi
 validated again on every read, so it must accept its own output unchanged. For options with
 structure, override it; a pydantic model is the natural tool. Raise `TandemError`, or `ValueError`
 (a pydantic `ValidationError` is one). Error locations are shown under `options.`, so a pydantic
-error at `tamp` reads as `planner.options.tamp`.
+error at `tamp` reads as `planner.options.tamp`. What it returns is written into profile.yml as it
+stands, so it must be plain data -- mappings with string keys, lists, strings, numbers, booleans and
+None: from a pydantic model, return `model_dump(mode="json")`. A `Path`, an `Enum` or a numpy value is
+refused when the profile loads (`registry.options_for`), and the conformance kit fails it. A setting
+with no sensible default (a robot's address) may be required: refuse `{}` with a `TandemError` naming
+it. `tandem planners use NAME --option KEY=VALUE` is then how a person supplies it, and `planners use`
+or `profile create --planner` without it is refused with that hint rather than crashing.
 
 **Showing them.** `describe_options(profile, *, settings=None)` returns an `OptionsView`, which
 `tandem profile show`, the web editor and the session header all use:
@@ -520,8 +545,10 @@ profile:                              # settings, spelled as a profile spells th
     options: {...}                    # under planner:, only options: -- the planner is chosen with --planner
 ```
 
-A preset may not state `name`, `version` or `description`, and a planner's preset may not state
-`planner.backend`. tandem's own presets may not state `planner` at all. A planner's preset with the
+A preset may not state `name`, `version` or `description`. A planner's preset may state
+`planner.options` and nothing else -- not `hitl`, `cameras` or the task, which would silently win over
+tandem's half it extends -- and not `planner.backend`. tandem's own presets may not state `planner` at
+all. A planner's preset with the
 same name as one of tandem's (tandem ships `paper`) must extend it, so tandem's half is never
 silently dropped for one planner. Ship the directory as package data: in
 `pyproject.toml`, `[tool.setuptools.package-data]` with a glob such as `"tandem_arm" =
@@ -564,10 +591,11 @@ next listing, an editable one (`pip install -e .`) included: the `.pth` file tha
 path is read then.
 
 Then `planner: {backend: arm}` in a profile (or `tandem planners use arm`) is all it takes.
-`tandem planners use arm --default` also makes it the planner every new profile gets
-(`settings.default_planner`). Over HTTP, `GET /api/planners` and `GET /api/planners/{name}` return
-what `tandem planners list/info --json` print. `POST /api/planners/{name}/use` and
-`POST /api/planners/{name}/default` do what `use` and `--default` do. Installing is deliberately not
+`tandem planners default arm` makes it the planner every new profile gets
+(`settings.default_planner`) and changes no profile; `tandem planners use arm --default` does both,
+switching the active profile too. Over HTTP, `GET /api/planners` and `GET /api/planners/{name}` return
+what `tandem planners list/info --json` print. `POST /api/planners/{name}/use` (body: `profile`,
+`options`) and `POST /api/planners/{name}/default` do what `use` and `default` do. Installing is deliberately not
 an endpoint: every catalog row carries the `install_command` to run in a terminal.
 
 ---
@@ -679,7 +707,7 @@ phase planning needs of it, with two class switches that are on by default:
 
 Turn one off, visibly, only for a planner that is never run that way. The scaffold returns a
 stand-in image for both until you wire the real cameras in. Before collecting with phase planning
-on, run a session with `--no-execute`, and run `tandem plan --backend NAME` on a photo of your
+on, run a session with `--no-execute`, and run `tandem plan --planner NAME` on a photo of your
 workspace.
 
 With `records_legs`, the recording is held to the documented shapes too: `[F,7]` joint arrays,
@@ -713,5 +741,5 @@ or not the leg records.
       overwrite `PYTHONPATH`.
 - [ ] Recipe pins are full commits, and every trim and patch says why.
 - [ ] `OPTIONS` or `validate_options` refuses what the planner does not read.
-- [ ] `pytest` is green. `tandem planners info NAME` shows what you meant. `tandem plan --backend
+- [ ] `pytest` is green. `tandem planners info NAME` shows what you meant. `tandem plan --planner
       NAME` decomposes a real instruction into phases your planner can carry out.

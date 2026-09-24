@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from planner_sources import planner_sources
+from planner_sources import planner_sources, skip_or_fail
 
 from tandem.core.errors import TandemError
 from tandem.planners import registry
@@ -88,7 +88,7 @@ def test_the_declaration_matches_the_real_cutamp_domain():
             get_initial_state,
         )
     except Exception as exc:  # pragma: no cover - the symbolic layer needs no deps, but be kind
-        pytest.skip(f"cuTAMP's symbolic layer is not importable here: {exc}")
+        skip_or_fail(f"cuTAMP's symbolic layer is not importable here: {exc}")
     finally:
         sys.path.remove(str(cutamp_tree))
         # Leave sys.modules as it was found. This is the one test that imports a planner on purpose,
@@ -329,7 +329,7 @@ def test_every_symbol_the_sidecar_imports_exists_in_the_pinned_planner():
         # written against the clean upstream. Four of the functions it calls (_planning_robot_types,
         # home_all_arms, _execute_plan_recorded, resolve_max_motion_refine_attempts) are
         # upstream-only, so the check is meaningless against the fork.
-        pytest.skip("these planner sources are the fork; the sidecar targets the clean upstream")
+        skip_or_fail("these planner sources are the fork; the sidecar targets the clean upstream")
 
     def module_path(dotted: str) -> Path | None:
         root = sources / ("tiptop" if dotted.startswith("tiptop") else "cuTAMP")
@@ -412,7 +412,7 @@ def test_the_sidecar_calls_the_planner_with_the_right_arguments():
     """
     sources = planner_sources("tiptop/tiptop/tiptop_run.py", "cuTAMP/cutamp")
     if (sources / "tiptop" / "tiptop" / "hitl").is_dir():
-        pytest.skip("these planner sources are the fork; the sidecar targets the clean upstream")
+        skip_or_fail("these planner sources are the fork; the sidecar targets the clean upstream")
 
     tree = ast.parse(sidecar_path().read_text())
 

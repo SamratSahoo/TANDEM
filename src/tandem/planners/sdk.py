@@ -510,7 +510,12 @@ class Planner(abc.ABC):
         name and returns the rest unchanged. Override it for options with structure or types (a
         pydantic model is the natural tool) and raise ``TandemError``, or ``ValueError`` -- a pydantic
         ``ValidationError`` is one -- naming what is wrong. It must accept its own output unchanged:
-        a saved profile is validated again when it is read back.
+        a saved profile is validated again when it is read back. And its output must be plain data --
+        mappings with string keys, lists, strings, numbers, booleans, None -- because it is written
+        into profile.yml as it stands: from a pydantic model, return ``model_dump(mode="json")``. A
+        Path or an Enum is refused (``registry.options_for``). A setting with no sensible default (a
+        robot's address) may be required: refuse ``{}`` with a TandemError naming it, and `tandem
+        planners use NAME --option KEY=VALUE` is how a person supplies it.
         """
         cls.check_options(options)
         return dict(options or {})

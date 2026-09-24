@@ -38,6 +38,7 @@ export const api = {
   deleteProfile: (name, purge) =>
     request("DELETE", `/profiles/${encodeURIComponent(name)}${purge ? "?purge=true" : ""}`),
   setActive: (name) => request("POST", "/profiles/active", { name }),
+  presets: (planner) => request("GET", `/presets${planner ? `?planner=${encodeURIComponent(planner)}` : ""}`),
 
   // ---- trajectories
   trajectories: (profile, status) => {

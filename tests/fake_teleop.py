@@ -32,17 +32,27 @@ def read_line():
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    # Strict, as the real driver's tyro parser is: an unknown flag -- or an abbreviation of one -- is an
+    # error, not ignored. A lenient stand-in is how a renamed flag once passed every hand-off test and
+    # stopped every hand-off on a robot (tests/test_teleop_argv.py checks the real driver's own list).
+    parser = argparse.ArgumentParser(allow_abbrev=False)
     parser.add_argument("--events-file", required=True)
     parser.add_argument("--output-root", required=True)
     parser.add_argument("--instruction", default="")
     parser.add_argument("--trajectory-id", default="")
+    parser.add_argument("--device", default="vr")
+    parser.add_argument("--controller", default="right")
+    parser.add_argument("--keep-pose", action="store_true")
+    parser.add_argument("--hand-camera-id", default="")
+    parser.add_argument("--external-camera-id", default="")
+    parser.add_argument("--external-2-camera-id", default="")
+    # The stand-in's own: refuse the first start, as a headset that is not on yet does.
     parser.add_argument("--refuse-first", action="store_true")
     # The driver's phase stamp, written into _meta.json only when given, as the driver does.
     parser.add_argument("--phase-index", type=int, default=None)
     parser.add_argument("--n-phases", type=int, default=None)
     parser.add_argument("--phase-description", default=None)
-    args, _ = parser.parse_known_args()
+    args = parser.parse_args()
 
     events = Path(args.events_file)
     output_root = Path(args.output_root)

@@ -26,7 +26,7 @@ from rich.text import Text
 
 from tandem.cli import theme
 from tandem.core import settings as settings_mod
-from tandem.core.errors import ProfileError
+from tandem.core.errors import ProfileError, one_line
 
 app = typer.Typer(no_args_is_help=True, help="Who carries out a human phase.")
 
@@ -54,7 +54,7 @@ def profile_executor(profile_name: str | None = None) -> dict:
     try:
         profile = profiles.load(name)
     except ProfileError as exc:
-        out["problem"] = exc.message.splitlines()[0]
+        out["problem"] = one_line(exc.message)
         return out
     out.update(executor=profile.hitl.human_executor, phase_planning=profile.hitl.enabled)
     return out
@@ -80,6 +80,7 @@ def executor_row(info: Any, *, active: bool) -> dict:
 
 def catalog_payload(*, profile_name: str | None = None) -> dict:
     """Every human executor, as `tandem executors list --json` and the web UI show it. JSON-safe."""
+    from tandem.core import profiles
     from tandem.executors import base as executors
 
     # Scanned afresh: in the web server's long-lived process, a package installed since the last
@@ -96,6 +97,7 @@ def catalog_payload(*, profile_name: str | None = None) -> dict:
         "profile_executor": current["executor"],
         "phase_planning": current["phase_planning"],
         "profile_problem": current["problem"],
+        "profile_exists": profiles.exists(current["profile"]),
         "executors": rows,
     }
 
@@ -105,6 +107,9 @@ def use_executor(name: str, *, profile_name: str | None = None) -> dict:
 
     An unknown name, or an installed executor that will not load, is refused with the registry's own
     error. One whose requirements are unmet on this machine is not: the result lists them.
+
+    Works from the profile's file as written (``profiles.set_human_executor``), so it also repairs a
+    profile naming an executor this machine no longer has -- the command that profile's error points at.
     """
     from tandem.core import profiles
     from tandem.executors import base as executors
@@ -112,20 +117,16 @@ def use_executor(name: str, *, profile_name: str | None = None) -> dict:
     executors.refresh()
     info = executors.info(name)
     target = profile_name or settings_mod.load().active_profile
-    profile = profiles.load(target)
-    previous = profile.hitl.human_executor
-    if previous != name:
-        profile.hitl.human_executor = name
-        profiles.save(profile)
+    switched = profiles.set_human_executor(target, name)
     return {
         "executor": name,
         "display_name": info.display_name,
         "profile": target,
-        "previous": previous,
-        "changed": previous != name,
+        "previous": switched["previous"],
+        "changed": switched["changed"],
         "status": READY if not info.unmet else NEEDS_SETUP,
         "unmet": list(info.unmet),
-        "phase_planning": profile.hitl.enabled,
+        "phase_planning": switched["profile"].hitl.enabled,
     }
 
 
@@ -164,7 +165,10 @@ def list_executors(as_json: bool = _AS_JSON, profile_name: str = _PROFILE) -> No
                 "phase planning is off in that profile, so it has no human phases until it is on",
                 "hitl.enabled",
             )
-    theme.next_steps([("tandem executors use NAME", f"hand the human phases of profile {profile!r} to it")])
+    if payload["profile_exists"]:
+        # Offered for a profile that does not load too: `use` works from its file, and repairs one that
+        # names an executor this machine no longer has.
+        theme.next_steps([("tandem executors use NAME", f"hand the human phases of profile {profile!r} to it")])
 
 
 @app.command("use", help="Make a profile's human phases run with an executor.")

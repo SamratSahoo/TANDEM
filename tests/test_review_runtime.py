@@ -356,17 +356,12 @@ def test_a_runtime_from_before_keeps_the_checkpoint_already_in_its_tree(upstream
 
 
 def _bundle(upstream, shipped, tmp_path: Path, monkeypatch) -> Path:
-    """What `python tools/bundle.py` makes, made by it."""
-    import importlib.util
+    """What `tandem planners bundle` makes (and `python tools/bundle.py`, a wrapper of it), made by it."""
+    from tandem.planners import bundle as bundle_mod
 
-    spec = importlib.util.spec_from_file_location(
-        "tandem_bundle_tool", Path(__file__).resolve().parents[1] / "tools" / "bundle.py"
-    )
-    tool = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(tool)
-    monkeypatch.setattr(tool, "recipe_of", lambda planner: toy(upstream, shipped))
+    monkeypatch.setattr(bundle_mod, "recipe_of", lambda planner: toy(upstream, shipped))
     out = tmp_path / "usb"
-    tool.bundle("toy", out, only=[], local={"toy": upstream.work}, log=lambda _line: None)
+    bundle_mod.bundle_sources("toy", out, only=[], local={"toy": upstream.work}, log=lambda _line: None)
     return out
 
 

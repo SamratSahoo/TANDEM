@@ -77,7 +77,9 @@ def check_platform() -> Check:
             "operating system",
             WARN,
             system,
-            "Collection needs Linux (CUDA, the ZED SDK and the robot stack). Visualization works anywhere.",
+            # Not "collection needs Linux": that is TiPToP's stack, and a planner states its own needs.
+            "Collection with the planner and robot stack tandem ships (TiPToP: CUDA, the ZED SDK) needs "
+            "Linux; `tandem planners info NAME` says what a planner needs. Visualization works anywhere.",
         )
     return Check("operating system", OK, f"{system} {platform.release()}")
 
@@ -97,7 +99,8 @@ def check_disk(path: Path, need_gb: float = 25.0) -> Check:
             "disk space",
             FAIL if free_gb < 10 else WARN,
             detail,
-            f"The runtime needs roughly {need_gb:.0f} GB (CUDA toolkit, torch, compiled kernels).",
+            f"A planner runtime can need roughly {need_gb:.0f} GB (TiPToP's: the CUDA toolkit, torch, "
+            "compiled kernels).",
             group="runtime",
         )
     return Check("disk space", OK, detail, group="runtime")

@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
-import subprocess
 import sys
 
 import typer
@@ -151,8 +149,9 @@ def edit() -> None:
     paths.ensure_dir(path.parent)
     if not path.is_file():
         settings_mod.save(settings_mod.load())
-    editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "vi"
-    subprocess.call([editor, str(path)])
+    from tandem.cli.editor import open_in_editor
+
+    open_in_editor(path)
     # Re-read so a syntax error is reported now, not at the next command.
     settings_mod.load(force=True)
     theme.ok("config is valid", str(path))

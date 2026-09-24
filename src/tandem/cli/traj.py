@@ -17,6 +17,29 @@ app = typer.Typer(no_args_is_help=True, help="Inspect collected trajectories.")
 
 _STATUS_STYLE = {"success": "ok", "failure": "err", "eval": "warn"}
 
+# Every command below reads a profile only to find its trajectories, so each loads it read-only
+# (``require_installed=False``): a profile collected with a planner or executor this machine does not
+# have is still browsed, relabeled, merged and copied here -- a laptop is where that is done.
+
+
+def is_human_segment(segment: dict) -> bool:
+    """Whether a merged trajectory's segment is a human phase's leg, whoever carried it out.
+
+    Any source other than the planner's ("tamp") is a human executor's -- teleop, or a policy standing in
+    for the person (``executors.SEGMENT_SOURCES``). Counting only "teleop" showed a policy executor's
+    legs as the planner's, and its hand-offs as none.
+    """
+    return str(segment.get("source") or "tamp") != "tamp"
+
+
+def segment_label(source: str) -> str:
+    """How a segment's source is shown: TAMP, human, or human with the executor kind (policy)."""
+    if source in ("tamp", "", None):
+        return "[accent]TAMP[/accent]"
+    if source == "teleop":
+        return "[violet]human[/violet]"
+    return f"[violet]human ({source})[/violet]"
+
 
 @app.command("list", help="List a profile's trajectories, newest first.")
 def list_trajectories(
@@ -25,7 +48,7 @@ def list_trajectories(
     limit: int = typer.Option(30, "--limit", "-n", help="How many to show (0 for all)."),
     as_json: bool = typer.Option(False, "--json", help="Machine-readable output."),
 ) -> None:
-    profile = profiles.load(profile_name)
+    profile = profiles.load(profile_name, require_installed=False)
     if status and status not in profiles.STATUSES:
         raise TandemError(f"Unknown status {status!r}.", hint=f"One of: {', '.join(profiles.STATUSES)}")
 
@@ -47,7 +70,7 @@ def list_trajectories(
         chip = f"[{style}]{traj.status}[/{style}]"
         flags = []
         if traj.segments and len(traj.segments) > 1:
-            human = sum(1 for s in traj.segments if s.get("source") == "teleop")
+            human = sum(1 for s in traj.segments if is_human_segment(s))
             flags.append(f"[violet]hand-off ×{human}[/violet]")
         if not traj.complete:
             flags.append("[faint]incomplete[/faint]")
@@ -81,7 +104,7 @@ def show(
     profile_name: str = typer.Option(None, "--profile", "-p", help="Profile name."),
     as_json: bool = typer.Option(False, "--json", help="Machine-readable output."),
 ) -> None:
-    profile = profiles.load(profile_name)
+    profile = profiles.load(profile_name, require_installed=False)
     traj = trajectories.find(profile, traj_id)
 
     if as_json:
@@ -110,8 +133,7 @@ def show(
         theme.heading("hand-off legs", f"{len(traj.segments)} segments merged into one trajectory")
         seg_table = theme.table("#", "source", "timestamp", "frames", "video")
         for i, seg in enumerate(traj.segments):
-            source = seg.get("source", "?")
-            label = "[violet]human[/violet]" if source == "teleop" else "[accent]TAMP[/accent]"
+            label = segment_label(str(seg.get("source") or "tamp"))
             start, stop = seg.get("video_start"), seg.get("video_stop")
             span = f"{start:.1f}–{stop:.1f}s" if isinstance(start, (int, float)) and isinstance(stop, (int, float)) else "—"
             seg_table.add_row(str(i + 1), label, str(seg.get("timestamp", "")), str(seg.get("n_frames", "")), span)
@@ -136,12 +158,58 @@ def show(
             rows.append(("velocity at rail", f"{stats['frac_clipped']:.1%} of commanded elements clipped to ±1"))
         theme.kv(rows)
 
-    theme.next_steps(
-        [
-            (f"tandem traj open {traj.id}", "3D replay of the plan in Rerun"),
-            ("tandem ui", "videos and charts in the browser"),
-        ]
-    )
+    steps = []
+    recorder, _ = recorded_by(traj, profile)
+    if can_replay(recorder):
+        steps.append((f"tandem traj open {traj.id}", f"replay it in {recorder}'s own viewer"))
+    steps.append(("tandem ui", "videos and charts in the browser"))
+    theme.next_steps(steps)
+
+
+def recorded_by(traj, profile) -> tuple[str, str]:
+    """(the planner that recorded ``traj``, how that is known).
+
+    Not simply the profile's planner: `tandem planners use` switches a profile and leaves its earlier
+    trajectories where they are, and a leg handed to another planner's viewer is either refused or,
+    worse, read as a rollout it is not. In order: the planner a leg says recorded it (``planner`` in
+    _meta.json), the one the trial's phase record names (hitl.json), the recorder a leg names as its
+    ``source`` when that is a planner this machine knows, and only then the profile's.
+    """
+    from tandem.planners import registry
+
+    known = set(registry.available())
+    meta = traj.meta or {}
+    if isinstance(meta.get("planner"), str) and meta["planner"]:
+        return meta["planner"], "the trajectory's _meta.json"
+    try:
+        stated = trajectories.read_hitl(traj.path).get("planner")
+    except Exception:
+        stated = None
+    if isinstance(stated, str) and stated:
+        return stated, "its hitl.json"
+    source = meta.get("source")
+    if isinstance(source, str) and source in known:
+        return source, "the recorder named in its _meta.json"
+    return profile.planner.backend, f"profile {profile.name!r}"
+
+
+def can_replay(planner: str) -> bool:
+    """Whether ``planner`` has a viewer of its own for `tandem traj open`. A planner written with the SDK
+    always HAS a replay method -- the base one, which refuses -- so that one does not count."""
+    from tandem.planners import registry
+
+    try:
+        factory = registry.factory(planner)
+    except TandemError:
+        return False
+    hook = getattr(factory, "replay", None)
+    if not callable(hook):
+        return False
+    from tandem.planners.sdk import Planner
+
+    if isinstance(factory, type) and issubclass(factory, Planner):
+        return getattr(factory.replay, "__func__", None) is not getattr(Planner.replay, "__func__", None)
+    return True
 
 
 @app.command("relabel", help="Move a trajectory between success, failure and eval.")
@@ -156,7 +224,7 @@ def relabel(
         "says it was overruled.",
     ),
 ) -> None:
-    profile = profiles.load(profile_name)
+    profile = profiles.load(profile_name, require_installed=False)
     traj = trajectories.find(profile, traj_id)
     old = traj.status
     updated = trajectories.relabel(profile, traj, status, force=force)
@@ -171,7 +239,7 @@ def remove(
     profile_name: str = typer.Option(None, "--profile", "-p", help="Profile name."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation."),
 ) -> None:
-    profile = profiles.load(profile_name)
+    profile = profiles.load(profile_name, require_installed=False)
     traj = trajectories.find(profile, traj_id)
     size_mb = trajectories.read(traj.path, with_size=True).size_bytes / 1e6
     theme.warn(f"{traj.id} ({traj.status}, {size_mb:.0f} MB) will be deleted. There is no undo.")
@@ -186,15 +254,20 @@ def open_(
     traj_id: str = typer.Argument(..., help="Timestamp id, or a unique prefix."),
     profile_name: str = typer.Option(None, "--profile", "-p", help="Profile name."),
 ) -> None:
-    """The viewer is the planner's (the profile's planner): TiPToP's replays the saved plan in Rerun,
-    inside its runtime, since it needs cuRobo and cuTAMP to load the robot model and the TAMP scene."""
+    """The viewer is the planner's -- the one that RECORDED the trajectory, which is not always the one the
+    profile plans with now (`recorded_by`). TiPToP's replays the saved plan in Rerun, inside its runtime,
+    since it needs cuRobo and cuTAMP to load the robot model and the TAMP scene."""
     from tandem.planners import registry
 
-    profile = profiles.load(profile_name)
+    profile = profiles.load(profile_name, require_installed=False)
     traj = trajectories.find(profile, traj_id)
     cfg = settings_mod.load()
-    theme.busy(f"Opening {traj.id} with {profile.planner.backend}", str(traj.path))
-    registry.replay(profile.planner.backend, traj.path, settings=cfg)
+    recorder, known_from = recorded_by(traj, profile)
+    if recorder != profile.planner.backend:
+        theme.info(f"Recorded by {recorder} ({known_from}); profile {profile.name!r} plans with "
+                   f"{profile.planner.backend} now")
+    theme.busy(f"Opening {traj.id} with {recorder}", str(traj.path))
+    registry.replay(recorder, traj.path, settings=cfg)
 
 
 @app.command("path", help="Print a trajectory's directory.")
@@ -202,7 +275,7 @@ def path_(
     traj_id: str = typer.Argument(..., help="Timestamp id, or a unique prefix."),
     profile_name: str = typer.Option(None, "--profile", "-p", help="Profile name."),
 ) -> None:
-    profile = profiles.load(profile_name)
+    profile = profiles.load(profile_name, require_installed=False)
     typer.echo(str(trajectories.find(profile, traj_id).path))
 
 
@@ -219,7 +292,7 @@ def merge(
     from tandem.core import merge as merge_mod
     from tandem.planners import registry
 
-    profile = profiles.load(profile_name)
+    profile = profiles.load(profile_name, require_installed=False)
     cfg = settings_mod.load()
     targets = [trajectory_id] if trajectory_id else merge_mod.pending_trajectory_ids(profile)
 
@@ -254,8 +327,8 @@ def copy(
     dest_profile: str = typer.Argument(..., help="Destination profile."),
     profile_name: str = typer.Option(None, "--profile", "-p", help="Source profile."),
 ) -> None:
-    source = profiles.load(profile_name)
-    dest = profiles.load(dest_profile)
+    source = profiles.load(profile_name, require_installed=False)
+    dest = profiles.load(dest_profile, require_installed=False)
     traj = trajectories.find(source, traj_id)
     target = dest.status_dir(traj.status) / traj.id
     if target.exists():
