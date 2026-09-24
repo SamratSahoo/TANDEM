@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+import threading
+from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -42,14 +43,29 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     from tandem.core import session as session_mod
 
     yield
-    still = await asyncio.to_thread(session_mod.manager().shutdown)
-    for session in still:
+    report_still_ending(await asyncio.to_thread(session_mod.manager().shutdown))
+
+
+def report_still_ending(sessions: Iterable) -> None:
+    """Say which sessions were still ending as the server exited, and what that leaves to be done."""
+    for session in sessions:
         log.warning(
             "session %s (%s) was still ending when the server exited; its arm may not be parked, and "
             "`tandem traj merge` joins a trial whose merge did not finish",
             session.id,
             session.profile.name,
         )
+
+
+def close_streams(app: FastAPI) -> None:
+    """End every session event stream ``app`` is serving, and any it is asked for from now on.
+
+    For the server to call as it starts shutting down. A collect page's stream otherwise stays open
+    until its session has ended -- a park and a merge of gigabytes of video, far longer than the
+    server gives open connections -- and the server then cancelled it, printing an error and a
+    traceback on the terminal of every Ctrl-C that went exactly as it should.
+    """
+    app.state.closing.set()
 
 
 def create_app() -> FastAPI:
@@ -62,6 +78,9 @@ def create_app() -> FastAPI:
         openapi_url="/api/openapi.json",
         lifespan=_lifespan,
     )
+    # Set by `close_streams`. A threading.Event, not an asyncio one: this app outlives any one event loop
+    # (a test client runs it on a loop of its own each time), and the streams only ever poll it.
+    app.state.closing = threading.Event()
 
     @app.exception_handler(SessionConflict)
     async def _session_conflict(_request: Request, exc: SessionConflict) -> JSONResponse:

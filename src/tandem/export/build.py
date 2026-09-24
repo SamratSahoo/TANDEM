@@ -21,7 +21,6 @@ import json
 import logging
 import os
 import shutil
-import tempfile
 import uuid
 from pathlib import Path
 from typing import NamedTuple
@@ -218,9 +217,14 @@ def build_dataset(
     _check_replaceable(dataset_root, force=force)
 
     dataset_root.parent.mkdir(parents=True, exist_ok=True)
+    _warn_leftovers(dataset_root)
     # Beside the destination, so the swap at the end is a rename within one directory -- never a copy
-    # across filesystems that could fail half-way.
-    staging = Path(tempfile.mkdtemp(prefix=f".{dataset_root.name}.building-", dir=dataset_root.parent))
+    # across filesystems that could fail half-way. Made with a plain mkdir, which honours the umask: the
+    # rename makes this directory the dataset's root, and `tempfile.mkdtemp` makes every directory 0700,
+    # so a dataset the exporter's group and a training container could read became readable by the
+    # exporter alone.
+    staging = _sibling(dataset_root, "building")
+    staging.mkdir()
     written = 0
     writer = None
     try:
@@ -303,6 +307,44 @@ def _check_replaceable(dataset_root: Path, *, force: bool) -> None:
     )
 
 
+def _sibling(dataset_root: Path, kind: str) -> Path:
+    """A fresh hidden name beside ``dataset_root`` for a dataset being built or one being replaced."""
+    return dataset_root.with_name(f".{dataset_root.name}.{kind}-{uuid.uuid4().hex[:8]}")
+
+
+def _warn_leftovers(dataset_root: Path) -> None:
+    """Say what an export that did not finish left beside ``dataset_root``. Nothing is deleted.
+
+    A build killed outright (the OOM killer mid-encode, a closed terminal, a power cut) leaves its
+    staging directory, gigabytes of video under a name `ls` does not show, and nothing ever mentioned
+    it again. Not removed here, because an export to the same place still running has one too.
+    """
+    prefixes = {f".{dataset_root.name}.{kind}-": kind for kind in ("building", "replaced")}
+    try:
+        names = sorted(os.listdir(dataset_root.parent))
+    except OSError:
+        return
+    for name in names:
+        kind = next((kind for prefix, kind in prefixes.items() if name.startswith(prefix)), None)
+        if kind is None:
+            continue
+        path = dataset_root.parent / name
+        if kind == "building":
+            log.warning(
+                "%s is what an export that did not finish (or one still running) left; delete it by hand",
+                path,
+            )
+        elif kind == "replaced" and not os.path.lexists(dataset_root):
+            log.warning(
+                "%s is the dataset an export was replacing when it stopped, and nothing is at %s: it is the "
+                "last complete one, so move it back there to keep it",
+                path,
+                dataset_root,
+            )
+        elif kind == "replaced":
+            log.warning("%s is a dataset an export replaced and did not delete; delete it by hand", path)
+
+
 def _swap_in(staging: Path, dataset_root: Path) -> None:
     """Put the finished dataset at ``dataset_root``, replacing whatever was there.
 
@@ -313,13 +355,28 @@ def _swap_in(staging: Path, dataset_root: Path) -> None:
     if not os.path.lexists(dataset_root):
         os.rename(staging, dataset_root)
         return
-    aside = dataset_root.with_name(f".{dataset_root.name}.replaced-{uuid.uuid4().hex[:8]}")
-    os.rename(dataset_root, aside)
+    aside = _sibling(dataset_root, "replaced")
     try:
+        os.rename(dataset_root, aside)
         os.rename(staging, dataset_root)
     except BaseException:
-        os.rename(aside, dataset_root)
+        # How far the renames got is read off the disk, not from which line raised: Python acts on a
+        # Ctrl-C as a call returns, so one lands just after a rename as readily as during it. Going by the
+        # line, a Ctrl-C after the first rename (then outside this block) had the new dataset deleted as
+        # a failed build and left the old one at a hidden name; one after the second tried to move the
+        # old one back onto the new one, and came out as an OSError.
+        if not os.path.lexists(staging):
+            # Both happened: the new dataset is in place, and there is nothing to undo.
+            log.warning("Interrupted, but the new dataset was already in place at %s", dataset_root)
+            _discard(aside)
+        elif os.path.lexists(aside) and not os.path.lexists(dataset_root):
+            # Only the first: the old one goes back.
+            os.rename(aside, dataset_root)
         raise
+    _discard(aside)
+
+
+def _discard(aside: Path) -> None:
     try:
         if aside.is_dir() and not aside.is_symlink():
             shutil.rmtree(aside)

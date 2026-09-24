@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from planner_sources import planner_sources, skip_or_fail
+from planner_sources import importable_from, planner_sources, skip_or_fail
 
 from tandem.core.errors import TandemError
 from tandem.planners import registry
@@ -77,26 +77,18 @@ def test_the_declaration_matches_the_real_cutamp_domain():
     achieve would sail past the feasibility check and into a search with no bound.
     """
     cutamp_tree = planner_sources("cuTAMP/cutamp/tamp_domain.py") / "cuTAMP"
-    sys.path.insert(0, str(cutamp_tree))
-    already = set(sys.modules)
-    try:
-        from cutamp.tamp_domain import (
-            Movable,
-            Surface,
-            all_tamp_fluents,
-            all_tamp_operators,
-            get_initial_state,
-        )
-    except Exception as exc:  # pragma: no cover - the symbolic layer needs no deps, but be kind
-        skip_or_fail(f"cuTAMP's symbolic layer is not importable here: {exc}")
-    finally:
-        sys.path.remove(str(cutamp_tree))
-        # Leave sys.modules as it was found. This is the one test that imports a planner on purpose,
-        # and a `cutamp` left behind makes any later "did that import a planner?" assertion depend
-        # on test order.
-        for name in set(sys.modules) - already:
-            if name.split(".")[0] == "cutamp":
-                del sys.modules[name]
+    # The one test that imports a planner on purpose, from what may be the developer's own runtime.
+    with importable_from(cutamp_tree, "cutamp"):
+        try:
+            from cutamp.tamp_domain import (
+                Movable,
+                Surface,
+                all_tamp_fluents,
+                all_tamp_operators,
+                get_initial_state,
+            )
+        except Exception as exc:  # pragma: no cover - the symbolic layer needs no deps, but be kind
+            skip_or_fail(f"cuTAMP's symbolic layer is not importable here: {exc}")
 
     from tandem.planners.tiptop.capabilities import ACHIEVABLE, ALL_FLUENTS, CAPABILITIES
 

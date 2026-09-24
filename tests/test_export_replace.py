@@ -170,6 +170,96 @@ def test_the_swap_puts_the_old_dataset_back_when_the_new_one_cannot_be_moved_in(
     assert sorted(p.name for p in tmp_path.iterdir()) == [".data.building-x", "data"]
 
 
+def _interrupt_after(monkeypatch, which: str):
+    """os.rename that does its job and then raises KeyboardInterrupt, for the rename whose source is ``which``.
+
+    Python acts on a pending Ctrl-C as a call returns, so this is where one really lands.
+    """
+    import os
+
+    from tandem.export import build
+
+    rename = os.rename
+
+    def rename_then_interrupt(src, dst):
+        rename(src, dst)
+        if Path(src).name.startswith(which):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(build.os, "rename", rename_then_interrupt)
+
+
+def test_a_ctrl_c_as_the_old_dataset_is_moved_aside_puts_it_back(profile, tmp_path, monkeypatch):
+    """The first rename was outside the rollback: the new dataset was deleted as a failed build, and the
+    old one was left at a hidden name, with nothing at the destination and nothing said."""
+    _episode(profile, "2026-01-01_00-00-01")
+    _build(profile, tmp_path)
+    before = _files(_dataset(tmp_path))
+    _episode(profile, "2026-01-01_00-00-02")
+
+    _interrupt_after(monkeypatch, "data")
+    with pytest.raises(KeyboardInterrupt):
+        _build(profile, tmp_path)
+    assert _files(_dataset(tmp_path)) == before
+    assert _beside(tmp_path) == ["data"]
+
+
+def test_a_ctrl_c_as_the_new_dataset_is_moved_in_leaves_it_there(profile, tmp_path, monkeypatch):
+    """The rollback then tried to move the old one back onto the new one, and the Ctrl-C came out as
+    `OSError: Directory not empty`, with the export said to have failed and the old one left hidden."""
+    _episode(profile, "2026-01-01_00-00-01")
+    _build(profile, tmp_path)
+    _episode(profile, "2026-01-01_00-00-02")
+
+    _interrupt_after(monkeypatch, ".data.building-")
+    with pytest.raises(KeyboardInterrupt):
+        _build(profile, tmp_path)
+    assert _episodes_in(_dataset(tmp_path)) == 2, "the finished dataset is the one in place"
+    assert _beside(tmp_path) == ["data"], "the replaced dataset was left behind"
+
+
+def test_what_an_export_that_did_not_finish_left_is_named_and_kept(profile, tmp_path, caplog):
+    """A build killed outright leaves gigabytes under a name `ls` does not show; nothing ever said so."""
+    _episode(profile, "2026-01-01_00-00-01")
+    out = _dataset(tmp_path).parent
+    out.mkdir(parents=True)
+    (out / ".data.building-dead0000").mkdir()
+    (out / ".data.replaced-dead0000").mkdir()
+    (out / ".data.replaced-dead0000" / "meta").mkdir()
+    (out / ".other.building-dead0000").mkdir()
+
+    with caplog.at_level("WARNING", logger="tandem.export"):
+        _build(profile, tmp_path)
+    said = caplog.text
+    assert ".data.building-dead0000 is what an export that did not finish" in said
+    assert ".data.replaced-dead0000 is the dataset an export was replacing when it stopped" in said
+    assert "last complete one" in said
+    assert ".other." not in said, "another dataset's leftovers are its own export's to mention"
+    assert _beside(tmp_path) == [
+        ".data.building-dead0000",
+        ".data.replaced-dead0000",
+        ".other.building-dead0000",
+        "data",
+    ], "only this export's own staging directory is its to remove"
+
+
+def test_the_dataset_is_as_readable_as_any_directory_the_exporter_makes(profile, tmp_path):
+    """Staged with `tempfile.mkdtemp`, the root came out 0700 whatever the umask: a shared lab machine or a
+    training container running as another user got "permission denied" on it."""
+    import os
+    import stat
+
+    _episode(profile, "2026-01-01_00-00-01")
+    previous = os.umask(0o002)
+    try:
+        _build(profile, tmp_path)
+    finally:
+        os.umask(previous)
+    root = _dataset(tmp_path)
+    assert stat.S_IMODE(root.stat().st_mode) == 0o775
+    assert stat.S_IMODE(root.stat().st_mode) == stat.S_IMODE((root / "meta").stat().st_mode)
+
+
 # --- a directory tandem did not build ------------------------------------------------------------------
 
 

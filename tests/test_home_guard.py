@@ -72,3 +72,27 @@ def test_the_developers_own_environment_is_there_for_what_asks_for_it(monkeypatc
         assert os.environ.get("HOME") == home_guard.ORIGINAL["HOME"]
         assert os.environ["TANDEM_RUNTIME_DIR"] == "/the/test/says"
     assert os.environ["HOME"] == run_home and os.environ["TANDEM_RUNTIME_DIR"] == "/the/test/says"
+
+
+def test_a_planner_imported_from_a_runtime_leaves_no_bytecode_in_it(tmp_path):
+    """The cuTAMP domain check imported from the developer's runtime, which the guard watches, and wrote
+    `__pycache__` into it: the run failed after every runtime build, blaming a thread that outlived its test."""
+    import sys
+
+    from planner_sources import importable_from
+
+    tree = tmp_path / "cuTAMP"
+    (tree / "toyplanner" / "domain").mkdir(parents=True)
+    (tree / "toyplanner" / "__init__.py").write_text("")
+    (tree / "toyplanner" / "domain" / "__init__.py").write_text("from toyplanner.domain.facts import FLUENTS\n")
+    (tree / "toyplanner" / "domain" / "facts.py").write_text("FLUENTS = ('On', 'Holding')\n")
+    writes_bytecode = sys.dont_write_bytecode
+    before = home_guard.snapshot([tree])
+
+    with importable_from(tree, "toyplanner"):
+        from toyplanner.domain import FLUENTS
+
+    assert FLUENTS == ("On", "Holding")
+    assert home_guard.changes(before, home_guard.snapshot([tree])) == [], "the import wrote into the tree"
+    assert not any(name.split(".")[0] == "toyplanner" for name in sys.modules)
+    assert str(tree) not in sys.path and sys.dont_write_bytecode is writes_bytecode

@@ -1360,7 +1360,11 @@ class SessionManager:
         self._sessions: dict[str, Session] = {}
         self._lock = threading.RLock()
         # Set by `abandon`: the person at the terminal would rather quit now than wait for `shutdown`.
+        # Never cleared: the process is on its way out, and a Ctrl-C that came before the wait began is
+        # as much an answer as one that comes during it.
         self._abandoned = threading.Event()
+        # Set by `shutdown` as it starts: whoever called it has taken on ending the sessions.
+        self._shutting_down = threading.Event()
 
     def create(self, profile: Profile, **kwargs) -> Session:
         with self._lock:
@@ -1416,10 +1420,12 @@ class SessionManager:
         exits without this -- `tandem ui` on Ctrl-C did -- kills them where they stand: the arm left
         wherever the last plan put it, the hardware never released, a merge cut off half-way.
 
-        `abandon` cuts the wait short; a session still ending then is force-stopped, which at least
-        ends a leg in flight rather than leaving its process behind.
+        `abandon` cuts the wait short, whether it comes during the wait or before it began; a session
+        still ending then is force-stopped, which at least ends a leg in flight rather than leaving its
+        process behind. The flag used to be cleared here, so a Ctrl-C that landed before the wait
+        started was lost, and the wait ran its whole length.
         """
-        self._abandoned.clear()
+        self._shutting_down.set()
         self.stop_all()
         ending = [session for session in self.all() if session.running]
         deadline = time.monotonic() + timeout
@@ -1438,6 +1444,11 @@ class SessionManager:
     def abandon(self) -> None:
         """Stop waiting in `shutdown`: somebody asked twice to quit. Safe from a signal handler."""
         self._abandoned.set()
+
+    @property
+    def shutting_down(self) -> bool:
+        """Whether `shutdown` has been called: the sessions are being ended, by whoever called it."""
+        return self._shutting_down.is_set()
 
 
 _manager: SessionManager | None = None

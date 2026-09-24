@@ -127,10 +127,9 @@ def lerobot(
         for name, reason in result["skipped"]:
             table.add_row(name, f"[faint]{reason}[/faint]")
         theme.console().print(table)
+    # A build that writes nothing raises, so there is no "nothing to push" left to say here.
     if result["pushed"]:
         theme.ok("Pushed", f"https://huggingface.co/datasets/{repo_id}")
-    elif push:
-        theme.warn("Nothing to push", "no episodes were written")
 
 
 @app.command("manifest", help="Write a JSON index of a profile's trajectories.")

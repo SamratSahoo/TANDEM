@@ -110,24 +110,41 @@ def _server(config):
     """uvicorn's server, with the sessions told to stop as soon as it starts to shut down.
 
     Not only at the app's shutdown, which comes after every connection has closed: a collect page's
-    event stream closes when its session has ended, so the sessions are what have to go first. A
-    second Ctrl-C while they park and merge gives up the wait, as it does in `tandem collect`.
+    event stream stays open while its session is on, so the sessions are told to stop, and the streams
+    to close, first. A second Ctrl-C while they park and merge gives up the wait, as it does in
+    `tandem collect`: whatever is still ending is force-stopped.
     """
+    import asyncio
     import signal
 
     import uvicorn
 
     from tandem.core import session as session_mod
+    from tandem.server import app as app_mod
 
     class Server(uvicorn.Server):
         async def shutdown(self, sockets=None) -> None:
-            stopping = session_mod.manager().stop_all()
+            manager = session_mod.manager()
+            stopping = manager.stop_all()
             if stopping:
                 theme.busy(
                     f"Stopping {len(stopping)} session(s): parking the arm, finishing the episode merges",
                     "Ctrl-C again to quit now, leaving the arm where it is",
                 )
+            app_mod.close_streams(self.config.app)
             await super().shutdown(sockets)
+            if not manager.shutting_down:
+                # uvicorn skips the app's shutdown -- which ends the sessions -- when a second Ctrl-C
+                # came in while it was still closing connections. Nothing then force-stopped what was
+                # ending: the teleop driver, in a process group of its own, kept the arm and the
+                # cameras, and nothing said a merge was cut off. So it is run here. After that Ctrl-C
+                # (`abandon`, which holds) it does not wait: it force-stops what is still ending, and
+                # says so. Run as the app's own shutdown rather than beside it, which also lets the
+                # app finish instead of being cancelled at exit with a traceback.
+                await self.lifespan.shutdown()
+            if not manager.shutting_down:
+                # An app whose shutdown did not get that far (a lifespan that is off, or failed).
+                app_mod.report_still_ending(await asyncio.to_thread(manager.shutdown))
 
         def handle_exit(self, sig, frame) -> None:
             if self.should_exit and sig == signal.SIGINT:

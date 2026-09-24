@@ -24,6 +24,9 @@ directories by then, and a developer's own runtime is under the real ones.
 from __future__ import annotations
 
 import os
+import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import home_guard
@@ -117,3 +120,27 @@ def planner_sources(*required: str) -> Path:
         f"no planner sources to check against: set ${ENV} to a directory of the pinned sources "
         "(python tools/bundle.py --planner tiptop --out DIR), or build the runtime (tandem runtime build)"
     )
+
+
+@contextmanager
+def importable_from(tree: Path, package: str) -> Iterator[None]:
+    """``package`` importable from ``tree`` for the block, with nothing written into the tree or left behind.
+
+    The tree can be the developer's own runtime, which the run's home guard watches. An import from it
+    wrote ``__pycache__`` beside every module it loaded -- tandem's Python is not the runtime's, so none
+    was there to reuse -- and the run failed on the first try after every runtime build, blaming a thread
+    that outlived its test. And a ``package`` left in ``sys.modules`` makes any later "did that import a
+    planner?" assertion depend on test order.
+    """
+    already = set(sys.modules)
+    writes_bytecode = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    sys.path.insert(0, str(tree))
+    try:
+        yield
+    finally:
+        sys.path.remove(str(tree))
+        sys.dont_write_bytecode = writes_bytecode
+        for name in set(sys.modules) - already:
+            if name.split(".")[0] == package:
+                del sys.modules[name]
