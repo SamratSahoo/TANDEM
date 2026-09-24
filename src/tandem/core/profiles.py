@@ -812,6 +812,10 @@ def save(profile: Profile) -> Path:
     The file is replaced whole or not at all (``paths.write_atomic``): truncating it before a dump that
     could fail -- over a value YAML cannot represent, a Ctrl-C, a full disk -- once left an empty file
     that then loaded, silently, as a profile of defaults.
+
+    Over a file that is there, only what changed is rewritten (``_kept_as_written``): the comments in it
+    -- a paper profile's header saying which task it is and where its values came from, a person's notes
+    -- survive an edit in the web, `tandem planners use` and `tandem executors use`.
     """
     # Where it goes, from the profile given: a pinned one keeps its data root through the copy below.
     path, trajectories = profile.file(), profile.trajectories_dir()
@@ -819,11 +823,68 @@ def save(profile: Profile) -> Path:
         profile = Profile.model_validate(profile.model_dump(), context={ABSENT_OK: _names_on_disk(profile.name)})
     except Exception as exc:
         raise ProfileInvalid(f"Profile {profile.name!r} is not valid:\n{format_errors(exc)}") from exc
-    text = _yaml_text(_dump_dict(profile), what=f"Profile {profile.name!r}")
+    data = _dump_dict(profile)
+    text = _kept_as_written(path, data) or _yaml_text(data, what=f"Profile {profile.name!r}")
     path.parent.mkdir(parents=True, exist_ok=True)
     _make_trajectory_dirs(trajectories)
     _write_atomic(path, text)
     return path
+
+
+def _kept_as_written(path: Path, data: dict) -> str | None:
+    """``data`` written over the file at ``path`` as a round trip: what changed changes, and the rest -- its
+    comments, its order, how each value is spelled -- stays as it was.
+
+    None -- and the plain dump is written instead -- when there is no such file, it is not a mapping of
+    settings, or the result would not read back as exactly ``data``: keeping comments is worth a lot, but
+    never a setting written other than as validated.
+    """
+    from ruamel.yaml import YAML as SafeYAML
+
+    try:
+        doc = _new_yaml().load(path.read_text())
+    except Exception:
+        return None
+    if not isinstance(doc, dict):
+        return None
+    _merge_into(doc, data)
+    buf = io.StringIO()
+    yaml = _new_yaml()
+    yaml.width = 4096  # lines as the file had them, not folded at 100 columns
+    yaml.Representer = _NullAsWritten
+    try:
+        yaml.dump(doc, buf)
+        back = SafeYAML(typ="safe").load(buf.getvalue())
+    except Exception:
+        return None
+    if not isinstance(back, dict) or _without_nulls(back) != _without_nulls(data):
+        return None
+    return buf.getvalue()
+
+
+def _merge_into(node: Any, data: Mapping[str, Any]) -> None:
+    """Make the round-trip mapping ``node`` hold ``data``, touching only the keys whose value differs.
+
+    A key ``data`` lacks goes, except one written as null: the dump leaves out what is unset, and ``goal:
+    null`` in a file says the same thing with a line of documentation above it. A value equal to the one
+    given is left as written; a ``${oc.env:...}`` is not equal to what it resolves to, so a save writes
+    the value, which is how a profile from the monorepo's configs heals.
+    """
+    for key in [key for key in node if key not in data and node[key] is not None]:
+        del node[key]
+    for key, value in data.items():
+        if key in node and isinstance(value, Mapping) and isinstance(node[key], dict):
+            _merge_into(node[key], value)
+        elif key not in node or _plain(node[key]) != value:
+            node[key] = value
+
+
+def _without_nulls(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _without_nulls(item) for key, item in value.items() if item is not None}
+    if isinstance(value, (list, tuple)):
+        return [_without_nulls(item) for item in value]
+    return value
 
 
 def _yaml_text(data: Any, *, what: str) -> str:
