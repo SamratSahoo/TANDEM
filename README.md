@@ -148,7 +148,7 @@ python tools/bundle.py --planner tiptop --out /media/usb/planner-sources
 
 then, on the workstation, `tandem planners install tiptop --sources /media/usb/planner-sources`, or
 set `TANDEM_PLANNER_SOURCES`. With a sources directory in force nothing is fetched, and each export is
-checked against the pinned commit.
+checked against the pinned commit, and its files against the digest taken when it was bundled.
 
 <table>
 <tr><td width="50%">

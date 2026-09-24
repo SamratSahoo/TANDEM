@@ -214,7 +214,9 @@ ENUMS: dict[str, frozenset[str]] = {
 
 # Range limits, each the check the planner itself applies -- only later, at warm-up or at the first
 # plan (resolve_blend_config, apply_perception_overrides, cuTAMP's validate_tamp_config), and with
-# the arm already moving to its capture pose.
+# the arm already moving to its capture pose. Three more are range-checked in options.py because
+# their range is not a sign: traj_length_norm (>= 1, or inf) and the two time_dilation_factor keys
+# ((0, 1]).
 POSITIVE_KEYS: tuple[str, ...] = (
     "num_particles",
     "opt_steps_per_skeleton",

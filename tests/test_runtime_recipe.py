@@ -472,12 +472,14 @@ def test_a_checkout_in_the_sources_directory_gives_the_pinned_commit_whatever_it
 def test_an_export_from_a_bundle_must_be_the_pinned_commit(upstream, shipped, tmp_path, monkeypatch):
     _no_network(monkeypatch)
     sources = tmp_path / "sources"
-    # What tools/bundle.py leaves: an export of a commit, with a marker naming it.
+    # What tools/bundle.py leaves: an export of a commit, with a marker naming it and its files.
     rt_mod._export_with_git(
         str(upstream.bare), upstream.second, sources / "toy", scratch=tmp_path / "s", fetch=True
     )
     marker = sources / "toy" / rt_mod.SOURCE_MARKER
-    marker.write_text(json.dumps({"name": "toy", "commit": upstream.second}))
+    marker.write_text(
+        json.dumps({"name": "toy", "commit": upstream.second, "sha256": rt_mod.tree_digest(sources / "toy")})
+    )
 
     with pytest.raises(
         TandemError, match=f"is toy at {upstream.second[:7]}, but the recipe pins {upstream.first[:7]}"

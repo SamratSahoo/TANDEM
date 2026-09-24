@@ -215,7 +215,11 @@ def _merge_tiptop_config(data: dict, options: dict, raw: dict) -> None:
             }
         sam = perc.get("sam") or {}
         if sam.get("mode"):
-            target["sam_mode"] = str(sam["mode"])
+            target["sam_mode"] = str(_deref(sam["mode"]))
+        # A rig with a SAM-2 server names it here, and tiptop reads it for any mode but "local":
+        # dropped, the imported profile would warm with no perception.sam.url at all.
+        if sam.get("url"):
+            target["sam_url"] = str(_deref(sam["url"]))
         smoothing = perc.get("depth_smoothing") or {}
         if smoothing.get("num_frames") is not None:
             target["depth_smoothing_frames"] = int(smoothing["num_frames"])

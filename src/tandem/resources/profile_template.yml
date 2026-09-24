@@ -72,7 +72,7 @@ planner:
   backend: tiptop
   options:
     robot:
-      type: fr3_robotiq           # fr3_robotiq | ur5 | franka | panda_robotiq
+      type: fr3_robotiq           # fr3_robotiq | panda_robotiq | panda | ur5
       dof: 7
       host: 172.16.0.2            # the NUC running the bamboo-polymetis shim
       port: 5555                  # control
@@ -93,7 +93,7 @@ planner:
       m2t2:
         url: http://localhost:8123
         apply_bounds: true
-      sam_mode: local
+      sam_mode: local             # local | remote (then set sam_url: http://<host>:8000)
       # Frames grabbed back-to-back at the capture pose and per-pixel median-fused to suppress
       # depth noise. 1 disables smoothing.
       depth_smoothing_frames: 5

@@ -412,6 +412,7 @@ RECIPE = RuntimeRecipe(
             trim=("docs/videos",),                   # dropped after fetching; say why in a comment
             patches=(HERE / "patches" / "0001-fix.patch",),   # applied in order; a patch that fails stops the install
             marker="pixi.toml",                      # exists only when the tree is really there
+            persistent=("arm/.cache",),              # written at run time, must outlive a new tree
         ),
         Source(SourcePin("solver", "https://github.com/you/solver.git", "<40-hex commit>")),
     ),
@@ -446,11 +447,15 @@ RECIPE = RuntimeRecipe(
       arm/  solver/            each source at its pinned commit, trimmed and patched
       arm/.pixi -> ../env      where pixi looks for the environment
       env/                     the environment, outside every tree
+      cache/arm/arm/.cache/    each `persistent` directory; arm/arm/.cache links here
       .tandem-runtime.json     what is installed, from where, verified or not, with each patch's digest
   ```
 
   The environment lives outside the trees on purpose: moving a pin replaces a tree without solving
-  torch and CUDA again from nothing.
+  torch and CUDA again from nothing. So does anything the planner downloads into its own tree at run
+  time, once the recipe names it `persistent` (TiPToP's SAM-2 checkpoint is 0.9 GB). A tree the
+  record does not list is replaced only in a directory that holds the record, and never if it is a
+  git checkout, so a runtime path pointed at a workspace by mistake is refused, not emptied.
 - **Placeholders** in `env` values are filled at build time:
   - `{root}`: the runtime root;
   - `{source:NAME}`: a tree's path;
@@ -464,9 +469,9 @@ RECIPE = RuntimeRecipe(
   checkout or export per source, named as the recipe names them:
   `tandem planners install NAME --sources DIR`, or `$TANDEM_PLANNER_SOURCES=DIR`. From a checkout of
   the tandem repository, on a machine that can reach the sources, `python tools/bundle.py --planner
-  NAME --out DIR` makes one; each export carries a marker naming its commit, which the install
-  checks. While a sources directory is in force nothing is fetched: a missing source is an error,
-  not a hang.
+  NAME --out DIR` makes one; each export carries a marker naming its commit and a digest of its
+  files, which the install checks. While a sources directory is in force nothing is fetched: a
+  missing source is an error, not a hang.
 - **Assets** are small files the planner package itself ships (as package data) and the runtime
   needs at a fixed path. TiPToP ships two DATAFARM checkpoints this way, because their source
   repository is private.

@@ -76,6 +76,12 @@ TIPTOP = Source(
         # pyproject.toml, pixi.toml or pixi.lock here; change them upstream, together.
     ),
     marker="pixi.toml",
+    # tiptop downloads SAM-2's sam2.1_hiera_large.pt (~0.9 GB) into its own package, at
+    # Path(tiptop.__file__).parent / ".cache" (utils.get_tiptop_cache_dir), the first time a session
+    # warms (sam2_client). Inside the tree it would go with the tree on every pin bump, patch change or
+    # --force, and the next warm-up would download it again -- inside WARM_TIMEOUT, with an operator
+    # waiting at the arm, and not at all on a rig with no network. Kept under <runtime>/cache instead.
+    persistent=("tiptop/.cache",),
 )
 
 CUTAMP = Source(

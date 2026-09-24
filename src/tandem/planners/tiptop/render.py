@@ -31,6 +31,12 @@ from tandem.planners.tiptop.options import DETECTOR_MODEL, TiptopOptions, option
 _yaml = YAML()
 _yaml.default_flow_style = False
 
+# How check_assets starts the two problems that stop a session before it starts, rather than warn:
+# a camera with no extrinsics, and a camera the pinned tiptop opens that the profile does not have.
+# The factory refuses on either; doctor shows each as a FAIL row of its own.
+MISSING_EXTRINSICS = "no camera extrinsics"
+MISSING_CAMERA = "no cameras."
+
 
 # --------------------------------------------------------------------------- tiptop.yml
 
@@ -80,7 +86,12 @@ def render_tiptop_config(profile: Profile, options: Any = None) -> dict:
                 "url": o.perception.m2t2.url,
                 "apply_bounds": o.perception.m2t2.apply_bounds,
             },
-            "sam": {"mode": o.perception.sam_mode},
+            # tiptop reads sam.url whenever the mode is not "local"; the options refuse a remote
+            # mode without one.
+            "sam": {
+                "mode": o.perception.sam_mode,
+                **({"url": o.perception.sam_url} if o.perception.sam_url else {}),
+            },
             "robot_mask_margin_m": o.perception.robot_mask_margin_m,
             "depth_trunc_m": o.perception.depth_trunc_m,
             "voxel_downsample_size": o.perception.voxel_downsample_size,
@@ -237,10 +248,23 @@ def check_assets(profile: Profile, options: Any = None, *, runtime_dir: Path | N
             "default, so this changes nothing; set it to null"
         )
 
+    # tandem's camera block asks only for the camera perception reads, which is right for teleop and
+    # for another planner. The pinned tiptop opens BOTH of these at every warm-up (get_demo_container:
+    # get_hand_camera(), get_external_camera()), whichever one perception reads, and the tiptop.yml
+    # rendered here names only the cameras the profile has -- so a missing one is an OmegaConf
+    # missing-key error tens of seconds into the warm-up.
+    configured = profile.cameras.configured()
+    for slot in ("hand", "external"):
+        if slot not in configured:
+            problems.append(
+                f"{MISSING_CAMERA}{slot}: the pinned tiptop opens cameras.hand and cameras.external at every "
+                "warm-up, whichever one perception reads"
+            )
+
     missing = profiles.missing_calibration(profile)
     if missing:
         problems.append(
-            "no camera extrinsics for serial(s) " + ", ".join(missing) + f" in {profile.calibration_file()}"
+            f"{MISSING_EXTRINSICS} for serial(s) " + ", ".join(missing) + f" in {profile.calibration_file()}"
         )
     return problems
 

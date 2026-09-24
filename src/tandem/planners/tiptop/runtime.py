@@ -32,6 +32,9 @@ CUROBO = "curobo"
 
 STAMP_FILE = recipe_runtime.MANIFEST_FILE
 
+#: tiptop's plan viewer as tandem runs it, inside the runtime (see its docstring).
+VIEWER = Path(__file__).resolve().parent / "viewer.py"
+
 
 class TiptopRuntime(RecipeRuntime):
     """TiPToP's runtime: the generic recipe runtime, bound to TiPToP's recipe.
@@ -50,8 +53,14 @@ class TiptopRuntime(RecipeRuntime):
         return self.root / TIPTOP
 
     def replay_command(self, rollout_dir: Path) -> list[str]:
-        """argv replaying one recorded leg's plan in Rerun, with tiptop's own viewer. Run from ``tiptop_dir``."""
-        return self.command(["viz-tiptop-run", str(rollout_dir)])
+        """argv replaying one recorded leg's plan in Rerun, with tiptop's own viewer. Run from ``tiptop_dir``.
+
+        Through ``viewer.py``, tandem's wrapper of ``viz-tiptop-run`` (it says why), with the viewer's own
+        arguments. The directory is a flag, not a positional: tyro makes one of every parameter, and at
+        the pinned tiptop that parameter is ``save_dir`` -- a later tiptop renames it ``--run-dir``, which
+        tests/test_review_tiptop.py catches on the bump that brings it.
+        """
+        return self.command(["python", str(VIEWER), "--save-dir", str(rollout_dir)])
 
 
 @dataclass
