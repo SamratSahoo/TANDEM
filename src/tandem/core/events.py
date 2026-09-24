@@ -34,6 +34,10 @@ each trial ended (``tandem.core.phase_loop``, ``tandem.core.session``):
                                                        the loop ended the trial itself
     {"event":"trial_excluded","dir":"…","outcome":"excluded","filed_under":"failure",…}
                                                        filed without a label prompt
+    {"event":"trial_filed","dir":"…","outcome":"failure","failure_stage":"tamp_execution",…}
+                                                       ended part-way (or "aborted"); no label
+    {"event":"trial_unlabeled","dir":"…","outcome":null,"filed_under":null,…}
+                                                       stopped at the label prompt; left in eval/
     {"event":"labeled",…,"outcome":"success","failure_stage":null}
 """
 
@@ -68,8 +72,10 @@ KNOWN = frozenset(
         "awaiting_teleop_resume",
         "homing",
         "homed",
-        # The phase loop's. A trial the method excludes never reaches `awaiting_label`, so
-        # `trial_excluded` is the only event that tells a UI why it went back to the task prompt.
+        # The phase loop's. A trial the loop ended itself never reaches `awaiting_label`, so
+        # `trial_excluded` (excluded) and `trial_filed` (failed part-way, or aborted) are the only
+        # events that tell a UI why it went back to the task prompt. `trial_unlabeled` is a trial the
+        # session stopped before anybody labeled it, left in eval/ with its phase record.
         "instruction_not_fully_represented",
         "awaiting_human_phase",
         "phase_preconditions_checked",
@@ -79,6 +85,8 @@ KNOWN = frozenset(
         "phase_complete",
         "trial_outcome",
         "trial_excluded",
+        "trial_filed",
+        "trial_unlabeled",
     }
 )
 

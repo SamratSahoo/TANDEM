@@ -621,7 +621,8 @@ def test_an_excluded_trial_is_filed_under_failure_without_a_label(session_for, m
     # Filed and merged all the same, so the raw legs survive for whoever audits the exclusion.
     trajectory_id = backends[-1].legs[0]["leg"].trajectory_id
     assert wait_for(lambda: filed_record(profile, "failure") is not None), "no hitl.json under failure/"
-    assert merges == [(trajectory_id, "failure")]
+    # The record is written before the merge starts (so a merge that never finishes still leaves it).
+    assert wait_for(lambda: merges == [(trajectory_id, "failure")]), merges
     assert not any(profile.status_dir("eval").glob("*/_meta.json")), "a leg was left unfiled in eval/"
 
     record = filed_record(profile, "failure")

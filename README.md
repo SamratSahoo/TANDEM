@@ -244,17 +244,23 @@ when applied: watch the first rollouts with a hand on the stop.
 | the label prompt | `s` success · `f` failure |
 | the task prompt | `↵` repeat the task · `n` new task |
 
-`q` finishes the session from any state, parking the arm first.
+`q` finishes the session from any state, parking the arm first. It is a step boundary like a
+preempt: nothing more is perceived, planned or executed, the trial in flight is filed as aborted,
+and one waiting at the label prompt is left unlabeled in `eval/` with its `hitl.json`
+(`tandem traj merge <trajectory id> --status success` files it later).
 
 Three things a person can do during a session:
 
 - **Preempt.** Abandon the attempt in flight. The session stays warm, and you are back at the task
-  prompt in a second. It does not stop the arm mid-motion (see [Troubleshooting](#troubleshooting)).
+  prompt in a second; what was recorded is filed as aborted. It does not stop the arm mid-motion
+  (see [Troubleshooting](#troubleshooting)).
 - **Hand off.** Take the arm between phases. The planner lets go of the robot and cameras at the
   next boundary. When you hand back, the same phase is perceived and planned again from wherever you
   left the arm: no homing, no dropped object. Every leg merges into **one** trajectory.
-- **Label.** Mark the trial success or failure while watching its video. An excluded trial is never
-  offered for a label.
+- **Label.** Mark the trial success or failure while watching its video. Only a trial whose plan ran
+  to the end is offered for a label (plus a failed check, with `on_verification_failure: label`). One
+  the loop ended itself -- excluded, failed at a TAMP or human-policy stage, or aborted -- is filed
+  under `failure/` without one, and the prompt says why.
 
 ---
 
@@ -499,8 +505,8 @@ keeps the key out of your shell history) and `tandem config set-hf-token`. `GEMI
 
 ## What a trajectory looks like
 
-Every leg of a trial is recorded under `eval/` as it happens. When the trial is labeled, or
-excluded, its legs are merged into one episode and filed:
+Every leg of a trial is recorded under `eval/` as it happens. When the trial is labeled, or filed
+without a label, its legs are merged into one episode and filed:
 
 ```
 trajectories/success/2026-08-16_21-14-02/
@@ -529,7 +535,10 @@ trajectories/success/2026-08-16_21-14-02/
   - which checks ran, and every verdict, failing ones included;
   - how the trial ended: `outcome` (`success`, `failure`, `excluded` or `aborted`), `failure_stage`
     (`invention`, `tamp_planning`, `tamp_execution`, `verification`, `human_policy`) and
-    `excluded`.
+    `excluded`;
+  - after an `on_robot_phase_failure: replan`, every plan the trial replaced (`superseded_plans`,
+    each with its phases, verdicts and why it was given up). Each segment then also says which plan
+    its phase belongs to (`plan_generation`).
 
   The full schema is in [docs/METHOD.md §6](docs/METHOD.md#hitljson).
 - **`vlm/`** holds each image sent to a model, a rendered PNG of what it answered (rejected
@@ -551,7 +560,8 @@ Proprioception and action are **decoupled on purpose**. When the action is a lag
 measured state, a policy learns to echo it, and a fine-tuned policy that has learned to echo the
 gripper never closes it. `tandem export lerobot` skips an episode whose `cmd_gripper` is not binary,
 loudly, rather than write a dataset with that defect in it. It exports `success/` only, so failed
-and excluded trials never reach a dataset.
+and excluded trials never reach a dataset -- and it also skips a trial under `success/` whose
+`hitl.json` says the method settled it (excluded, aborted, or failed part-way), however it got there.
 
 The on-disk format is unchanged from the system tandem was extracted from, so data moves between
 the two in either direction.
@@ -633,9 +643,10 @@ what to do about it.
 <details>
 <summary><b>A preempt didn't stop the arm</b></summary>
 
-It can't, and no software button can. The controller is handed a whole trajectory segment in one
-request and has no abort, so the motion runs to the end of that segment. Preempt stops *further plan
-steps*. **The physical E-stop is the only instant stop.**
+It can't, and no software button can. Unless the planner declares cooperative stop, it is handed
+a whole trajectory segment in one request and has no abort, so the motion runs to the end of that
+segment; one that does stops at its next step boundary. Preempt stops *further plan steps*. **The
+physical E-stop is the only instant stop.**
 </details>
 
 <details>
@@ -663,8 +674,9 @@ as the paper does. Open its `hitl.json`. The failing verdicts under `verificatio
 the camera did not see, and why; `satisfied: false` is the one to read. `vlm/` shows the image each
 verdict was made on. If the classifier was wrong rather than the person, set
 `hitl.on_verification_failure: label` while you calibrate it: every disagreement between you and the
-check then becomes a labeled data point. Do not `tandem traj relabel` an excluded trial into
-`success/` unless you mean to overrule the check: nothing stops the export from including it then.
+check then becomes a labeled data point. `tandem traj relabel <id> success` refuses an excluded
+trial; `--force` (a confirm in the web UI) overrules the check on purpose, and its `hitl.json` then
+says so under `overruled` -- the one way such a trial reaches the export.
 </details>
 
 <details>

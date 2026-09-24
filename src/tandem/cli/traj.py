@@ -51,6 +51,10 @@ def list_trajectories(
             flags.append(f"[violet]hand-off ×{human}[/violet]")
         if not traj.complete:
             flags.append("[faint]incomplete[/faint]")
+        if traj.settled:
+            # The chip says where it is filed; this says what the method decided it is.
+            stage = f" at {traj.failure_stage}" if traj.failure_stage else ""
+            flags.append(f"[warn]{traj.settled}{stage}[/warn]")
         table.add_row(
             traj.id,
             chip,
@@ -96,6 +100,7 @@ def show(
             ("frames", f"{traj.n_frames} at {traj.fps} Hz  ({traj.duration_s:.1f}s)"),
             ("cameras", [trajectories.CAMERA_LABELS.get(c, c) for c in traj.cameras]),
             ("plan", "recorded" if traj.has_plan else None),
+            ("outcome", _outcome_line(traj)),
             ("path", traj.path),
         ]
     )
@@ -144,12 +149,20 @@ def relabel(
     traj_id: str = typer.Argument(..., help="Timestamp id, or a unique prefix."),
     status: str = typer.Argument(..., help="success | failure | eval"),
     profile_name: str = typer.Option(None, "--profile", "-p", help="Profile name."),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="File a trial the method excluded (or ended part-way) as a success anyway. Its hitl.json "
+        "says it was overruled.",
+    ),
 ) -> None:
     profile = profiles.load(profile_name)
     traj = trajectories.find(profile, traj_id)
     old = traj.status
-    updated = trajectories.relabel(profile, traj, status)
+    updated = trajectories.relabel(profile, traj, status, force=force)
     theme.ok(f"{updated.id}: {old} → {status}", str(updated.path))
+    if force and traj.settled and status == "success":
+        theme.warn(f"overruled: the method had settled it as {traj.settled}", "recorded in its hitl.json")
 
 
 @app.command("rm", help="Delete a trajectory from disk.")
@@ -250,6 +263,18 @@ def copy(
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(traj.path, target)
     theme.ok(f"Copied {traj.id} to {dest.name}", str(target))
+
+
+def _outcome_line(traj) -> str | None:
+    """How the phase record says the trial ended, when there is one, with what the method settled."""
+    if not traj.outcome and not traj.settled:
+        return None
+    line = traj.outcome or "not labeled"
+    if traj.failure_stage:
+        line += f" at {traj.failure_stage}"
+    if traj.settled:
+        line += "  (settled by the method: not a demonstration)"
+    return line
 
 
 def _truncate(text: str, width: int) -> str:

@@ -28,7 +28,8 @@ machine exists once.
 
     spawning → warming → rolling → awaiting_label → labeling → awaiting_task → rolling …
                             │  │
-                            │  └── excluded: filed with no label ──→ awaiting_task
+                            │  └── ended by the loop (excluded, failed, aborted):
+                            │      filed under failure/ with no label ──→ awaiting_task
                             ├── a phase only a person can do
                             ↓
                      awaiting_human_phase → handing_off → teleop_handoff ──"resume"──→ rolling
@@ -37,10 +38,13 @@ Three behaviours are load-bearing and were each learned expensively:
 
 * **Preempt is not stop.** It abandons the task attempt and returns to the task prompt with
   everything still warm. It sets no end reason and ends no session; only `stop()` does that. It
-  cannot stop the arm mid-motion: the planner is handed a whole trajectory segment in one request
-  and has no abort, so the motion runs to the end of that segment. The physical E-stop is the only
-  instant stop.
-* **Stopping parks the arm.** Nothing homes at the end of a task, so `stop()` asks the backend to
+  cannot stop the arm mid-motion: unless the planner declares cooperative stop, it is handed a whole
+  trajectory segment in one request and has no abort, so the motion runs to the end of that segment.
+  The physical E-stop is the only instant stop.
+* **Stopping parks the arm, and stops the task where it is.** A stop is a step boundary like a
+  preempt: nothing is perceived, planned or executed after it, a person's step it cut short is not
+  checked, and the legs already recorded are filed (or, at the label prompt, kept unlabeled in eval/
+  with their phase record). Nothing homes at the end of a task, so `stop()` asks the backend to
   park before closing it. The gripper is deliberately NOT opened — nothing here can know the arm is
   not holding something.
 * **A hand-off is a custody transfer.** The planner holds the robot and the cameras exclusively, so
@@ -75,11 +79,15 @@ from tandem.executors.base import CustodyError, ExecutorContext
 from tandem.planners import registry
 
 LOG_BUFFER = 4000
+# How long a session that is ending waits for the episode merges it started. A merge joins several
+# GB of video, and it runs on a thread of its own so the next task need not wait for it -- but a
+# process that exits under one kills it half-done, leaving the legs split between success/ and eval/.
+MERGE_GRACE = 300.0
 # How long a caller should wait for `stop()` to finish. It has to cover the session thread
 # unwinding, the arm's park-and-exit move, and the planner letting go of the cameras — the backend
 # bounds those at HARDWARE_TIMEOUT and the channel at EXIT_GRACE, so this is deliberately longer
-# than their sum rather than a guess.
-STOP_GRACE = 300.0
+# than their sum rather than a guess — and then the merges still running (MERGE_GRACE).
+STOP_GRACE = 300.0 + MERGE_GRACE
 # How long a human phase, or a lent arm, waits for the person before the session is considered
 # abandoned. Long: the whole point is that somebody is doing something with their hands.
 HUMAN_PHASE_TIMEOUT = 3600.0
@@ -104,6 +112,20 @@ class State(str, Enum):
 
 class _Preempted(Exception):
     """Raised inside the session loop to abandon one task attempt and keep everything warm."""
+
+    # What the trial's record says ended it (`PhaseLoop.interrupted`).
+    reason = "preempted by the operator"
+
+
+class _Stopped(_Preempted):
+    """Raised inside the session loop because the session is stopping: the attempt ends where it is.
+
+    A preempt as far as the phase loop is concerned -- raised from the same boundary checks, so a
+    stop can never be read as a step finished or let one more leg start -- but it ends the session
+    rather than returning to the task prompt.
+    """
+
+    reason = "the session was stopped"
 
 
 TERMINAL = frozenset({State.STOPPED, State.FAILED})
@@ -162,6 +184,15 @@ class Session:
         # and it still works: the runtime's root is handed to the planner's factory as the one to use
         # (``BackendContext.runtime_dir``), which is what that script meant by passing it.
         if runtime is not None:
+            if not hasattr(runtime, "root"):
+                # `Session(profile, "put the toy in the box")` reads as a task and is not one: taken
+                # as the runtime, the string was quietly ignored (the warning is hidden by default
+                # outside __main__), and every episode was planned and labeled with the profile's
+                # default task instead.
+                raise TypeError(
+                    "Session's second positional argument is a planner runtime (deprecated), not the task; "
+                    f"got {runtime!r}. Pass the task as task=..."
+                )
             warnings.warn(
                 "Session(profile, runtime) is deprecated: a session builds its planner's runtime through "
                 "the registry. Leave the runtime out, or set runtime_dir in the settings.",
@@ -194,6 +225,10 @@ class Session:
         # with their legs, never labeled, and never counted towards `max_episodes`, since they are
         # not part of the dataset the target counts.
         self.excluded_count = 0
+        # Trials that ended part-way for a reason outside the method -- the operator gave the step up,
+        # preempted the attempt, or stopped the session. Filed under failure/ with their legs and no
+        # label, and not counted towards `max_episodes` either: no trial result is in them.
+        self.aborted_count = 0
         # How the last trial ended, for the operator: set as soon as the attempt ends (so the label
         # prompt can say why the loop stopped it) and settled by the label. None while one runs.
         self.last_trial: dict | None = None
@@ -220,6 +255,9 @@ class Session:
         # built, and building one may start a process. `force_stop` reaches a leg in flight through it.
         self._loop: PhaseLoop | None = None
         self._legs_recorded = 0
+        # Every episode merge started, as (thread, trajectory id), so a session that is ending can wait
+        # for them rather than exit under one (`_finish_merges`).
+        self._merges: list[tuple[threading.Thread, str]] = []
 
         # The planner, and what it says it can be asked for.
         self._backend = None
@@ -351,11 +389,16 @@ class Session:
             self._event("session_start")
             self._backend.warm()
             self._capabilities = self._backend.capabilities()
+            # After warm, not in start(): a sidecar only says which verbs it answers once it runs.
+            self._require_frames()
             while not self._stopping:
                 if not self._await_task():
                     break
                 try:
                     self._run_task()
+                except _Stopped:
+                    self._log("tandem", "the session is stopping, so the task attempt ends here")
+                    self._event("rollout_aborted", reason=_Stopped.reason)
                 except _Preempted:
                     self._log("tandem", "the task attempt was preempted; the planner is still warm")
                     self._event("rollout_aborted")
@@ -398,10 +441,66 @@ class Session:
                 backend.close()
             except Exception as exc:
                 self._log("tandem", f"could not close the planner cleanly: {exc}")
+        # The human executors last, once the arm is parked and the planner has let go: whatever
+        # building one started (a policy server, a device) would otherwise outlive the session.
+        loop, self._loop = self._loop, None
+        if loop is not None:
+            loop.close()
+        self._finish_merges()
         self._event("session_end")
         with self._lock:
             if self.state not in TERMINAL:
                 self._set_state(State.STOPPED, locked=True)
+
+    def _finish_merges(self) -> None:
+        """Wait, bounded, for the episode merges this session started. Before the session reads as ended.
+
+        A merge runs on a thread of its own so the next task need not wait for several GB of video,
+        and `tandem collect` exits as soon as the session has ended: an interpreter exiting under a
+        merge kills it half-done. The phase record is written before the merge starts
+        (``episodes.merge_trajectory``), so even a merge that outlives this still leaves it beside the
+        legs; what is lost is only the join, which `tandem traj merge` can redo.
+        """
+        pending = [(thread, tid) for thread, tid in self._merges if thread.is_alive()]
+        if not pending:
+            return
+        self._log("tandem", f"waiting for {len(pending)} episode merge(s) to finish")
+        deadline = time.monotonic() + MERGE_GRACE
+        for thread, _ in pending:
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        for thread, tid in pending:
+            if thread.is_alive():
+                self._log(
+                    "tandem",
+                    f"the merge of trajectory {tid} is still running after {MERGE_GRACE:.0f}s; if it does not "
+                    f"finish, the legs are intact and `tandem traj merge {tid}` joins them",
+                )
+
+    def _require_frames(self) -> None:
+        """Refuse, before any task, a planner that cannot capture the frame the checks need.
+
+        A human step is verified on a fresh frame from the verification camera. A planner with no
+        ``capture_frame`` (the SDK's default, and how the scaffold ships) used to have every person's
+        step accepted unchecked -- read as a camera that happened to be down -- so no trial could ever
+        fail verification, and the paper's exclusion rule never fired. That is a setting the operator
+        has to change, or a verb the planner has to implement; it is not something to find out from
+        a dataset.
+        """
+        if not self.hitl_enabled:
+            return
+        cfg = self._planning_config()
+        needs = [key for key in _FRAME_CHECKS if getattr(cfg, key)]
+        if not needs or _can_capture_frame(self._backend):
+            return
+        name = self.profile.planner.backend
+        checks = " and ".join(f"hitl.{key}" for key in needs)
+        raise TandemError(
+            f"The {name} planner cannot capture a camera frame, and {checks} "
+            f"{'needs' if len(needs) == 1 else 'need'} one: every human step is verified on a fresh frame "
+            "from the verification camera.",
+            hint=f"Implement capture_frame(camera=...) in the planner, or set {checks} to false in the "
+            "profile's hitl block -- knowing that no human step will then be verified.",
+        )
 
     def _run_task(self) -> None:
         """One attempt at the current task, and the label that closes it out.
@@ -437,6 +536,23 @@ class Session:
                 trajectory_id=self._trajectory_id,
                 vlm_dir=self._vlm_dir,
             )
+        except _Preempted as exc:
+            # Raised from the operator's own boundary check, so the loop never got to say how the
+            # attempt ended. Said here, before anything is filed: an attempt a preempt or a stop cut
+            # off part-way is aborted, and must not reach a label prompt looking like one that ran.
+            loop.interrupted(exc.reason)
+            raise
+        except CustodyError as exc:
+            loop.interrupted(f"the arm could not be handed back: {exc.message}")
+            raise
+        except Exception as exc:
+            # Said now, not after the filing below: a trial the planner or an executor ended by
+            # raising used to reach the label prompt with the error still in flight, and the operator
+            # was asked "did that work?" before being told the attempt failed. The loop has already
+            # recorded the stage for anything it knows how to name; anything else is a failure too.
+            self._log("tandem", f"the task attempt failed: {type(exc).__name__}: {exc}")
+            self._event("rollout_aborted", error=str(exc))
+            loop.interrupted(f"the attempt failed: {type(exc).__name__}: {exc}", outcome="failure")
         finally:
             # Read off the loop's outcome, which it keeps current as it goes, so it is right on
             # every exit path, including the ones that unwind out of the loop as an exception.
@@ -449,16 +565,15 @@ class Session:
             # no longer matches, or preempted. The rule is the same for all of them: frames on disk
             # have to be filed, because filing is what ends a trajectory and merges its legs.
             # Anything else leaves legs nothing will ever join, filing as episodes of their own.
-            # Filing normally waits for the operator's label. An EXCLUDED trial does not: the method
-            # has already decided it is not part of the dataset, and a label prompt the operator
-            # could answer "success" would put it straight back in.
-            if self._legs_recorded and outcome.outcome == "excluded":
-                self._file_excluded(outcome)
-            elif self._legs_recorded:
-                self._await_label()
-            else:
+            # Filing waits for the operator's label only where the label can still decide the trial
+            # (`_settled_by_the_loop`): one the loop ended itself is filed at once, under failure/.
+            if not self._legs_recorded:
                 self._log("tandem", "nothing was recorded, so there is nothing to label")
                 self._event("rollout_discarded", **self.last_trial)
+            elif _settled_by_the_loop(outcome):
+                self._file_without_label(outcome)
+            else:
+                self._await_label()
 
     def _phase_loop(self) -> PhaseLoop:
         """The trial algorithm, wired to this session's planner, settings and operator."""
@@ -534,9 +649,11 @@ class Session:
             if self._label_ready.wait(timeout=0.2):
                 self._label_ready.clear()
                 break
-        else:
-            return
         if self._stopping:
+            # Stopped before anybody answered: `q` or Ctrl-C at "Did that work?", or a stop from the
+            # web page. Not a label, so nothing is filed as one -- but the phase record exists only
+            # in memory, and returning without it lost it for good.
+            self._leave_unlabeled()
             return
 
         success = bool(self._label_answer)
@@ -548,57 +665,126 @@ class Session:
         self.current = None
         self.labeled_count += 1
         self.success_count += int(success)
-        # The label settles the trial's outcome, unless the loop had already decided it (an aborted
-        # trial stays aborted); the stage the loop stopped at, if it stopped one, goes with it.
-        self.last_trial = self._trial_summary(record.status)
+        # The label settles the trial's outcome; the stage the loop stopped at, if it stopped one (a
+        # check whose verdict was left to the label), goes with it.
+        self.last_trial = self._trial_summary(record.status, labeled=True)
         self._event("labeled", dir=record.dir, success=success, **self.last_trial)
         self._file_episode(record.status)
 
-    def _file_excluded(self, outcome: TrialOutcome) -> None:
-        """File a trial the phase loop excluded: under failure/, marked excluded, with no label.
+    def _file_without_label(self, outcome: TrialOutcome) -> None:
+        """File a trial the phase loop ended itself: under failure/, with no label prompt.
 
-        The paper's rule for a human phase that never verified (``on_verification_failure:
-        exclude``). The trial is not part of the dataset, but it is not thrown away either: its legs
-        are merged exactly as a labeled trial's are, and ``hitl.json`` beside them says it was
-        excluded, at which stage, and carries the failing verdicts -- the raw material for working
-        out whether the person or the classifier got it wrong.
+        There is no question left for a label to answer, so asking one is a control that lies:
+
+        * ``excluded`` -- the paper's rule for a human phase that never verified
+          (``on_verification_failure: exclude``). Not part of the dataset, and a prompt the operator
+          could answer "success" would put it straight back in.
+        * ``failure`` at ``tamp_planning``, ``tamp_execution`` or ``human_policy`` (or on an error with
+          no stage). The plan did not finish, and the paper counts exactly these as trial failures
+          (Fig. 4): an unfinished plan is never a demonstration, whatever the video looks like.
+        * ``aborted`` -- the operator gave the step up, preempted the attempt, or stopped the session.
+          Nothing about the task was decided; the attempt simply did not finish.
+
+        The one loop-ended trial still labeled is a check left to the operator on purpose
+        (``on_verification_failure: label``, stage ``verification``): overruling the classifier is
+        what that setting is for.
+
+        None of them is thrown away. The legs are merged exactly as a labeled trial's are, and
+        ``hitl.json`` beside them says how it ended, at which stage, and why -- for an excluded trial,
+        with the failing verdicts that are the raw material for working out whether the person or
+        the classifier got it wrong. A failure counts towards `max_episodes` as a failure label did,
+        since it is a trial result; an excluded or aborted trial does not.
+        """
+        kind = outcome.outcome
+        directory = str(self.current.dir) if self.current else ""
+        record = self.current or RolloutRecord(dir=directory, started_at=time.time())
+        record.status = kind
+        record.success = False if kind == "failure" else None
+        self.rollouts.append(record)
+        self.current = None
+        if kind == "excluded":
+            self.excluded_count += 1
+        elif kind == "aborted":
+            self.aborted_count += 1
+        else:
+            self.labeled_count += 1
+        self.last_trial = self._trial_summary("failure")
+        if kind == "excluded":
+            self._log(
+                "tandem",
+                f"this trial is excluded from the dataset ({outcome.failure_stage}): {outcome.reason}. It "
+                "is not labeled; its legs are kept under failure/ with excluded: true",
+            )
+            self._event("trial_excluded", dir=record.dir, **self.last_trial)
+        else:
+            stage = f" at {outcome.failure_stage}" if outcome.failure_stage else ""
+            self._log(
+                "tandem",
+                f"this trial ended {kind}{stage}: {outcome.reason}. There is nothing for a label to decide, "
+                "so it is filed under failure/ without one",
+            )
+            self._event("trial_filed", dir=record.dir, **self.last_trial)
+        self._file_episode("failure")
+
+    def _leave_unlabeled(self) -> None:
+        """Keep the record of a trial the session stopped before anyone labeled it.
+
+        The legs stay where they are, in eval/, unmerged: there is no label to file them under, and a
+        guess would be one the dataset keeps. What is written now, synchronously -- a merge thread
+        would die with the process -- is the phase record, into the leg a later merge treats as the
+        primary. ``tandem traj merge <id> --status success|failure`` then files the trial, and the
+        merge carries the record up beside the joined episode.
         """
         directory = str(self.current.dir) if self.current else ""
         record = self.current or RolloutRecord(dir=directory, started_at=time.time())
-        # Not labeled, so neither success nor failure as far as the operator's tally goes.
-        record.status = "excluded"
-        record.success = None
+        record.status = None
         self.rollouts.append(record)
         self.current = None
-        self.excluded_count += 1
-        self.last_trial = self._trial_summary("failure")
+        self.last_trial = self._trial_summary(None)
+        outcome = self._last_outcome
+        written = episodes.record_unfiled(
+            self.profile,
+            self._trajectory_id,
+            self._last_plan,
+            vlm_dir=self._vlm_dir,
+            log=functools.partial(self._log, "tandem"),
+            reason=outcome.reason if outcome is not None else None,
+            superseded=outcome.superseded_plans if outcome is not None else (),
+            leg_generations=outcome.leg_generations if outcome is not None else None,
+        )
+        where = f" with its phase record in {written.name}" if written is not None else ""
         self._log(
             "tandem",
-            f"this trial is excluded from the dataset ({outcome.failure_stage}): {outcome.reason}. It is "
-            "not labeled; its legs are kept under failure/ with excluded: true",
+            f"the session stopped before this trial was labeled; its legs stay unmerged in eval/{where}. "
+            f"File it with `tandem traj merge {self._trajectory_id} --status success` (or failure), or "
+            "`tandem traj relabel` for a trial of one leg",
         )
-        self._event("trial_excluded", dir=record.dir, **self.last_trial)
-        self._file_episode("failure")
+        self._event("trial_unlabeled", dir=record.dir, **self.last_trial)
 
-    def _trial_summary(self, status: str | None) -> dict:
+    def _trial_summary(self, status: str | None, *, labeled: bool = False) -> dict:
         """How the attempt just walked ended, as the events, the summary and ``hitl.json`` say it.
 
         ``status`` is where the episode is filed (``success``/``failure``), or None before it is.
-        The outcome is resolved the one way ``hitl.json`` resolves it (``episodes.trial_outcome``), so
-        the events file and the record on disk can never disagree about a trial.
+        ``labeled`` is whether an operator's answer filed it, so a UI can say why a trial came back
+        to the task prompt without asking. The outcome is resolved the one way ``hitl.json``
+        resolves it (``episodes.trial_outcome``), so the events file and the record on disk can
+        never disagree about a trial.
         """
         outcome = self._last_outcome
         loop_outcome = outcome.outcome if outcome is not None else None
+        stage = outcome.failure_stage if outcome is not None else None
         return {
             "trajectory_id": self._trajectory_id,
-            **episodes.trial_outcome(loop_outcome, status),
-            "failure_stage": outcome.failure_stage if outcome is not None else None,
+            **episodes.trial_outcome(loop_outcome, status, failure_stage=stage),
+            "failure_stage": stage,
             "reason": outcome.reason if outcome is not None else None,
+            "labeled": labeled,
         }
 
     def _file_episode(self, status: str) -> None:
         """Move the attempt's legs under ``status``, merge them, and write the record beside them."""
-        # Fire and forget: a merge of several GB of video must not hold up the next task.
+        # Off the session thread: a merge of several GB of video must not hold up the next task. Kept,
+        # though, so a session that is ending waits for it (`_finish_merges`).
         trajectory_id = self._trajectory_id
         # The LAST plan, not the one the loop was still walking: an attempt that was abandoned drops
         # its plan, and those are precisely the episodes whose provenance -- which phases ran, what
@@ -606,7 +792,7 @@ class Session:
         plan = self._last_plan
         outcome = self._last_outcome
         if trajectory_id:
-            threading.Thread(
+            thread = threading.Thread(
                 target=episodes.merge_trajectory,
                 args=(self.profile, trajectory_id, status, plan),
                 kwargs={
@@ -619,10 +805,16 @@ class Session:
                     "log": functools.partial(self._log, "tandem"),
                     "emit": self._emit,
                     "reason": outcome.reason if outcome is not None else None,
+                    # The plans a replan replaced, and which plan each leg carried out a phase of.
+                    "superseded": list(outcome.superseded_plans) if outcome is not None else [],
+                    "leg_generations": dict(outcome.leg_generations) if outcome is not None else None,
                 },
-                name=f"merge:{self.id}",
+                name=f"merge:{self.id}:{trajectory_id}",
                 daemon=True,
-            ).start()
+            )
+            self._merges = [(t, tid) for t, tid in self._merges if t.is_alive()]
+            self._merges.append((thread, trajectory_id))
+            thread.start()
 
     def _await_human(self) -> str:
         """What the person answered at a human phase: `done`, `abort`, or `teleop`."""
@@ -643,6 +835,10 @@ class Session:
             if self._human_ready.wait(timeout=0.2):
                 self._human_ready.clear()
                 return self._human_answer or "done"
+        if self._stopping:
+            # Not an answer. Read as "abort" it filed the trial as a step the operator gave up on;
+            # the session is stopping, and the attempt ends as that.
+            raise _Stopped()
         return "abort"
 
     def _check_preempt(self) -> None:
@@ -731,9 +927,11 @@ class Session:
     def preempt(self) -> None:
         """Abandon the task attempt, keeping the session warm.
 
-        It cannot stop the arm: the planner is handed a whole trajectory segment in one request and
-        has no abort, so the motion runs to the end of that segment. The physical E-stop is the only
-        instant stop. What this does is stop asking it for the next one.
+        It cannot stop the arm mid-motion. A planner that declares cooperative stop
+        (``supports_cooperative_stop``) is asked to stop at its next step boundary; any other is
+        handed a whole trajectory segment in one request and has no abort, so the motion runs to the
+        end of that segment. The physical E-stop is the only instant stop. What this does is stop
+        asking the planner for the next one. The attempt is filed as aborted, under failure/.
         """
         with self._lock:
             if self.state in TERMINAL:
@@ -907,6 +1105,7 @@ class Session:
                 "labeled": self.labeled_count,
                 "success": self.success_count,
                 "excluded": self.excluded_count,
+                "aborted": self.aborted_count,
                 "last_trial": self.last_trial,
                 "target": self.max_episodes or self.profile.task.target_episodes,
                 "current": self.current.to_dict() if self.current else None,
@@ -960,7 +1159,17 @@ class _SessionIO:
     # ---- OperatorIO --------------------------------------------------------
 
     def check_preempt(self) -> None:
+        # A stop is a boundary too. Only the preempt flag was read here, so a session told to stop
+        # went on perceiving, planning and executing every robot leg left, and then filed none of
+        # them: the stop was noticed only at a human phase's prompt.
+        if self._session._stopping:
+            raise _Stopped()
         self._session._check_preempt()
+
+    def leg_should_stop(self) -> Callable[[], bool]:
+        session = self._session
+        # Read, never cleared: the check_preempt after the leg is what unwinds the attempt.
+        return lambda: session._stopping or session._preempt.is_set()
 
     def take_handoff_request(self) -> bool:
         requested = self._session._teleop_requested
@@ -1035,6 +1244,43 @@ class _SessionIO:
         session.handoff_error = None
         session._event("teleop_handoff_done")
         session._set_state(State.ROLLING)
+
+
+def _settled_by_the_loop(outcome: TrialOutcome) -> bool:
+    """Whether the loop's own outcome is the trial's verdict, so no label is asked for.
+
+    Everything the loop ended itself, except a check it left to the operator on purpose
+    (``on_verification_failure: label`` ends at ``verification`` as a ``failure`` the label decides).
+    A trial that ran to the end has no outcome of the loop's, and is labeled as it always was.
+    """
+    if outcome.outcome in ("excluded", "aborted"):
+        return True
+    return outcome.outcome == "failure" and outcome.failure_stage != "verification"
+
+
+# The checks that put a fresh frame from the verification camera to the classifier. The robot leg's
+# precondition check reads the perception pass's own image, so it needs none.
+_FRAME_CHECKS = ("check_human_effects", "check_human_preconditions", "check_tamp_effects")
+
+
+def _can_capture_frame(backend: Any) -> bool:
+    """Whether ``backend`` answers ``capture_frame`` at all, as far as can be told without calling it.
+
+    A ``Planner`` that did not override it has the SDK's default, which raises ``UnsupportedVerb``. A
+    ``SidecarPlanner`` answers it when its running sidecar lists the verb (one that lists nothing is
+    taken to answer the whole protocol, as the planner itself takes it), unless the class answers it
+    in-process instead. A backend written against the protocol by hand implements every verb.
+    """
+    from tandem.planners.sdk import Planner
+    from tandem.planners.sidecar import SidecarPlanner
+
+    own = getattr(type(backend), "capture_frame", None)
+    if isinstance(backend, SidecarPlanner) and own is SidecarPlanner.capture_frame:
+        verbs = backend.sidecar_verbs
+        return verbs is None or "capture_frame" in verbs
+    if isinstance(backend, Planner):
+        return own is not Planner.capture_frame
+    return True
 
 
 def _executor_status(name: str) -> dict:

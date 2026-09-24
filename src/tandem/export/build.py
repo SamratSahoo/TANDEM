@@ -140,19 +140,43 @@ def build_dataset(
     token: str | None = None,
     on_episode=None,
 ) -> dict:
-    """Write (and optionally push) the dataset. Returns a summary dict."""
+    """Write (and optionally push) the dataset. Returns a summary dict.
+
+    Every directory under success/ with state data is a candidate, except one whose phase record says
+    the method settled the trial itself (``trajectories.settled_outcome``): excluded by verification,
+    ended part-way, or aborted. The directory is only where somebody filed it -- a relabel, a merge
+    with ``--status``, a move by hand -- and the record is what the method decided. Such a trial is
+    listed in ``skipped`` with why, and is exported only once a forced relabel says so on its record.
+    A trial with no record (phase planning off, or collected before there was one) is exported as
+    before.
+    """
     success_dir = profile.status_dir("success")
-    candidates = (
+    stated = (
         sorted(d for d in success_dir.iterdir() if d.is_dir() and (d / traj_mod.STATE_FILE).is_file())
         if success_dir.is_dir()
         else []
     )
+    skipped: list[tuple[str, str]] = []
+    candidates = []
+    for directory in stated:
+        record = traj_mod.read_hitl(directory)
+        settled = traj_mod.settled_outcome(record)
+        if settled is None:
+            candidates.append(directory)
+            continue
+        stage = record.get("failure_stage")
+        reason = f"{settled}" + (f" at {stage}" if stage else "") + " (hitl.json), so not a demonstration"
+        skipped.append((directory.name, reason))
+        log.warning("%s: %s; skipping", directory.name, reason)
+    held_back = len(skipped)
     if max_episodes is not None:
         candidates = candidates[:max_episodes]
     if not candidates:
+        kept_out = f" ({held_back} more are filed there, but their records keep them out)" if held_back else ""
         raise TandemError(
-            f"No successful trajectories with {traj_mod.STATE_FILE} under {success_dir}.",
-            hint="Collect some, or relabel with `tandem traj relabel <id> success`.",
+            f"No successful trajectories with {traj_mod.STATE_FILE} under {success_dir}{kept_out}.",
+            hint="Collect some, or relabel a trial with `tandem traj relabel <id> success` -- one the method "
+            "settled needs --force, and its record then says it was overruled.",
         )
 
     dataset_root = Path(out_root) / repo_id
@@ -162,7 +186,6 @@ def build_dataset(
 
     writer = V3DatasetWriter(dataset_root, FPS)
     written = 0
-    skipped: list[tuple[str, str]] = []
 
     for traj_dir in candidates:
         result = _add_episode(writer, traj_dir, profile.task.prompt)
@@ -185,7 +208,8 @@ def build_dataset(
         "repo_id": repo_id,
         "dataset_root": str(dataset_root),
         "written": written,
-        "considered": len(candidates),
+        # The ones held back by their record were looked at too, and are in `skipped` saying why.
+        "considered": len(candidates) + held_back,
         "skipped": skipped,
         "pushed": pushed,
     }

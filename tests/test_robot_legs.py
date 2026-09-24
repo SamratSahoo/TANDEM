@@ -645,16 +645,22 @@ def session_for(profile, tmp_path, monkeypatch):
             session.wait(timeout=5)
 
 
-def test_a_failed_execution_reaches_the_label_prompt_saying_where_it_stopped(session_for, profile):
+def test_a_failed_execution_is_filed_as_a_failure_without_a_label_saying_where_it_stopped(session_for, profile):
+    """The leg recorded frames before it stopped, so it is filed -- but not labeled: the plan did not
+    finish, which the paper counts as a trial failure (Fig. 4), and a "success" answer could not make
+    it a demonstration."""
     session, backends = session_for(backend_kwargs={"execute_failures": {0: "the arm hit a joint limit"}})
+    states: list[str] = []
+    session.subscribe(lambda m: states.append(m["state"]) if m.get("type") == "state" else None)
     session.next_task()
 
-    # The leg recorded frames before it stopped, so the operator labels it -- with the stage shown.
-    assert wait_for(lambda: session.state is State.AWAITING_LABEL), f"stuck in {session.state}"
+    assert wait_for(lambda: session.labeled_count == 1), f"stuck in {session.state}"
+    assert wait_for(lambda: session.state is State.AWAITING_TASK), f"stuck in {session.state}"
+    assert "awaiting_label" not in states
     assert session.human_phase is None, "the person was never asked to carry on from it"
+    assert session.success_count == 0
     last = session.summary()["last_trial"]
-    assert (last["failure_stage"], last["outcome"]) == ("tamp_execution", "failure")
-    session.label(False)
+    assert (last["failure_stage"], last["outcome"], last["labeled"]) == ("tamp_execution", "failure", False)
 
     def filed():
         records = sorted(profile.status_dir("failure").glob("*/hitl.json"))

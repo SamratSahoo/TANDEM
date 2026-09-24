@@ -191,6 +191,8 @@ function attachSession(shell, state, initial) {
       // An excluded trial never reaches the label prompt, so this is the one cue that the
       // demonstration just given is not in the dataset.
       if (message.event === "trial_excluded") toast.err("Trial excluded, not labeled", message.reason || "");
+      // Likewise a trial that ended part-way: there was nothing for a label to decide.
+      if (message.event === "trial_filed") toast.err(`Trial filed as ${message.outcome}, not labeled`, message.reason || "");
     }
   });
 
@@ -352,6 +354,14 @@ function renderNotice(host, summary) {
       summary.last_trial.reason || "",
       h("div.small", { style: { marginTop: "4px" } },
         "Its legs are kept under failure/, marked excluded, with the failing checks in hitl.json.")));
+  } else if (summary.state === "awaiting_task" && summary.last_trial
+             && summary.last_trial.labeled === false && summary.last_trial.filed_under) {
+    const trial = summary.last_trial;
+    host.appendChild(h("div.alert",
+      h("strong", `The last trial ended ${trial.outcome}${trial.failure_stage ? ` at ${trial.failure_stage}` : ""} and was not labeled. `),
+      trial.reason || "",
+      h("div.small", { style: { marginTop: "4px" } },
+        "Its plan did not finish, so it is filed under failure/ with its legs and hitl.json.")));
   } else if (summary.state === "teleop_handoff") {
     host.appendChild(h("div.alert",
       "The arm is yours — the driver has released the robot and closed its cameras. " +

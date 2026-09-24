@@ -244,7 +244,7 @@ is then neither checked nor registrable.
 |---|---|
 | `warm`, `close`, `home`, `release_hardware`, `reacquire_hardware` | Do nothing: right for a planner that holds no hardware. |
 | `require_ready` | Checks the declared recipe's runtime. No recipe: nothing to check. |
-| `capture_frame`, `move_to_joints` | Raise `UnsupportedVerb`. There is no honest default for a camera frame: a verifier shown a made-up one would pass or fail a person's work on nothing. Without `capture_frame`, human phases cannot be verified; turn `hitl.check_human_effects` off, or implement it. |
+| `capture_frame`, `move_to_joints` | Raise `UnsupportedVerb`. There is no honest default for a camera frame: a verifier shown a made-up one would pass or fail a person's work on nothing. Without `capture_frame`, human phases cannot be verified, so a session with `hitl.check_human_effects`, `check_human_preconditions` or `check_tamp_effects` on refuses to start on the planner; implement it, or turn those off. |
 | `create(ctx)` (classmethod) | `validate_options(ctx.options)`, then `cls(ctx)`. Override when construction needs more. |
 | `validate_options(options)` | Refuses any key not in `OPTIONS`, with a difflib hint. |
 | `describe_options(profile, *, settings=None)` | `OptionsView.generic`: each option, as set. |
@@ -579,15 +579,24 @@ is set:
   | `frame_time` | `[F]` | wall clock, float64 |
 
 - **The camera clips** `cameras` names. With none named, at least one of `external_cam.mp4`,
-  `external_cam_2.mp4` and `hand_cam.mp4`.
+  `external_cam_2.mp4` and `hand_cam.mp4`. Every clip is named from those three
+  (`trajectories.CAMERA_FILES`), whatever its dataset key: they are the only names the merge joins,
+  the viewer lists and the export decodes, and a person's teleop legs always use them. Only the
+  cameras every leg of a trial recorded are joined.
 
 `tandem.core.trajectories.is_complete(leg_dir)` is the check. It does not ask for a planner's own
 plan file. `tiptop_plan.json` is TiPToP's, and any other file a leg holds is the recorder's own; the
-merge surfaces the first planner leg's files at the top of the episode.
+merge surfaces the first planner leg's files at the top of the episode. A planner that saves its
+plan can say where with `plan_file` in `_meta.json` (a bare file name, e.g. `"plan.json"`), which is
+what `tandem traj show` and the web UI's "plan: recorded" read; without it they look for
+`tiptop_plan.json`.
 
 **Stamp `_meta.json` even when execution fails part-way.** A leg on disk without its trajectory id
 is filed as an episode of its own. Return `rollout_dir` (usually `save_dir`) and `n_frames`.
-`ExecuteResult.stopped_early=True` means a cooperative stop was honoured.
+`ExecuteResult.stopped_early=True` means a cooperative stop was honoured: tandem passes `should_stop`
+only to a planner that declares `supports_cooperative_stop`, true once the operator preempts or the
+session stops. A leg that stopped early never advances the plan, whatever `ok` says, and the trial
+is filed as aborted rather than as a `tamp_execution` failure.
 
 A planner that records nothing (`n_frames=0`) still stamps `_meta.json`, so the leg directory is
 kept. That is what the scaffold does until real recording is wired in.
@@ -642,7 +651,8 @@ planning needs:
 
 - **an image from `perceive`**: without `rgb_path` a task cannot be decomposed, and the trial ends
   at `invention`;
-- **`capture_frame`**: without it no human phase can be verified.
+- **`capture_frame`**: without it no human phase can be verified, and a session with the camera
+  checks on refuses to start.
 
 The scaffold returns neither until you wire them in. Before collecting with phase planning on, run a
 session with `--no-execute`, and run `tandem plan --backend NAME` on a photo of your workspace.

@@ -110,6 +110,10 @@ function row(profile, traj, reload) {
     flags.push(h("span.chip.violet", `hand-off ×${human}`));
   }
   if (!traj.complete) flags.push(h("span.chip", "incomplete"));
+  // What the method settled, which the status chip alone does not say: an excluded trial is filed
+  // under failure/ like any other, and must not read as one a reviewer can simply relabel.
+  const settled = settledChip(traj);
+  if (settled) flags.push(settled);
 
   return h("tr.clickable", { onclick: () => openDrawer(profile, traj, reload) },
     h("td", h("span.mono", fmtTimestamp(traj.id))),
@@ -120,6 +124,12 @@ function row(profile, traj, reload) {
     h("td.faint", String((traj.cameras || []).length)),
     h("td", h("div.row", ...flags))
   );
+}
+
+function settledChip(traj) {
+  if (!traj.settled) return null;
+  const label = traj.failure_stage ? `${traj.settled} · ${traj.failure_stage}` : traj.settled;
+  return h("span.chip.amber", { title: "Settled by the method (hitl.json): not a demonstration" }, label);
 }
 
 // ---- drawer ----------------------------------------------------------------
@@ -134,6 +144,7 @@ function openDrawer(profile, traj, reload) {
         h("div", { style: { fontWeight: 650 } }, traj.id),
         h("div.faint.small", traj.instruction || "no instruction recorded")),
       h("div.spacer"),
+      settledChip(traj),
       h(`span.chip.${traj.status}`, traj.status),
       h("button.icon.ghost", { onclick: close, title: "Close" }, "✕")),
     body);
@@ -173,8 +184,14 @@ function openDrawer(profile, traj, reload) {
       h("button.small", {
         disabled: status === traj.status,
         onclick: async () => {
+          // The server refuses a settled trial as a success without force; ask first, and say so.
+          const overrule = status === "success" && Boolean(traj.settled);
+          if (overrule && !confirm(
+            `${traj.id} ended ${traj.settled}${traj.failure_stage ? ` at ${traj.failure_stage}` : ""}, ` +
+            "so the method keeps it out of the dataset. File it under success anyway? " +
+            "Its hitl.json will say it was overruled.")) return;
           try {
-            await api.relabel(profile, traj.id, status);
+            await api.relabel(profile, traj.id, status, overrule);
             toast.ok(`Moved to ${status}`);
             close();
             reload();

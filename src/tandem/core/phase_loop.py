@@ -64,7 +64,11 @@ How it maps onto the paper (TANDEM, Sec. IV-D "Task Plan Generation and Executio
 
 How a trial ended is the paper's Fig. 4 taxonomy: ``TrialOutcome.outcome`` and ``failure_stage``,
 kept on the plan as well (``PhasePlan.set_outcome``) so that ``hitl.json`` says it, and announced
-as a ``trial_outcome`` event whenever the loop ends a trial itself.
+as a ``trial_outcome`` event whenever the loop ends a trial itself. That includes a trial that ends
+because something raised: a planner verb or a human executor that fails is recorded at its stage
+(``tamp_planning``, ``tamp_execution``, ``human_policy``) before the error goes on up, and an attempt
+cut short from outside -- a preempt, the session stopping -- is recorded by `PhaseLoop.interrupted`.
+An attempt that ended with its plan unfinished is never left looking like one that ran to the end.
 
 Where this departs from the paper, on purpose:
 
@@ -145,7 +149,7 @@ class TrialOutcome:
 
     The loop keeps this up to date while it runs; it does not only build it at the end. An attempt
     that is preempted, or that cannot get the arm back, leaves `PhaseLoop.run` as an exception. The
-    session still has to label and merge whatever reached disk, so it reads `PhaseLoop.outcome` on
+    session still has to file and merge whatever reached disk, so it reads `PhaseLoop.outcome` on
     every exit path.
 
     For a trial that ran to the end, the operator's label is still the verdict, so `outcome` is None
@@ -153,7 +157,8 @@ class TrialOutcome:
     `failure_stage` to the stage that ended it. `outcome` is one of "success", "failure", "excluded"
     or "aborted". `failure_stage` is one of "invention", "tamp_planning", "tamp_execution",
     "verification" or "human_policy". The session reads `outcome` to decide whether to ask for a
-    label at all: an "excluded" trial is filed without one.
+    label at all: a trial the loop ended is filed without one, except a failed check left to the
+    label on purpose (``on_verification_failure: label``).
     """
 
     trajectory_id: str
@@ -166,6 +171,16 @@ class TrialOutcome:
     # provenance you want.
     plan: PhasePlan | None = None
     legs_recorded: int = 0
+    # Every plan this attempt proposed and then replaced (``on_robot_phase_failure: replan``), oldest
+    # first, each as ``PhasePlan.to_json`` wrote it at the moment it was replaced, with its
+    # ``plan_generation`` and why it was given up (``superseded_because``). Without them the record
+    # is `plan` alone: the verdicts of a person's step checked under an earlier plan, its phases and
+    # its planner records all vanish, while the legs that carried them out stay in the episode.
+    superseded_plans: list[dict] = field(default_factory=list)
+    # Recorded leg directory name -> the generation of the plan it carried out a phase of (0 for the
+    # first plan, one more for each replan). A replanned proposal numbers its phases from 0 again, so
+    # a leg's phase index alone no longer says which phase it was; (generation, index) does.
+    leg_generations: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -205,7 +220,19 @@ class OperatorIO(Protocol):
     """
 
     def check_preempt(self) -> None:
-        """Raise if the operator has abandoned the attempt. Called at every step boundary."""
+        """Raise if the attempt must end here: the operator abandoned it, or the session is stopping.
+
+        Called at every step boundary. A stop is one too: a session told to stop must not perceive,
+        plan or move the arm again, however many phases are left.
+        """
+
+    def leg_should_stop(self) -> Callable[[], bool]:
+        """What a robot leg polls to be stopped part-way, for a planner that declares it can be.
+
+        True once `check_preempt` would raise. It must not consume anything and must not block: the
+        planner polls it at its own step boundaries, and the `check_preempt` after the leg is what
+        then ends the attempt.
+        """
 
     def take_handoff_request(self) -> bool:
         """Whether the operator asked for the arm since the last boundary. Consumes the request."""
@@ -259,7 +286,7 @@ class PhaseLoop:
 
     The human executors are not per-attempt state. Each is built the first time it is needed and kept
     for the loop's life, because building one may start a process or load a policy, and a session
-    runs attempt after attempt through one loop.
+    runs attempt after attempt through one loop. `close` shuts them down when the session ends.
     """
 
     def __init__(
@@ -286,6 +313,9 @@ class PhaseLoop:
         # is what `kill` reaches from another thread.
         self._executors: dict[str, HumanExecutor] = {}
         self._running: HumanExecutor | None = None
+        # A forced stop (`kill`), remembered rather than only passed on: one that lands while the arm
+        # is being released has no executor running to reach, and must still stop the leg starting.
+        self._kill_requested = False
 
         self.outcome = TrialOutcome(trajectory_id="")
         # One attempt's working state, reset by `run`.
@@ -323,10 +353,13 @@ class PhaseLoop:
         `vlm_dir` is where every model call made during the attempt is recorded, or None to record
         nothing.
 
-        A preempt, or an arm that cannot be taken back, is raised straight through. `outcome` is
-        still accurate when that happens.
+        A preempt, or an arm that cannot be taken back, is raised straight through, and so is a
+        planner or executor that fails. `outcome` is still accurate when that happens: a failure is
+        recorded at its stage before it is raised, and whoever catches a preempt says so through
+        `interrupted`.
         """
         self.outcome = TrialOutcome(trajectory_id=trajectory_id)
+        self._kill_requested = False
         self._task = task
         self._instruction = instruction
         self._trajectory_id = trajectory_id
@@ -411,32 +444,105 @@ class PhaseLoop:
             phase_index=plan.index if plan is not None else None,
         )
 
-    def _leg_recorded(self, n_frames: int) -> None:
-        """Count a leg that reached disk. The session labels the attempt only if one did."""
-        if n_frames:
-            self.outcome.legs_recorded += 1
+    def interrupted(self, reason: str, *, outcome: str = "aborted") -> None:
+        """Record an attempt that was cut short from outside the loop, if it had work left.
+
+        A preempt or a stop unwinds `run` as an exception raised by the operator's own
+        `check_preempt`, so the loop never gets to say how the attempt ended; the session, which
+        catches it, says it here. ``outcome`` is ``aborted`` for an attempt a person ended, and
+        ``failure`` for one that ended on an error nothing recorded at a stage.
+
+        Only an attempt with work left is recorded. A preempt that lands after the last phase ended
+        interrupted nothing: the plan ran to the end, and the operator's label is still its verdict.
+        And an outcome the loop already recorded stands -- it is the more specific of the two.
+        """
+        if self.outcome.outcome is not None or not self._work_left():
+            return
+        self._show_human_phase(None)
+        self._plan = None
+        self._task_done = True
+        self.events.log(f"{reason}; this attempt ends here")
+        self._end(outcome, None, reason)
+
+    def _work_left(self) -> bool:
+        """Whether the attempt still had something to do: a phase to run, or (with no plan) its leg."""
+        if self._task_done:
+            return False
+        return not (self._plan is not None and self._plan.finished)
+
+    def _leg_recorded(self, n_frames: int, *leg_dirs: Path | None, phased: bool = True) -> None:
+        """Count a leg that reached disk. The session labels the attempt only if one did.
+
+        ``leg_dirs`` are where it was recorded. A leg that carried out a phase of a plan is noted
+        against that plan's generation (`TrialOutcome.leg_generations`), so the merged episode can
+        say which plan's phase each stretch was once a replan has numbered the phases from 0 again.
+        """
+        if not n_frames:
+            return
+        self.outcome.legs_recorded += 1
+        if phased and self._plan is not None:
+            generation = len(self.outcome.superseded_plans)
+            for leg_dir in leg_dirs:
+                if leg_dir is not None:
+                    self.outcome.leg_generations[Path(leg_dir).name] = generation
 
     def kill(self) -> None:
-        """End the human leg in flight at once, if there is one. Called from another thread.
+        """End the human leg in flight at once, or the one about to start. Called from another thread.
 
         A forced stop's, for an executor that is wedged: its `run` returns ``aborted`` as soon as it
-        can, and the loop then takes the arm back as it would after any leg. Nothing else in the loop
-        can be cut short from outside; a robot leg runs to the end of its segment.
+        can, and the loop then takes the arm back as it would after any leg. The request is kept as
+        well as passed on, because the leg may not have started yet: the arm takes seconds to release,
+        and a kill that landed then used to reach nothing, so the leg started anyway and came back
+        ``done`` -- a forced stop recorded as a step carried out, and checked as one (`_lend_arm`).
+        Nothing else in the loop can be cut short from outside; a robot leg runs to the end of its
+        segment, or to its planner's next step boundary for one that stops cooperatively.
+
+        Set before the leg in flight is read, and `_lend_arm` publishes the leg before reading the
+        flag, so whichever order the two threads run in, one of them sees the other.
         """
+        self._kill_requested = True
         executor = self._running
         if executor is not None:
             executor.kill()
+
+    def close(self) -> None:
+        """Shut down every human executor the loop built. Called once, when the session ends.
+
+        Building an executor may start a process or open a device (a policy server, say), and the
+        loop keeps each one for the session's life, so nothing else would ever release it. An
+        executor's ``close`` is optional (``HumanExecutor``); one that raises is logged, and the rest
+        are still closed.
+        """
+        built, self._executors = self._executors, {}
+        for name, executor in built.items():
+            close = getattr(executor, "close", None)
+            if not callable(close):
+                continue
+            try:
+                close()
+            except Exception as exc:
+                self.events.log(f"could not shut down the {name} executor cleanly: {type(exc).__name__}: {exc}")
 
     # ---- one leg -----------------------------------------------------------
 
     def _take_turn(self, scene: SceneView | None, leg_dir: Path | None) -> None:
         """Carry out whatever is due now: a hand-off the operator asked for, a person's step, or a leg.
 
-        ``scene`` and ``leg_dir`` are None exactly when the step due is a person's, which is never
-        preceded by a perception pass.
+        ``scene`` and ``leg_dir`` are None when the step due is a person's, which is never preceded
+        by a perception pass -- except for a plan just proposed that opens with one, which is taken
+        from the pass the proposal needed anyway.
+
+        A person's step due now is looked at BEFORE a pending hand-off. An operator who sees their
+        step coming and asks for the arm is asking to do that step, and `_run_human_phase` takes the
+        request as its answer, so the leg is stamped with the phase. Taken here as an unstamped
+        hand-off instead, the real demonstration of the step was attributed to no phase, and the
+        stamped leg the prompt then insisted on (a step "done" while recording is refused) held a
+        second, usually empty, stretch.
         """
         phase = self._plan.current if self._plan is not None else None
-        if self.operator.take_handoff_request():
+        if phase is not None and phase.is_human:
+            self._run_human_phase(phase)
+        elif self.operator.take_handoff_request():
             # An operator-asked hand-off, honoured at a phase boundary so the arm parks somewhere
             # sane rather than mid-motion. Nothing advances: the same phase (or, with no plan, the
             # same task) is re-perceived and planned afterwards. That pass leaves the gripper as the
@@ -444,8 +550,6 @@ class PhaseLoop:
             # Always teleop, whatever `human_executor` is: the operator asked for the arm, and only
             # an executor a person drives can lend it with no phase attached.
             self._lend_arm(TELEOP, None)
-        elif phase is not None and phase.is_human:
-            self._run_human_phase(phase)
         else:
             self._run_robot_phase(scene, leg_dir)
 
@@ -469,12 +573,18 @@ class PhaseLoop:
             options["open_gripper"] = True
             self.events.log("a person had the arm last, so the gripper is opened before looking")
         self._after_human = False
-        scene = self.backend.perceive(
-            task_hint=self._task,
-            save_dir=leg_dir,
-            reset_arm=first_leg,
-            **options,
-        )
+        try:
+            scene = self.backend.perceive(
+                task_hint=self._task,
+                save_dir=leg_dir,
+                reset_arm=first_leg,
+                **options,
+            )
+        except Exception as exc:
+            # Recorded at its stage before it goes on up (`_failed`): legs already on disk are filed
+            # by what this says, and without it a trial whose planner died reads as one that ran.
+            self._failed("tamp_planning", f"the {self.caps.name} planner could not perceive the scene", exc)
+            raise
         self.events.log(f"perceived: {', '.join(scene.object_labels) or 'nothing'}")
         return scene
 
@@ -549,6 +659,18 @@ class PhaseLoop:
             self._end("failure", "invention", reason)
             return False
 
+        previous = self.outcome.plan
+        if previous is not None:
+            # A replan: the plan this one replaces is kept on the record, as it stood when it was given
+            # up -- which is now, since `_replan` dropped it and nothing has touched it since. Its
+            # verdicts are the only evidence that a person's step carried out under it was checked,
+            # and its phases are what the legs recorded under it are stamped against. Kept only once
+            # the new plan exists: if the re-proposal fails, the old plan is still the record, and
+            # listing it here as well would file it twice.
+            snapshot = previous.to_json()
+            snapshot["plan_generation"] = len(self.outcome.superseded_plans)
+            snapshot["superseded_because"] = self._replan_feedback[-1] if self._replan_feedback else None
+            self.outcome.superseded_plans.append(snapshot)
         self._plan = plan
         self.outcome.plan = plan
         self.operator.show_progress((0, len(plan.phases)))
@@ -644,7 +766,11 @@ class PhaseLoop:
             self.events.log(
                 "more of the task follows this leg, so it ends where it stops rather than at home"
             )
-        result = self.backend.plan(scene.scene_id, goal, surfaces=surfaces, save_dir=save_dir, **options)
+        try:
+            result = self.backend.plan(scene.scene_id, goal, surfaces=surfaces, save_dir=save_dir, **options)
+        except Exception as exc:
+            self._failed("tamp_planning", f"the {self.caps.name} planner failed planning {description!r}", exc)
+            raise
 
         if not result.ok:
             self._on_plan_failure(result.failure_reason or "no plan found", run)
@@ -655,21 +781,43 @@ class PhaseLoop:
             # On the record before the arm moves, not once the leg has run: a leg that then fails to
             # execute is audited by exactly this -- which plan it was carrying out.
             self._plan.record_plan(self._plan.index, result)
-        execution = self.backend.execute(
-            result.plan_handle,
-            LegSpec(
-                trajectory_id=self._trajectory_id,
-                instruction=self._instruction,
-                phase_index=index,
-                n_phases=total,
-                phase_description=description,
-                record=self.record,
-            ),
-            save_dir=save_dir,
-        )
+        # A planner that declares it can stop at its own step boundaries is given the stop to poll:
+        # a preempt or a session stop then ends the leg there, rather than after the whole segment.
+        # Only then: one that does not declare it may leave the keyword out of its signature.
+        cooperative: dict[str, Any] = {}
+        if self.caps.supports_cooperative_stop:
+            cooperative["should_stop"] = self.operator.leg_should_stop()
+        try:
+            execution = self.backend.execute(
+                result.plan_handle,
+                LegSpec(
+                    trajectory_id=self._trajectory_id,
+                    instruction=self._instruction,
+                    phase_index=index,
+                    n_phases=total,
+                    phase_description=description,
+                    record=self.record,
+                ),
+                save_dir=save_dir,
+                **cooperative,
+            )
+        except Exception as exc:
+            # The arm may have moved and recorded before the planner died. A leg its recorder already
+            # stamped is a leg on disk (the rule `LegDirs.retire` applies), and it must be filed with
+            # the rest rather than left unmerged because the count said nothing reached disk.
+            if (Path(save_dir) / "_meta.json").is_file():
+                self._leg_recorded(1, save_dir)
+            self._failed("tamp_execution", f"the robot could not carry out {description!r}", exc)
+            raise
         self.operator.rollout_saved(execution.n_frames)
-        self._leg_recorded(execution.n_frames)
+        self._leg_recorded(execution.n_frames, save_dir)
         self.events.event("rollout_saved", dir=str(save_dir), n_frames=execution.n_frames)
+        if execution.stopped_early:
+            # Before the ok check, whatever `ok` says: a leg stopped part-way did not carry its phase
+            # out, so it must never advance the plan, and a stop the operator asked for is not the
+            # planner failing to execute (`tamp_execution`).
+            self._stopped_part_way(description)
+            return
         if not execution.ok:
             self._execution_failed(execution.failure_reason, description)
             return
@@ -743,14 +891,43 @@ class PhaseLoop:
         There is no policy for this, unlike a leg that cannot be planned. The arm is somewhere no
         plan put it, possibly holding something, and every later phase was planned against a scene
         that no longer exists. Advancing would ask the next phase of a world the robot did not
-        produce, and record a demonstration of it. The legs already on disk still reach the
-        operator's label, with the stage beside it.
+        produce, and record a demonstration of it. The legs already on disk are still filed, under
+        failure/ with the stage beside them; an unfinished plan is not something a label could make
+        a demonstration of.
         """
         reason = f"the robot could not carry out {description!r}: {failure or 'the planner gave no reason'}"
         self.events.log(f"execution failed: {reason}; ending this attempt")
         self._plan = None
         self._task_done = True
         self._end("failure", "tamp_execution", reason)
+
+    def _stopped_part_way(self, description: str) -> None:
+        """End the trial over a robot leg its planner stopped before the end (``stopped_early``).
+
+        Normally that is the operator's stop, honoured at a step boundary by a planner that declares
+        cooperative stop, and the preempt (or the session stopping) is still pending: `check_preempt`
+        unwinds the attempt as the interrupt it is. A planner that stopped short with nothing asking
+        it to did not carry the leg out, which is an execution failure like any other.
+        """
+        self.operator.check_preempt()
+        reason = f"the {self.caps.name} planner stopped {description!r} part-way, and nothing asked it to"
+        self.events.log(f"{reason}; ending this attempt")
+        self._plan = None
+        self._task_done = True
+        self._end("failure", "tamp_execution", reason)
+
+    def _failed(self, stage: str, what: str, exc: BaseException) -> None:
+        """Record an attempt a planner verb or a human executor ended by raising, at its stage.
+
+        The caller raises the error on afterwards, so the session's own error path still runs. What
+        this adds is the record: the stage the paper's Fig. 4 counts it under, on the outcome and the
+        plan, and a reason in the log before anyone is asked anything about the trial.
+        """
+        reason = f"{what}: {type(exc).__name__}: {exc}"
+        self.events.log(f"{reason}; ending this attempt")
+        self._show_human_phase(None)
+        self._task_done = True
+        self._end("failure", stage, reason)
 
     def _on_plan_failure(self, reason: str, run: Sequence[Phase]) -> None:
         """What happens when the planner cannot plan a phase.
@@ -841,7 +1018,7 @@ class PhaseLoop:
         of it is ``on_verification_failure`` (`_verification_failed`).
         """
         from tandem.executors.base import HumanPhaseRequest
-        from tandem.planning.grounding import verify_effects
+        from tandem.planning.grounding import checkable, verify_effects
         from tandem.planning.plan import phase_summary, retry_message
 
         cfg = self.cfg
@@ -875,7 +1052,9 @@ class PhaseLoop:
             self._show_human_phase(view)
             self.events.event("awaiting_human_phase", **summary)
 
-            answer = self.operator.await_human_phase()
+            # A hand-off the operator asked for while their step was coming up is that step's leg,
+            # stamped with it -- the same answer the prompt gives when asked for the arm.
+            answer = "teleop" if self.operator.take_handoff_request() else self.operator.await_human_phase()
             if answer == "abort":
                 self.events.log("the phase was abandoned; ending this attempt")
                 self._show_human_phase(None)
@@ -893,6 +1072,12 @@ class PhaseLoop:
                 if carried_out.status == "aborted":
                     self._human_executor_failed(phase)
                     return
+                # A leg the session's stop ended is not a step carried out: `should_stop` handed the
+                # arm back because the session is going, not because the person finished. Nothing
+                # after this may run -- no check, and above all no next robot leg, seconds after a
+                # person let go of the arm, while the operator believes the session is stopping.
+                # After the aborted branch, which a forced stop must still reach (`human_policy`).
+                self.operator.check_preempt()
                 if not carried_out.recorded and not by_hand:
                     self._refuse_unrecorded(index, f"the {cfg.human_executor} leg recorded nothing")
                     continue
@@ -926,6 +1111,25 @@ class PhaseLoop:
             if skipped is not None:
                 # Recorded as NOT checked rather than as passed, so the trail cannot be read as a
                 # verification that happened.
+                self.events.log(f"not verifying this step: {skipped}")
+                self.events.event(
+                    "human_phase_verified",
+                    phase_index=index,
+                    attempt=attempt,
+                    ok=None,
+                    skipped=skipped,
+                    verdicts=[],
+                )
+                break
+
+            if not checkable(phase.add_effects | phase.delete_effects, self._invented(), self.caps):
+                # Nothing a camera can settle -- Holding and HandEmpty alone, under a planner that
+                # declares only On checkable -- is not a check that passed, the rule the precondition
+                # check already follows. Put to the camera anyway, it came back ok with no verdicts
+                # and nothing on the record, so hitl.json could not tell "passed" from "never
+                # checked". And there is no reason to take a frame.
+                skipped = "none of its effects is one a camera can settle"
+                self._record_unchecked(index, "effect check", f"not run: {skipped}")
                 self.events.log(f"not verifying this step: {skipped}")
                 self.events.event(
                     "human_phase_verified",
@@ -1237,8 +1441,13 @@ class PhaseLoop:
 
         ``request`` is the phase being carried out, or None for a hand-off the operator asked for,
         which is stamped with no phase.
+
+        A forced stop that arrived before the leg started (`kill`, while the arm was being released)
+        means the leg never starts: it comes back ``aborted`` without the executor being run. An
+        executor that raises anything but ``CustodyError`` ends the trial at ``human_policy``, on the
+        record before the error goes on up, and the arm is still taken back.
         """
-        from tandem.executors.base import CustodyError
+        from tandem.executors.base import CustodyError, HumanPhaseResult
         from tandem.planners.base import LegSpec
 
         executor = self._executor(name)
@@ -1273,14 +1482,23 @@ class PhaseLoop:
         try:
             self._running = executor
             try:
-                result = executor.run(
-                    request, leg, save_root=self.legs.profile.trajectories_dir(), should_stop=should_stop
-                )
+                if self._kill_requested:
+                    self.events.log(f"a forced stop arrived before the {name} leg started; it is not started")
+                    result = HumanPhaseResult("aborted")
+                else:
+                    result = executor.run(
+                        request, leg, save_root=self.legs.profile.trajectories_dir(), should_stop=should_stop
+                    )
             finally:
                 self._running = None
-            self._leg_recorded(result.n_frames)
+            self._leg_recorded(
+                result.n_frames, *(result.leg_dirs or (result.leg_dir,)), phased=request is not None
+            )
         except CustodyError:
             held_by_executor = True
+            raise
+        except Exception as exc:
+            self._failed("human_policy", f"the {name} executor failed", exc)
             raise
         finally:
             if not held_by_executor:
@@ -1338,15 +1556,28 @@ class PhaseLoop:
         demonstration. That includes the ValueError ``verify_atoms`` raises for an operator that adds
         and deletes the same atom -- a bug upstream, reported as the error rather than as a phase the
         person could never pass.
+
+        Except a planner that cannot capture a frame at all (``UnsupportedVerb``). That is not an
+        outage that passes; it is every check of every trial, and read as one it accepted every
+        person's step unchecked, so the paper's exclusion rule could never fire. The session refuses
+        to start such a planner with these checks on (``Session._require_frames``); should one get
+        here anyway, the trial ends at ``verification`` (`_verification_failed`) and the error goes
+        on up, loudly.
         """
         import asyncio
 
+        from tandem.planners.sdk import UnsupportedVerb
         from tandem.planning.record import recording_to
 
         try:
             image = frame()
             with recording_to(self._vlm_dir):
                 ok, verdicts = asyncio.run(verify(image))
+        except UnsupportedVerb as exc:
+            self._verification_failed(
+                f"this trial cannot be verified: {exc.message}" + (f" {exc.hint}" if exc.hint else "")
+            )
+            raise
         except Exception as exc:
             return _Check(ok=True, error=f"{type(exc).__name__}: {exc}")
         return _Check(ok=ok, verdicts=list(verdicts))

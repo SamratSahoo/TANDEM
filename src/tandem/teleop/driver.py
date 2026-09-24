@@ -1,23 +1,24 @@
 # ruff: noqa
-"""Teleoperation + capture driver for the data-collection app's teleop flow.
+"""Teleoperation + capture driver: what a person drives the arm with for a human leg.
 
-Drives the arm from either the **VR** (Oculus) controller — same as ``scripts/main.py`` — or a
-**SpaceMouse** (``--device``), and captures each episode from the browser exactly like the tamp/eval
-capture drivers (events-file + stdin protocol, see ``data-collection/ARCHITECTURE.md`` §6). The operator
-moves the end-effector with the chosen controller (6-DOF -> Cartesian velocity) and works the gripper
-(VR trigger, or the SpaceMouse's two buttons); the operator decides when each episode ends (from the
-UI). Every episode is written in the raw episode format (§3) so ``collect/build_lerobot.py`` builds it
-exactly like a tamp episode.
+Drives the arm from either the **VR** (Oculus) controller — same as DROID's ``scripts/main.py`` — or a
+**SpaceMouse** (``--device``), and captures each episode over an events file plus the stdin protocol
+below, which ``tandem/teleop/child.py``'s ``TeleopChild`` answers. The operator moves the end-effector
+with the chosen controller (6-DOF -> Cartesian velocity) and works the gripper (VR trigger, or the
+SpaceMouse's two buttons); the operator decides when each episode ends (from the UI or the terminal).
+Every episode is written in the raw episode format (``teleop/raw_episode.py``) so the export
+(``tandem.export``, ``export/build.py``) builds it exactly like a tamp episode.
 
-Unlike the old ``scripts/main.py`` + Tk GUI VR flow, session control (start / end / discard / label) is
-driven over the stdin protocol from the browser for BOTH devices — the controller only moves the arm.
+Unlike DROID's ``scripts/main.py`` + Tk GUI VR flow, session control (start / end / discard / label) is
+driven over the stdin protocol by tandem for BOTH devices — the controller only moves the arm.
 
 Nothing is installed on the NUC — this is a drop-in for the existing PC-side teleop (still talks to the
 NUC's ``run_server.py`` over the same ``StableRobotEnv`` -> ServerInterface path); only the controller
 changes. VR uses ``droid.controllers.oculus_controller.VRPolicy``; the SpaceMouse is read
 dependency-free (see ``spacemouse.py``).
 
-Protocol (stdin lines written by the Node server):
+Protocol (stdin lines written by ``tandem/teleop/child.py``, launched once per leg by
+``executors/teleop.py``):
   {"cmd":"start"}   begin an episode (at the task prompt)
   {"cmd":"end"}     stop + SAVE the current episode        {"cmd":"discard"} stop + throw it away
   {"cmd":"home"}    send the arm to its home pose (only at the task prompt, between episodes)
@@ -26,7 +27,8 @@ Protocol (stdin lines written by the Node server):
   y | n             label the saved episode success/failure   q  finish the session
 
 With --trajectory-id (a tamp->teleop hand-off), episodes are legs of that tamp trajectory: they are
-stamped with the id, left unlabeled in eval/, and never prompt for y/n. See ARCHITECTURE.md §6c.
+stamped with the id, left unlabeled in eval/, and never prompt for y/n. See
+docs/ADDING_A_HUMAN_EXECUTOR.md (the TeleopExecutor) and ``teleop/child.py`` for the hand-off.
 With --phase-index / --n-phases / --phase-description (a human phase of a phase-planned task), each
 leg's _meta.json also says which phase it records, under the keys the TAMP legs use.
 
@@ -36,7 +38,7 @@ so it is clear of the workspace before the next episode; the home motion is not 
 Events (appended to $TELEOP_EVENTS_FILE): session_start, awaiting_task, rollout_start, rollout_saved,
 awaiting_label, labeled, rollout_aborted, homing, homed, session_end.
 
-Run under the DROID conda env (same as the VR ``scripts/main.py``).
+Run under the DROID conda env (same as DROID's VR ``scripts/main.py``).
 """
 
 import dataclasses
@@ -64,7 +66,8 @@ from spacemouse import SpaceMouse  # noqa: E402
 CONTROL_HZ = 15  # matches StableRobotEnv.control_hz + the LeRobot build FPS
 # The env's action_dict["joint_velocity"] is the IK-commanded joint velocity ALREADY NORMALIZED to
 # [-1,1] (see droid/franka/robot.py::create_action_dict + robot_ik_solver.py) -- exactly the DROID /
-# lerobot/droid_1.0.1 action convention. We record it AS-IS (no scaling); build_lerobot just CLIPS it
+# lerobot/droid_1.0.1 action convention. We record it AS-IS (no scaling); the export
+# (export/build.py::clip_joint_velocity) just CLIPS it
 # for the teleop kind and does NOT re-normalize it (unlike the rad/s tamp/plan path). So there is no
 # double normalization: the IK value is normalized once, at its source (the robot's IK solver).
 EXTERNAL_CAM, EXTERNAL_CAM_2, HAND_CAM = "external_cam.mp4", "external_cam_2.mp4", "hand_cam.mp4"
@@ -276,8 +279,9 @@ class Args:
     keep_pose: bool = False  # skip the startup reset-to-home move; arm stays wherever it already is
     # Set by a tamp->teleop hand-off: this session's episodes are LEGS of that tamp trajectory, not
     # episodes in their own right. They are stamped with the id and left UNLABELED in eval/ -- the
-    # success/failure verdict belongs to the whole trajectory and is given once, on the final tamp
-    # leg, after which collect/merge_trajectory.py joins every leg into one episode.
+    # success/failure verdict belongs to the whole trajectory and is given once, by tandem's session
+    # when the trial ends, after which core/episodes.py::merge_trajectory (via core/merge.py) joins
+    # every leg into one episode.
     trajectory_id: str = ""
     # Set by tandem when this session records a HUMAN PHASE of a phase-planned task: which phase φ_k
     # (0-based) out of how many, and the phase's own words. Stamped into every saved leg's _meta.json
@@ -402,8 +406,8 @@ def record_episode(env, policy, ep_dir, args, events):
     frame_time = np.asarray(ft_log[:n], dtype=np.float64)
     # cmd_joint_velocity / cmd_joint_position are the IK COMMAND captured from env.step's action_dict --
     # the SAME quantities DROID records (droid/franka/robot.py create_action_dict). joint_velocity is
-    # ALREADY normalized to [-1,1] (the DROID action convention), so we store it AS-IS; build_lerobot
-    # only clips it for the teleop kind (it does NOT divide by 3 -- that is the rad/s tamp/plan path).
+    # ALREADY normalized to [-1,1] (the DROID action convention), so we store it AS-IS; the export
+    # (export/build.py::clip_joint_velocity) only clips it for the teleop kind (it does NOT divide by 3 -- that is the rad/s tamp/plan path).
     # cmd_joint_position is the IK commanded target (radians). This REPLACES the old finite-difference
     # of the MEASURED joints, which captured the achieved (undertracked) motion ~4-5x below the command.
     cmd_jv = np.stack(cmd_jv_log[:n]).astype(np.float32)          # IK command, normalized [-1,1]
@@ -542,8 +546,8 @@ def main(args: Args):
 
             if args.trajectory_id:
                 # A hand-off leg is not a standalone episode, so there is nothing to rate here: it
-                # stays unlabeled in eval/ until the trajectory it belongs to is labeled on the
-                # final tamp leg and merge_trajectory.py folds it in. Prompting would also stall
+                # stays unlabeled in eval/ until tandem's session files the trajectory it belongs to
+                # and core/episodes.py::merge_trajectory folds it in. Prompting would also stall
                 # "Return control to TAMP", which is the operator's actual next action.
                 print(f"[teleop] hand-off leg saved unlabeled in {ep_dir} (trajectory {args.trajectory_id})",
                       flush=True)

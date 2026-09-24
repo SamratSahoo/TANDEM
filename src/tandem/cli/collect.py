@@ -166,14 +166,18 @@ def _run_dashboard(session, profile) -> None:
 def _excluded_note(trial: dict) -> str:
     """Why the session came back to the task prompt without asking for a label, if that is why.
 
-    An excluded trial skips the label prompt entirely, so without this the operator sees the
-    session return to the task prompt and has no idea the demonstration they just gave is not in
-    the dataset.
+    A trial the loop ended itself skips the label prompt entirely -- excluded, failed part-way, or
+    aborted -- so without this the operator sees the session return to the task prompt and has no
+    idea the demonstration they just gave is not in the dataset, or why.
     """
-    if not trial.get("excluded"):
-        return ""
-    reason = _escape(str(trial.get("reason") or "a human phase did not verify"))
-    return f"[warn]Excluded, not labeled: {reason}[/warn]\n"
+    if trial.get("excluded"):
+        reason = _escape(str(trial.get("reason") or "a human phase did not verify"))
+        return f"[warn]Excluded, not labeled: {reason}[/warn]\n"
+    if trial.get("labeled") is False and trial.get("filed_under"):
+        stage = f" at {trial['failure_stage']}" if trial.get("failure_stage") else ""
+        reason = _escape(str(trial.get("reason") or "the attempt did not finish"))
+        return f"[warn]Filed as {trial.get('outcome')}{stage}, not labeled: {reason}[/warn]\n"
+    return ""
 
 
 def _stopped_note(trial: dict) -> str:

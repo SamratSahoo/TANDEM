@@ -49,8 +49,8 @@ export const api = {
     request("GET", `/trajectories/${encodeURIComponent(profile)}/${encodeURIComponent(id)}`),
   series: (profile, id) =>
     request("GET", `/trajectories/${encodeURIComponent(profile)}/${encodeURIComponent(id)}/series`),
-  relabel: (profile, id, status) =>
-    request("POST", `/trajectories/${encodeURIComponent(profile)}/${encodeURIComponent(id)}/relabel`, { status }),
+  relabel: (profile, id, status, force = false) =>
+    request("POST", `/trajectories/${encodeURIComponent(profile)}/${encodeURIComponent(id)}/relabel`, { status, force }),
   deleteTrajectory: (profile, id) =>
     request("DELETE", `/trajectories/${encodeURIComponent(profile)}/${encodeURIComponent(id)}`),
   mediaUrl: (profile, id, file) =>

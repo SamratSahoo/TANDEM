@@ -10,11 +10,15 @@ On-disk layout (unchanged from the source system, so data moves between the two)
         external_cam.mp4  external_cam_2.mp4  hand_cam.mp4
         robot_state.npz           per-frame measured + commanded arrays
         _meta.json                instruction, fps, n_frames, timestamps, lineage
-        tiptop_plan.json          the TipTop backend's serialized plan (backend-specific, optional)
+        tiptop_plan.json          the TipTop backend's serialized plan (backend-specific, optional;
+                                  another planner names its own with `plan_file` in _meta.json)
+        hitl.json                 the phase record, when phase planning was on
         segments/<NN>_<source>_<ts>/   raw legs of a merged hand-off trajectory
 
 The first three lines are the RECORDING CONTRACT every leg must meet, whichever backend or human
-executor wrote it (see `is_complete`). Anything else in the directory is that recorder's own.
+executor wrote it (see `is_complete`). Clips are named from CAMERA_FILES: those are the only names
+the merge joins, the viewer lists and the export decodes. Anything else in the directory is that
+recorder's own.
 """
 
 from __future__ import annotations
@@ -38,6 +42,8 @@ CAMERA_LABELS = {
     "hand_cam.mp4": "Wrist",
 }
 
+# The plan file of a leg that does not name its own (``plan_file`` in _meta.json): TiPToP's, and
+# every episode recorded before a planner could name one.
 PLAN_FILE = "tiptop_plan.json"
 STATE_FILE = "robot_state.npz"
 META_FILE = "_meta.json"
@@ -75,6 +81,15 @@ class Trajectory:
     n_phases: int = 0
     n_human_phases: int = 0
     has_vlm_log: bool = False
+    # How the trial ended, as its phase record says (hitl.json), None without one. `excluded` is the
+    # method's rule for a human step that never verified: kept on disk, never in the dataset -- which
+    # a listing that showed it as a plain "failure" invited a reviewer to undo with a relabel.
+    # `settled` is how the phase loop settled it, when it did (`settled_outcome`): such a trial is
+    # never a demonstration, whichever directory it sits in, until a forced relabel overrules it.
+    outcome: str | None = None
+    excluded: bool = False
+    failure_stage: str | None = None
+    settled: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -101,6 +116,10 @@ class Trajectory:
             "n_phases": self.n_phases,
             "n_human_phases": self.n_human_phases,
             "has_vlm_log": self.has_vlm_log,
+            "outcome": self.outcome,
+            "excluded": self.excluded,
+            "failure_stage": self.failure_stage,
+            "settled": self.settled,
         }
 
 
@@ -184,8 +203,29 @@ def is_complete(traj_dir: Path, meta: dict | None = None) -> bool:
     # A bare file name only: the map comes off disk, and `traj_dir / name` must not wander.
     clips = [name for name in named.values() if isinstance(name, str) and name and Path(name).name == name]
     if clips:
+        # And one of CAMERA_FILES. A clip under a name of the planner's own passed here and then
+        # could not be merged ("no camera is present in all legs"), listed or exported: the merge,
+        # the viewer and the export all read the fixed names, which is also what every teleop leg
+        # writes -- so the fixed names are what keeps a planner's legs joinable with a person's.
+        if any(name not in CAMERA_FILES for name in clips):
+            return False
         return all((traj_dir / name).is_file() for name in clips)
     return any((traj_dir / name).is_file() for name in CAMERA_FILES)
+
+
+def plan_file(traj_dir: Path, meta: dict | None = None) -> Path:
+    """Where a trajectory's planner saved its plan: the ``plan_file`` its _meta.json names, or PLAN_FILE.
+
+    Named by the planner that recorded the leg, since the file is the planner's own. The merge copies
+    the primary leg's _meta.json to the top, so a merged episode names its plan the same way. A name
+    that is not a bare file name is ignored: the value comes off disk, and must not wander.
+    """
+    if meta is None:
+        meta = read_meta(traj_dir)
+    named = meta.get("plan_file")
+    if isinstance(named, str) and named and Path(named).name == named:
+        return traj_dir / named
+    return traj_dir / PLAN_FILE
 
 
 def read(traj_dir: Path, *, profile_name: str = "", status: str = "", with_size: bool = False) -> Trajectory:
@@ -193,13 +233,14 @@ def read(traj_dir: Path, *, profile_name: str = "", status: str = "", with_size:
     n_frames, fps = _frames_and_fps(traj_dir, meta)
     cameras = [name for name in CAMERA_FILES if (traj_dir / name).is_file()]
     has_state = (traj_dir / STATE_FILE).is_file()
-    has_plan = (traj_dir / PLAN_FILE).is_file()
+    has_plan = plan_file(traj_dir, meta).is_file()
 
     # A merged hand-off trajectory carries its legs' boundaries; an ordinary rollout has none.
     segments = meta.get("segments") if meta.get("video_aligned") else None
 
     hitl = read_hitl(traj_dir)
     phases = hitl.get("phases") or [] if hitl else []
+    outcome = hitl.get("outcome") if isinstance(hitl.get("outcome"), str) else None
 
     return Trajectory(
         id=traj_dir.name,
@@ -224,6 +265,10 @@ def read(traj_dir: Path, *, profile_name: str = "", status: str = "", with_size:
         n_phases=len(phases),
         n_human_phases=sum(1 for p in phases if isinstance(p, dict) and p.get("executor") == "human"),
         has_vlm_log=(traj_dir / VLM_DIR).is_dir(),
+        outcome=outcome,
+        excluded=settled_outcome(hitl) == "excluded",
+        failure_stage=hitl.get("failure_stage") if isinstance(hitl.get("failure_stage"), str) else None,
+        settled=settled_outcome(hitl),
     )
 
 
@@ -303,12 +348,33 @@ def find(profile: Profile, traj_id: str, *, status: str | None = None) -> Trajec
 # --------------------------------------------------------------------------- mutation
 
 
-def relabel(profile: Profile, traj: Trajectory, new_status: str) -> Trajectory:
-    """Move a trajectory between eval / success / failure."""
+def relabel(profile: Profile, traj: Trajectory, new_status: str, *, force: bool = False) -> Trajectory:
+    """Move a trajectory between eval / success / failure, and make its phase record say so.
+
+    A trial the phase loop settled itself -- excluded by verification, ended part-way at a TAMP or
+    human-policy stage, or aborted -- is refused as a success unless ``force``: the method decided
+    it is not a demonstration, and success/ is what the export reads. With ``force`` the move goes
+    ahead and the record says it was overruled, keeping what the loop said under ``overruled``.
+
+    The record follows every move (``filed_under``, and the outcome of a trial a label decides), so
+    hitl.json and the directory it sits in never disagree about where the trial is filed.
+    """
     if new_status not in STATUSES:
         raise TandemError(f"Unknown status {new_status!r}.", hint=f"One of: {', '.join(STATUSES)}")
     if traj.status == new_status:
         return traj
+
+    record = read_hitl(traj.path)
+    settled = settled_outcome(record)
+    if new_status == "success" and settled is not None and not force:
+        stage = record.get("failure_stage")
+        raise TandemError(
+            f"{traj.id} ended {settled}"
+            + (f" at {stage}" if stage else "")
+            + f": {record.get('outcome_reason') or 'see its hitl.json'}. The method keeps it out of the "
+            "dataset, and success/ is what the export reads.",
+            hint="Pass --force to overrule that on purpose; the record will say it was overruled.",
+        )
 
     dest_dir = profile.status_dir(new_status)
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -319,7 +385,60 @@ def relabel(profile: Profile, traj: Trajectory, new_status: str) -> Trajectory:
             hint="Two trajectories share a timestamp; move or delete one by hand.",
         )
     shutil.move(str(traj.path), str(dest))
+    if record:
+        refile_record(dest, record, new_status, settled=settled)
     return read(dest, profile_name=profile.name, status=new_status)
+
+
+def settled_outcome(record: dict) -> str | None:
+    """How a phase record says the phase loop itself settled the trial, or None when a label decides it.
+
+    ``excluded``, ``aborted``, or ``failure`` at a stage other than ``verification`` (a plan that did
+    not finish). The same rule the session files by and ``hitl.json``'s outcome is resolved with
+    (``tandem.core.episodes.trial_outcome``); a record that was overruled on purpose (``overruled``)
+    is settled no longer.
+    """
+    if not record or record.get("overruled"):
+        return None
+    outcome = record.get("outcome")
+    if record.get("excluded") is True or outcome == "excluded":
+        return "excluded"
+    if outcome == "aborted":
+        return "aborted"
+    if outcome == "failure" and record.get("failure_stage") not in (None, "verification"):
+        return "failure"
+    return None
+
+
+def refile_record(directory: Path, record: dict, status: str, *, settled: str | None) -> None:
+    """Rewrite a moved trial's hitl.json so it says where the trial now is, and what it now is.
+
+    ``settled`` is `settled_outcome` of the record as it was. Used by `relabel`, and by a merge filed
+    under a status of its own (``tandem traj merge --status``), which is the same move.
+    """
+    record = dict(record)
+    record["filed_under"] = status if status != "eval" else None
+    if settled is not None and status == "success":
+        # Forced. What the loop said is kept, not erased: the record says both that the method
+        # rejected the trial and that somebody put it in the dataset anyway.
+        record["overruled"] = {
+            "outcome": record.get("outcome"),
+            "excluded": bool(record.get("excluded")),
+            "failure_stage": record.get("failure_stage"),
+            "by": "relabel",
+        }
+        record["outcome"] = "success"
+        record["excluded"] = False
+    elif settled is None and status in ("success", "failure"):
+        # A trial a label decides: the move IS its new label.
+        record["outcome"] = status
+    try:
+        (directory / HITL_FILE).write_text(json.dumps(record, indent=2, default=str))
+    except OSError as exc:
+        raise TandemError(
+            f"{directory.name} was moved to {status}/, but its hitl.json could not be updated: {exc}",
+            hint=f"It still says the trial is filed under {record.get('filed_under')!r}; fix it by hand.",
+        ) from exc
 
 
 def delete(profile: Profile, traj: Trajectory) -> Path:
@@ -369,7 +488,7 @@ def read_hitl(traj_dir: Path) -> dict:
 
 
 def plan(traj: Trajectory) -> dict | None:
-    path = traj.path / PLAN_FILE
+    path = plan_file(traj.path, traj.meta)
     if not path.is_file():
         return None
     try:

@@ -252,15 +252,18 @@ def test_a_failed_check_can_be_recorded_without_failing_the_run(phase_session):
 
 
 def test_aborting_a_phase_abandons_the_attempt(phase_session):
+    """Filed as aborted, under failure/, with no label: the plan did not finish, so there is nothing a
+    label could decide (tests/test_trial_outcomes.py has the record)."""
     session, _, _ = phase_session()
     session.next_task()
     assert wait_for(lambda: session.state is State.AWAITING_HUMAN_PHASE)
     session.abort_human_phase()
-    assert wait_for(lambda: session.state is State.AWAITING_LABEL), f"stuck in {session.state}"
+    assert wait_for(lambda: session.aborted_count == 1), f"stuck in {session.state}"
+    assert wait_for(lambda: session.state is State.AWAITING_TASK), f"stuck in {session.state}"
     assert session.human_phase is None
     assert session.alive
-    session.label(False)
-    assert wait_for(lambda: session.state is State.AWAITING_TASK)
+    assert session.labeled_count == 0
+    assert session.last_trial["outcome"] == "aborted" and session.last_trial["filed_under"] == "failure"
 
 
 def test_phase_actions_are_refused_outside_the_prompt(phase_session):

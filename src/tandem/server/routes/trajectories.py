@@ -15,6 +15,9 @@ router = APIRouter(tags=["trajectories"])
 
 class RelabelBody(BaseModel):
     status: str
+    # Overrule the method: file a trial it excluded (or ended part-way) under success/ anyway. Without
+    # it that is refused (400), because success/ is what the export reads.
+    force: bool = False
 
 
 @router.get("/trajectories")
@@ -65,7 +68,7 @@ async def get_media(profile: str, traj_id: str, filename: str, request: Request)
 async def relabel(profile: str, traj_id: str, body: RelabelBody) -> dict:
     prof = profiles_mod.load(profile)
     traj = traj_mod.find(prof, traj_id)
-    updated = traj_mod.relabel(prof, traj, body.status)
+    updated = traj_mod.relabel(prof, traj, body.status, force=body.force)
     return {"trajectory": updated.to_dict(), "counts": traj_mod.counts(prof)}
 
 
