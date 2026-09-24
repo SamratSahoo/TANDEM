@@ -80,8 +80,61 @@ def serve(
 
     from tandem.server.app import create_app
 
-    app = create_app()
-    uvicorn.run(app, host=host, port=port, log_level="warning", access_log=False)
+    config = uvicorn.Config(
+        create_app(),
+        host=host,
+        port=port,
+        log_level="warning",
+        access_log=False,
+        # An open collect page holds an event stream until its session has ended, and uvicorn waits for
+        # every connection before it lets the app shut down. Without a bound, Ctrl-C sat there saying
+        # nothing -- and the second Ctrl-C people then pressed skipped the app's shutdown altogether.
+        timeout_graceful_shutdown=CONNECTION_GRACE,
+    )
+    server = _server(config)
+    try:
+        server.run()
+    except KeyboardInterrupt:
+        # uvicorn re-raises the Ctrl-C it caught once it has shut down; it has done its job by then.
+        pass
+    if not server.started:
+        raise typer.Exit(code=3)
+
+
+# How long, after Ctrl-C, open connections get to finish before they are cut. The wait that matters
+# comes after it: the app's own shutdown, which ends every session and waits for it (server/app.py).
+CONNECTION_GRACE = 5
+
+
+def _server(config):
+    """uvicorn's server, with the sessions told to stop as soon as it starts to shut down.
+
+    Not only at the app's shutdown, which comes after every connection has closed: a collect page's
+    event stream closes when its session has ended, so the sessions are what have to go first. A
+    second Ctrl-C while they park and merge gives up the wait, as it does in `tandem collect`.
+    """
+    import signal
+
+    import uvicorn
+
+    from tandem.core import session as session_mod
+
+    class Server(uvicorn.Server):
+        async def shutdown(self, sockets=None) -> None:
+            stopping = session_mod.manager().stop_all()
+            if stopping:
+                theme.busy(
+                    f"Stopping {len(stopping)} session(s): parking the arm, finishing the episode merges",
+                    "Ctrl-C again to quit now, leaving the arm where it is",
+                )
+            await super().shutdown(sockets)
+
+        def handle_exit(self, sig, frame) -> None:
+            if self.should_exit and sig == signal.SIGINT:
+                session_mod.manager().abandon()
+            super().handle_exit(sig, frame)
+
+    return Server(config)
 
 
 def _runtime_note(cfg, profile_name: str) -> str:

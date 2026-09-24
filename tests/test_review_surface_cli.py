@@ -251,7 +251,12 @@ def served(monkeypatch):
     apps: list = []
     import uvicorn
 
-    monkeypatch.setattr(uvicorn, "run", lambda app, **kw: apps.append(app))
+    def run(self, sockets=None):
+        # Serves nothing: the app it was handed is what the test reads.
+        apps.append(self.config.app)
+        self.started = True
+
+    monkeypatch.setattr(uvicorn.Server, "run", run)
     monkeypatch.setattr("webbrowser.open", lambda url: None)
     return apps
 

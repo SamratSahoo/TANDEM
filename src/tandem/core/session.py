@@ -1153,6 +1153,12 @@ class Session:
     def alive(self) -> bool:
         return self.state not in TERMINAL
 
+    @property
+    def running(self) -> bool:
+        """Whether the session's thread is still going: walking tasks, or releasing everything as it ends."""
+        worker = self._worker
+        return worker is not None and worker.is_alive()
+
     def wait(self, timeout: float | None = None) -> int | None:
         """Block until the session thread has finished. None means it is still running."""
         worker = self._worker
@@ -1340,6 +1346,8 @@ class SessionManager:
     def __init__(self) -> None:
         self._sessions: dict[str, Session] = {}
         self._lock = threading.RLock()
+        # Set by `abandon`: the person at the terminal would rather quit now than wait for `shutdown`.
+        self._abandoned = threading.Event()
 
     def create(self, profile: Profile, **kwargs) -> Session:
         with self._lock:
@@ -1351,7 +1359,15 @@ class SessionManager:
                 )
             session = Session(profile, **kwargs)
             self._sessions[session.id] = session
-        session.start()
+        try:
+            session.start()
+        except BaseException:
+            # A session that never started never ends either: kept, it read as live for its profile
+            # forever, and every later start was refused as "already running (state: spawning)" until
+            # the server was restarted.
+            with self._lock:
+                self._sessions.pop(session.id, None)
+            raise
         return session
 
     def get(self, session_id: str) -> Session:
@@ -1372,10 +1388,43 @@ class SessionManager:
         with self._lock:
             return list(self._sessions.values())
 
-    def shutdown(self) -> None:
-        for session in self.all():
-            if session.alive:
-                session.stop()
+    def stop_all(self) -> list[Session]:
+        """Ask every live session to stop, parking its arm on the way out, and return them. Does not wait."""
+        stopping = [session for session in self.all() if session.alive]
+        for session in stopping:
+            session.stop()
+        return stopping
+
+    def shutdown(self, *, timeout: float = STOP_GRACE) -> list[Session]:
+        """Stop every session and wait, bounded, for each to finish ending. Returns those still ending.
+
+        Ending is everything `_shutdown` does: the arm parked, the planner and the human executors
+        closed, the episode merges waited for. The threads doing it are daemons, so a process that
+        exits without this -- `tandem ui` on Ctrl-C did -- kills them where they stand: the arm left
+        wherever the last plan put it, the hardware never released, a merge cut off half-way.
+
+        `abandon` cuts the wait short; a session still ending then is force-stopped, which at least
+        ends a leg in flight rather than leaving its process behind.
+        """
+        self._abandoned.clear()
+        self.stop_all()
+        ending = [session for session in self.all() if session.running]
+        deadline = time.monotonic() + timeout
+        for session in ending:
+            while session.running and not self._abandoned.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                session.wait(timeout=min(remaining, 0.2))
+        still = [session for session in ending if session.running]
+        if self._abandoned.is_set():
+            for session in still:
+                session.force_stop()
+        return still
+
+    def abandon(self) -> None:
+        """Stop waiting in `shutdown`: somebody asked twice to quit. Safe from a signal handler."""
+        self._abandoned.set()
 
 
 _manager: SessionManager | None = None

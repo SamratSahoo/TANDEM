@@ -6,6 +6,10 @@ install time or at runtime — plus a small JSON API over the same core modules 
 
 from __future__ import annotations
 
+import asyncio
+import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -22,6 +26,31 @@ from tandem.server.routes import trajectories as trajectories_routes
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
+log = logging.getLogger("tandem.server")
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """On the way out, end every session this server started, and wait (bounded) for them to finish.
+
+    A session drives the robot on daemon threads, so a server that simply exits kills them where they
+    stand: the arm is not parked, the planner never lets go of the robot and the cameras, and a merge
+    in flight is cut off with the trial's legs half moved. Nothing called `SessionManager.shutdown`,
+    and that is what exiting `tandem ui` did. Waited for off the event loop, which stays free to
+    close the remaining connections.
+    """
+    from tandem.core import session as session_mod
+
+    yield
+    still = await asyncio.to_thread(session_mod.manager().shutdown)
+    for session in still:
+        log.warning(
+            "session %s (%s) was still ending when the server exited; its arm may not be parked, and "
+            "`tandem traj merge` joins a trial whose merge did not finish",
+            session.id,
+            session.profile.name,
+        )
+
 
 def create_app() -> FastAPI:
     # No "initial profile": the page works on the active one, and `tandem ui --profile NAME` makes NAME
@@ -31,6 +60,7 @@ def create_app() -> FastAPI:
         version=__version__,
         docs_url="/api/docs",
         openapi_url="/api/openapi.json",
+        lifespan=_lifespan,
     )
 
     @app.exception_handler(SessionConflict)
