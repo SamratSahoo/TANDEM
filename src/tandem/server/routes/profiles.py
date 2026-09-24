@@ -221,6 +221,14 @@ async def create_profile(body: dict[str, Any] = Body(...)) -> dict:
 
     if body.get("prompt"):
         profile.task.prompt = str(body["prompt"])
+    elif not source:
+        # The template is the paper's settings with no task of its own: as `tandem profile create` does, a
+        # new profile is never written with its placeholder as the task. (A 400, not a ProfileError's 404.)
+        raise TandemError(
+            "A new profile needs its task.",
+            hint="Say what the robot and you are to do, or start from a copy of a profile (the paper's five "
+            "included).",
+        )
 
     profiles_mod.save(profile)
 

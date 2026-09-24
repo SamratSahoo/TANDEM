@@ -201,3 +201,17 @@ def test_there_is_no_presets_command_and_an_empty_list_says_where_profiles_come_
     assert empty.exit_code == 0
     assert "tandem init" in empty.output and "add the paper's five tasks" in _said(empty)
     assert "tandem profile create NAME --prompt" in _said(empty)
+
+
+def test_the_web_writes_no_profile_without_its_task():
+    from fastapi.testclient import TestClient
+
+    from tandem.server.app import create_app
+
+    client = TestClient(create_app())
+    refused = client.post("/api/profiles", json={"name": "fresh"})
+    assert refused.status_code == 400 and "needs its task" in refused.json()["error"]
+    assert not profiles.exists("fresh")
+    made = client.post("/api/profiles", json={"name": "fresh", "prompt": "sort the bins"})
+    assert made.status_code == 200, made.text
+    assert profiles.load("fresh").task.prompt == "sort the bins"

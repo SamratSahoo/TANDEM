@@ -108,7 +108,7 @@ def test_the_default_for_new_profiles_is_set_without_touching_any_profile(client
     assert settings_mod.load(force=True).default_planner == "pure"
     assert profiles.load(profile.name).planner.backend == "tiptop"
 
-    created = client.post("/api/profiles", json={"name": "fresh"})
+    created = client.post("/api/profiles", json={"name": "fresh", "prompt": "sort the bins"})
     assert created.status_code == 200, created.text
     assert profiles.load("fresh").planner.backend == "pure"
 
