@@ -281,6 +281,25 @@ class V3DatasetWriter:
             ep_meta[f"videos/{droid_key}/to_timestamp"] = to_ts
         self._episode_rows.append(ep_meta)
 
+    def abort(self) -> None:
+        """Close every file this writer holds open and write no metadata: for a dataset being thrown away.
+
+        Without it, a build that failed part-way left the encoders and the parquet writer open on a
+        directory that was then deleted under them.
+        """
+        if self._finalized:
+            return
+        self._finalized = True
+        for container, _stream in self._encoders.values():
+            try:
+                container.close()
+            except Exception:  # noqa: BLE001 - best effort; the directory is being deleted anyway.
+                pass
+        try:
+            self._data_writer.close()
+        except Exception:  # noqa: BLE001
+            pass
+
     def finalize(self) -> dict:
         """Flush encoders/parquet and write meta/info.json + meta/episodes + meta/tasks.parquet."""
         if self._finalized:

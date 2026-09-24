@@ -16,13 +16,19 @@ Dividing it by 3 "to convert units" deploys about three times too slow.
 
 from __future__ import annotations
 
+import datetime
 import json
 import logging
+import os
 import shutil
+import tempfile
+import uuid
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 
+from tandem import __version__
 from tandem.core import trajectories as traj_mod
 from tandem.core.errors import TandemError
 from tandem.core.profiles import Profile
@@ -33,6 +39,11 @@ log = logging.getLogger("tandem.export")
 FPS = 15
 IMG_HW = (180, 320)  # DROID LeRobot image size (H, W)
 TAGS = ["droid", "panda", "real", "tamp", "tandem"]
+
+# Written into every dataset this export builds, and kept out of what is pushed. A build only ever
+# replaces a directory that has one: `--out` pointed one level too high, or a repo name that matches a
+# directory of somebody's own, used to be deleted without a word before a single episode was looked at.
+MARKER = ".tandem-export.json"
 
 # Our camera filenames -> the LeRobot common image key.
 REAL_CAMERAS = {
@@ -139,6 +150,7 @@ def build_dataset(
     max_episodes: int | None = None,
     token: str | None = None,
     on_episode=None,
+    force: bool = False,
 ) -> dict:
     """Write (and optionally push) the dataset. Returns a summary dict.
 
@@ -149,6 +161,11 @@ def build_dataset(
     listed in ``skipped`` with why, and is exported only once a forced relabel says so on its record.
     A trial with no record (phase planning off, or collected before there was one) is exported as
     before.
+
+    A dataset already at ``out_root/repo_id`` is replaced only by a finished one. Every candidate's
+    state is read first, the new dataset is built in a directory beside it, and the two are swapped
+    only once the new one is complete; a build that fails, or writes nothing, leaves the old one as it
+    was. The directory there is replaced only if this export built it (``MARKER``), or with ``force``.
     """
     success_dir = profile.status_dir("success")
     stated = (
@@ -179,24 +196,69 @@ def build_dataset(
             "settled needs --force, and its record then says it was overruled.",
         )
 
+    # Every candidate's state, read before anything on disk is touched: what cannot be an episode is
+    # known now, not after the dataset it would have replaced is gone.
+    exportable = []
+    for directory in candidates:
+        try:
+            _read_state(directory)
+        except _Unexportable as exc:
+            log.log(exc.level, "%s: %s; skipping", directory.name, exc)
+            skipped.append((directory.name, str(exc)))
+            continue
+        exportable.append(directory)
     dataset_root = Path(out_root) / repo_id
-    if dataset_root.exists():
-        log.info("Removing existing local dataset at %s", dataset_root)
-        shutil.rmtree(dataset_root)
+    untouched = f" {dataset_root} is as it was." if dataset_root.exists() else ""
+    if not exportable:
+        raise TandemError(
+            f"None of the {len(candidates)} successful trajectories under {success_dir} can be exported: "
+            + _reasons(skipped[held_back:]),
+            hint="Nothing was written." + untouched,
+        )
+    _check_replaceable(dataset_root, force=force)
 
-    writer = V3DatasetWriter(dataset_root, FPS)
+    dataset_root.parent.mkdir(parents=True, exist_ok=True)
+    # Beside the destination, so the swap at the end is a rename within one directory -- never a copy
+    # across filesystems that could fail half-way.
+    staging = Path(tempfile.mkdtemp(prefix=f".{dataset_root.name}.building-", dir=dataset_root.parent))
     written = 0
-
-    for traj_dir in candidates:
-        result = _add_episode(writer, traj_dir, profile.task.prompt)
-        if result is None:
-            skipped.append((traj_dir.name, _last_skip_reason))
-        else:
-            written += 1
-        if on_episode is not None:
-            on_episode(traj_dir.name, written, len(candidates), result is not None)
-
-    writer.finalize()
+    writer = None
+    try:
+        writer = V3DatasetWriter(staging, FPS)
+        for traj_dir in exportable:
+            result = _add_episode(writer, traj_dir, profile.task.prompt)
+            if result is None:
+                skipped.append((traj_dir.name, _last_skip_reason))
+            else:
+                written += 1
+            if on_episode is not None:
+                on_episode(traj_dir.name, written, len(exportable), result is not None)
+        if not written:
+            raise TandemError(
+                f"None of the {len(exportable)} trajectories could be written: " + _reasons(skipped[held_back:]),
+                hint="Nothing was replaced." + untouched,
+            )
+        writer.finalize()
+        (staging / MARKER).write_text(
+            json.dumps(
+                {
+                    "written_by": "tandem",
+                    "version": __version__,
+                    "profile": profile.name,
+                    "repo_id": repo_id,
+                    "episodes": written,
+                    "built_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+        _swap_in(staging, dataset_root)
+    except BaseException:
+        if writer is not None:
+            writer.abort()
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
     log.info("Wrote %d episode(s) to %s", written, dataset_root)
 
     pushed = False
@@ -213,6 +275,58 @@ def build_dataset(
         "skipped": skipped,
         "pushed": pushed,
     }
+
+
+def _reasons(skipped: list[tuple[str, str]], limit: int = 5) -> str:
+    shown = "; ".join(f"{name}: {why}" for name, why in skipped[:limit])
+    return shown + (f"; and {len(skipped) - limit} more" if len(skipped) > limit else "")
+
+
+def _check_replaceable(dataset_root: Path, *, force: bool) -> None:
+    """Refuse to replace ``dataset_root`` unless this export built it, it is empty, or ``force`` says to.
+
+    The destination is ``--out`` joined with the repo name, and either can be wrong by one level: a
+    directory of somebody's own there was deleted, whole, before a single episode had been read.
+    """
+    if not os.path.lexists(dataset_root):
+        return
+    if dataset_root.is_dir() and not dataset_root.is_symlink():
+        if (dataset_root / MARKER).is_file() or not any(dataset_root.iterdir()):
+            return
+    if force:
+        log.warning("Replacing %s, which this export did not build (--force)", dataset_root)
+        return
+    raise TandemError(
+        f"{dataset_root} already exists and is not a dataset tandem built, so it is not replaced.",
+        hint="Pick another --out or --repo, or move it aside. --force replaces it -- as a dataset built by "
+        f"a tandem from before this check needs once, having no {MARKER} in it.",
+    )
+
+
+def _swap_in(staging: Path, dataset_root: Path) -> None:
+    """Put the finished dataset at ``dataset_root``, replacing whatever was there.
+
+    Two renames within one directory, so there is never a moment with neither: until the second, the
+    old dataset is whole (moved aside), and after it the new one is. Only then is the old one deleted,
+    and a failure to delete it costs disk, not data -- it is left beside the new one, and said to be.
+    """
+    if not os.path.lexists(dataset_root):
+        os.rename(staging, dataset_root)
+        return
+    aside = dataset_root.with_name(f".{dataset_root.name}.replaced-{uuid.uuid4().hex[:8]}")
+    os.rename(dataset_root, aside)
+    try:
+        os.rename(staging, dataset_root)
+    except BaseException:
+        os.rename(aside, dataset_root)
+        raise
+    try:
+        if aside.is_dir() and not aside.is_symlink():
+            shutil.rmtree(aside)
+        else:
+            aside.unlink()
+    except OSError as exc:
+        log.warning("The dataset it replaced is still at %s (%s); delete it by hand", aside, exc)
 
 
 _last_skip_reason = ""
@@ -249,13 +363,37 @@ def _shape_problem(store) -> str | None:
     return None
 
 
-def _add_episode(writer: V3DatasetWriter, traj_dir: Path, default_instruction: str):
+class _Unexportable(Exception):
+    """Why a trajectory cannot be an episode of this dataset. It is skipped, with this as the reason.
+
+    ``level`` is how loudly: an error for what says capture has regressed (a shape DROID's schema cannot
+    hold, a gripper that is not binary), a warning for a trajectory that is simply too short or incomplete.
+    """
+
+    def __init__(self, reason: str, *, level: int = logging.WARNING) -> None:
+        super().__init__(reason)
+        self.level = level
+
+
+class _State(NamedTuple):
+    jp: np.ndarray
+    gp: np.ndarray
+    cmd_jp: np.ndarray
+    cmd_jv: np.ndarray
+    cmd_g: np.ndarray
+    frame_time: np.ndarray | None
+    video_time: np.ndarray | None
+
+
+def _read_state(traj_dir: Path) -> _State:
+    """One trajectory's state arrays, checked against DROID's schema. Raises ``_Unexportable``.
+
+    Reads no video, so it is cheap enough to run over every candidate before anything is written.
+    """
     with np.load(traj_dir / traj_mod.STATE_FILE) as store:
         problem = _shape_problem(store)
         if problem is not None:
-            _skip(problem)
-            log.error("%s: %s; skipping", traj_dir.name, _last_skip_reason)
-            return None
+            raise _Unexportable(problem, level=logging.ERROR)
         try:
             jp = store["joint_position"].astype(np.float32).reshape(-1, 7)
             gp = store["gripper_position"].astype(np.float32).reshape(-1)
@@ -263,15 +401,13 @@ def _add_episode(writer: V3DatasetWriter, traj_dir: Path, default_instruction: s
             cmd_jv = store["cmd_joint_velocity"].astype(np.float32).reshape(-1, 7)
             cmd_g_raw = store["cmd_gripper"]
         except KeyError as exc:
-            _skip(f"missing array {exc}")
-            log.warning("%s: %s; skipping", traj_dir.name, _last_skip_reason)
-            return None
+            raise _Unexportable(f"missing array {exc}") from None
         except ValueError as exc:
             # A backstop for a shape _shape_problem did not foresee: one bad episode is skipped, loudly,
             # rather than ending the export with every episode after it unwritten.
-            _skip(f"its state arrays cannot be read as DROID's schema: {exc}")
-            log.error("%s: %s; skipping", traj_dir.name, _last_skip_reason)
-            return None
+            raise _Unexportable(
+                f"its state arrays cannot be read as DROID's schema: {exc}", level=logging.ERROR
+            ) from None
 
         cmd_g_shape = tuple(cmd_g_raw.shape)
         cmd_g = cmd_g_raw.astype(np.float32).reshape(-1)
@@ -286,27 +422,30 @@ def _add_episode(writer: V3DatasetWriter, traj_dir: Path, default_instruction: s
 
     n = len(jp)
     if n < 2:
-        _skip(f"only {n} frame(s)")
-        log.warning("%s: %s; skipping", traj_dir.name, _last_skip_reason)
-        return None
+        raise _Unexportable(f"only {n} frame(s)")
     if not (len(gp) == len(cmd_jp) == len(cmd_jv) == len(cmd_g) == n):
-        _skip("state arrays disagree on length")
-        log.warning("%s: %s; skipping", traj_dir.name, _last_skip_reason)
-        return None
+        raise _Unexportable("state arrays disagree on length")
 
     # cmd_gripper becomes action[:, 7]. A non-[F]/[F,1] shape or a non-binary value means
     # capture regressed to writing a CONTINUOUS gripper -- the feedback trap where the action
     # is an echo of the state, which is what stopped finetuned policies ever closing the
     # gripper. Skip loudly rather than poison the dataset.
     if len(cmd_g_shape) > 2 or (len(cmd_g_shape) == 2 and cmd_g_shape[1] != 1):
-        _skip(f"cmd_gripper has shape {cmd_g_shape}, expected [F] or [F,1]")
-        log.error("%s: %s; skipping", traj_dir.name, _last_skip_reason)
-        return None
+        raise _Unexportable(f"cmd_gripper has shape {cmd_g_shape}, expected [F] or [F,1]", level=logging.ERROR)
     if not np.all((cmd_g == 0.0) | (cmd_g == 1.0)):
         bad = np.unique(cmd_g[(cmd_g != 0.0) & (cmd_g != 1.0)])
-        _skip(f"cmd_gripper is not binary (e.g. {bad[:4].tolist()})")
-        log.error("%s: %s; skipping", traj_dir.name, _last_skip_reason)
+        raise _Unexportable(f"cmd_gripper is not binary (e.g. {bad[:4].tolist()})", level=logging.ERROR)
+    return _State(jp, gp, cmd_jp, cmd_jv, cmd_g, frame_time, video_time)
+
+
+def _add_episode(writer: V3DatasetWriter, traj_dir: Path, default_instruction: str):
+    try:
+        jp, gp, cmd_jp, cmd_jv, cmd_g, frame_time, video_time = _read_state(traj_dir)
+    except _Unexportable as exc:
+        _skip(str(exc))
+        log.log(exc.level, "%s: %s; skipping", traj_dir.name, _last_skip_reason)
         return None
+    n = len(jp)
 
     task = default_instruction
     record_start = record_stop = video_seconds = None
@@ -387,6 +526,8 @@ def _upload(dataset_root: Path, repo_id: str, private: bool, token: str | None) 
         repo_type="dataset",
         folder_path=str(dataset_root),
         commit_message="Add LeRobot dataset (tandem)",
+        # tandem's own note that it built this directory, which is nobody else's business.
+        ignore_patterns=[MARKER],
     )
     # LeRobotDataset(repo_id) needs a git tag matching info.json's codebase_version or it
     # raises RevisionNotFoundError; upload_folder does not create one.

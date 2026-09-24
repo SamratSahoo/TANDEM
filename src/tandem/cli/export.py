@@ -23,6 +23,9 @@ def lerobot(
     push: bool = typer.Option(False, "--push", help="Upload to the Hub after building."),
     private: bool = typer.Option(None, "--private/--public", help="Repo visibility when pushing."),
     max_episodes: int = typer.Option(None, "--max-episodes", "-n", help="Only export the first N."),
+    force: bool = typer.Option(
+        False, "--force", help="Replace what is at the destination even if tandem did not build it."
+    ),
 ) -> None:
     """Matches `lerobot/droid_1.0.1`'s schema, so the result feeds a π₀.₅-DROID finetune."""
     try:
@@ -112,6 +115,7 @@ def lerobot(
             max_episodes=max_episodes,
             token=token,
             on_episode=on_episode,
+            force=force,
         )
 
     theme.blank()

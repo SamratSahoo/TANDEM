@@ -616,7 +616,7 @@ so what you see is what training sees.
 | `tandem planners list \| info \| install \| use \| default \| remove \| bundle \| new` | The planner catalog (above). |
 | `tandem executors list \| use` | The human executors. |
 | `tandem traj list \| show \| open \| relabel \| rm \| merge \| copy \| path` | Inspect trajectories. `open` replays one in its planner's own viewer (TiPToP's: Rerun, inside the runtime). `merge` re-joins a trial's legs if the automatic merge failed. |
-| `tandem export lerobot \| manifest` | Build a LeRobot v3.0 dataset from `success/` (and push it to the Hub), or write a JSON index. |
+| `tandem export lerobot \| manifest` | Build a LeRobot v3.0 dataset from `success/` (and push it to the Hub), or write a JSON index. A rebuild replaces the last dataset only once the new one is complete, and only one tandem built: `--force` replaces anything else at the destination. |
 | `tandem config list \| get \| set \| set-gemini-key \| set-hf-token \| path \| edit` | Machine settings and credentials. |
 | `tandem runtime status \| build \| shell \| python \| run \| clean \| path` | The runtime of the active profile's planner (`--planner NAME` for another). |
 
