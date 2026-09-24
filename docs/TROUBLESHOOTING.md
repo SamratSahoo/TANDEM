@@ -1,102 +1,92 @@
 # Troubleshooting
 
-`tandem doctor` is the first thing to run: every check, what it found, and what to do about it.
-
-- [A preempt didn't stop the arm](#a-preempt-didnt-stop-the-arm)
-- [A camera won't open, or shows serial number 0](#a-camera-wont-open-or-shows-serial-number-0)
-- ["no camera extrinsics for serial(s) …"](#no-camera-extrinsics-for-serials-)
-- [A trial was excluded](#a-trial-was-excluded)
-- [The plan leaves part of the instruction out](#the-plan-leaves-part-of-the-instruction-out)
-- ["I did it" is refused at a human step](#i-did-it-is-refused-at-a-human-step)
-- [The planner shows as outdated](#the-planner-shows-as-outdated)
-- [The runtime build failed](#the-runtime-build-failed)
-- [A leg fails with "No level patch of … is large enough"](#a-leg-fails-with-no-level-patch-of--is-large-enough)
-- [A TAMP setting seems to do nothing](#a-tamp-setting-seems-to-do-nothing)
-- [The videos won't scrub in the browser](#the-videos-wont-scrub-in-the-browser)
-- [Where everything is after a session that went wrong](#where-everything-is-after-a-session-that-went-wrong)
+Symptom, then fix. Run `tandem doctor` first: it checks everything tandem needs and says what to do about each
+problem. Logs and session files are listed in [DATA.md](DATA.md#logs-and-session-files).
 
 ## A preempt didn't stop the arm
 
-No software button can. Unless the planner declares a cooperative stop, it is handed a whole trajectory
-segment in one request and has no abort, so the motion runs to the end of that segment (one that does
-declare it stops at its next step boundary). A preempt stops *further plan steps*. **The physical E-stop is
-the only instant stop.**
+Expected: a preempt (`p`) stops further plan steps, not the motion segment already sent to the robot.
+**The physical E-stop is the only instant stop** ([details](USAGE.md#collecting)).
 
 ## A camera won't open, or shows serial number 0
 
-Serial `0` means another process still holds the camera. After a teleop hand-off the cameras take about
-15 seconds to be released, because the save workers inherited the device descriptors and have to exit first.
-Wait, then retry. If it persists, another tandem or tiptop process is still running.
+Another process still holds the camera. After a hand-off, TiPToP's save workers release the cameras within a
+few seconds: wait, then retry. If it persists, look for a stray process: `ps aux | grep -E 'tandem|tiptop'`.
 
 ## "no camera extrinsics for serial(s) …"
 
-Extrinsics are keyed by camera serial, and a configured serial with no entry stops the session before it
-warms up. Add it to the profile's `calibration.json`
-([format](CONFIGURATION.md#cameras-and-calibration)), or import from a checkout that has it:
-`tandem profile create <name> --import-from <path>`.
+A camera in the profile has no entry in its `calibration.json`, so the session stops before warm-up. Check the
+serial, then add its entry ([format](CONFIGURATION.md#cameras-and-calibration)), or import a hitl-tamp-vla
+checkout that has it: `tandem profile create <name> --import-from <path>`
+([details](CONFIGURATION.md#importing-a-hitl-tamp-vla-setup)).
 
 ## A trial was excluded
 
-A human phase still failed its check after its retries, so the trial was kept out of the dataset, as the
-paper does. Open its `hitl.json`: the failing verdicts under `verifications` say which effect the camera did
-not see, and why (`satisfied: false` is the field to read). `vlm/` holds the image each verdict was made on.
-If the classifier was wrong rather than the person, set `hitl.on_verification_failure: label` while you
-calibrate it, so every disagreement between you and the check becomes a labeled data point.
-`tandem traj relabel <id> success` refuses an excluded trial; `--force` (a confirm in the web UI) overrules
-the check on purpose, records that under `overruled` in its `hitl.json`, and is the one way such a trial
-reaches the export.
+Usually a human phase still failed its camera check after its retries. Its `hitl.json` lists the failed checks as
+`verifications` with `satisfied: false`, each with the model's `reason`; the images judged are the
+`*_classify-*` files in its `vlm/` ([format](DATA.md#hitljson)).
+
+- If the check, not the person, was wrong: set `hitl.on_verification_failure: label` while you calibrate it,
+  so you label each such trial yourself.
+- To file one as a success anyway: `tandem traj relabel <id> success --force`
+  ([details](USAGE.md#reviewing-and-exporting)).
 
 ## The plan leaves part of the instruction out
 
-`tandem plan`, the session log and the UI list each clause the model could not express, with its reason. It
-is almost always an object the instruction names that perception did not detect. Put it on the table, or
-reword the task, before collecting: the dataset is labeled with the whole instruction either way.
+Usually an object the instruction names wasn't detected. `tandem plan`, the session log
+(`NOT part of the plan — …`) and the web UI list each such clause with its reason. Put the object on the table,
+or reword the task, before collecting ([details](USAGE.md#planning-from-a-photo)).
 
 ## "I did it" is refused at a human step
 
-While recording, a human phase has to be carried out through the executor (`t`, to take the arm) so the
-episode has that stretch of demonstration. Set `hitl.allow_unrecorded_human_phase: true` to accept a step
-done off the record, or collect with `--no-record`. `tandem executors list` says whether teleop is ready on
-this machine.
+While recording, a human phase must be carried out through its executor. Either:
+
+- take the arm with `t` (no `t` means the executor isn't ready: `tandem executors list` says what it needs);
+- set [`hitl.allow_unrecorded_human_phase: true`](CONFIGURATION.md#phase-planning-hitl); or
+- collect with `tandem collect --no-record`.
 
 ## The planner shows as outdated
 
-This version of tandem pins other commits than the ones the runtime was built from. Run
-`tandem planners install tiptop`. It replaces only the source trees whose pin moved, then rebuilds against
-the pixi environment already on disk.
+Run `tandem planners install tiptop` ([why](CONFIGURATION.md#the-planner-runtime)).
 
 ## The runtime build failed
 
-The full log is `~/.local/state/tandem/logs/runtime-build-<time>.log`. The usual causes are a missing `nvcc`,
-a torch/CUDA mismatch, or running out of disk mid-compile. `tandem planners install tiptop` retries, and
-skips a step already done.
+The build prints the path of its log (`runtime-build-<time>.log`) as it starts. Usual causes: a missing `nvcc`,
+a torch/CUDA mismatch, or a full disk (`tandem doctor`'s `nvcc`, `cuda runtime` and `disk space` rows). Fix it
+and run `tandem planners install tiptop` again: it skips every step already done.
 
 ## A leg fails with "No level patch of … is large enough"
 
-`placement_support` found no observed patch of the goal surface that would hold the object with
-`placement_support_margin` around it. From the camera's side a box's near wall and lid can hide most of its
-floor: `placement_fill_occluded: true` counts the hidden floor, and a noisy floor needs a larger
-`placement_flatness_tol`. `placement_support_required: false` places on the bounding box instead, which is
-what the setting exists to avoid. The full reason, with the object's footprint and the margin, is in the
-leg's `metadata.json` and in the session log. See
-[surface-fitted placement](CONFIGURATION.md#surface-fitted-placement-placement_).
+With `placement_support: true`, no observed level patch of the goal surface holds the object's footprint plus
+`placement_support_margin`. The full message is in the session log, and in that perception pass's
+`metadata.json` under the session directory's `perception/` ([where](DATA.md#logs-and-session-files)). Under
+`planner.options.tamp` ([details](CONFIGURATION.md#surface-fitted-placement)):
+
+- A box's near wall or lid hides its floor: `placement_fill_occluded: true` counts the hidden floor.
+- A noisy floor: raise `placement_flatness_tol`.
+- Last resort: `placement_support_required: false` places on the bounding box.
 
 ## A TAMP setting seems to do nothing
 
-Run `tandem profile show <name> --planner`: that is exactly what the planner receives, so a key missing
-from it never applied. Unknown keys are refused when the profile loads, and `tandem doctor` warns about a
-key that is set but does nothing without another one.
+`tandem profile show <name> --planner` prints exactly what the planner receives; a key missing from it never
+applied. `tandem doctor`'s `tamp settings` row flags a key that does nothing without another (for example a
+`placement_*` key without `placement_support: true`). A misspelled key can't be the cause: the profile refuses
+to load and names the closest valid key ([details](CONFIGURATION.md#planner-settings)).
 
 ## The videos won't scrub in the browser
 
-They are served with HTTP Range support. If scrubbing fails, check that nothing is proxying `/api/media/`
-without passing Range headers through.
+A proxy in front of `tandem ui` is probably dropping the `Range` header that `/api/media/` needs: pass it
+through ([details](USAGE.md#http-api)).
 
-## Where everything is after a session that went wrong
+## A profile names a planner or executor this machine doesn't have
 
-- `~/.local/state/tandem/logs/session-<id>.json`: the session's summary and log.
-- `~/.local/state/tandem/sessions/<profile>/<id>/events.jsonl`: one line per event, in order. The event
-  types are in [METHOD.md](METHOD.md#the-events-file).
-- Beside it: each perception pass that recorded nothing, and `vlm/<trajectory id>/` for a trial that was
-  never filed.
-- `~/.local/state/tandem/logs/export.log`: what `tandem export lerobot` logged, appended per run.
+`tandem collect` refuses it (`no planner named '…' is installed on this machine`, or
+`Unknown human executor '…'`). Install the package that provides it, or switch with `tandem planners use NAME`
+or `tandem executors use NAME` (`-p PROFILE` for one that isn't active). Meanwhile the profile can still be
+browsed, exported and edited.
+
+## A sidecar dies with "No module named 'tandem_sidecar'"
+
+Your environment's activation replaced the sidecar's `PYTHONPATH`, where tandem puts the `tandem_sidecar` kit
+(for example a pixi `[activation.env]` that sets it). Append to `PYTHONPATH` instead of setting it
+([details](ADDING_A_PLANNER.md#sidecars)).

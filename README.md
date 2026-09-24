@@ -7,7 +7,7 @@ phases with task and motion planning (TAMP), a person teleoperates the rest, eac
 fresh image, and every trial is recorded as one demonstration. The planner is pluggable, and
 [TiPToP](https://github.com/SamratSahoo/tiptop/tree/TANDEM) is built in.
 
-[Paper website](https://prpl-group.com/tandem/) · [How it works](docs/METHOD.md)
+[Paper website](https://prpl-group.com/tandem/) · [How it works](docs/METHOD.md) · [Docs](docs/README.md)
 
 ## Setup
 
@@ -136,7 +136,7 @@ tandem profile create bread-box --from default --preset paper --prompt "place th
 ```
 
 `--preset paper` turns on phase planning (off in the template) and applies the paper's
-[phase-planning](docs/METHOD.md#5-every-hitl-setting-and-what-it-changes) and TiPToP settings, keeping your
+[phase-planning](docs/CONFIGURATION.md#phase-planning-hitl) and TiPToP settings, keeping your
 robot, cameras and perception. Planned motions then run at the paper's pace, not slowed by
 `robot.time_dilation_factor`, so keep a hand on the E-stop.
 
@@ -189,7 +189,7 @@ tandem export lerobot --repo <hf-user>/bread-box --push   # and upload (tandem c
 ```
 
 Each trial becomes one episode, with its robot and human legs merged
-([on-disk format](docs/METHOD.md#6-what-a-trial-leaves-on-disk)).
+([on-disk format](docs/DATA.md)).
 
 ## Adding a planner
 

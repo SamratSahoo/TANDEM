@@ -1,118 +1,83 @@
 # Adding a planner
 
-TANDEM "only requires an interface for specifying subgoals and executing the resulting plans"
-(paper, Sec. IV-D). This is that interface, and the kit for writing against it. A new task and
-motion planner is a package that declares what it can be asked for and implements three verbs.
-Nothing in tandem changes, and nothing in tandem has to know the package exists.
+A planner is a Python package that declares its goal language and implements `perceive`, `plan` and
+`execute`. tandem does the rest: phases, hand-offs, camera checks and merging legs. A planner is only
+ever asked to achieve one goal in one scene and record what it did as one [leg](README.md#terms).
 
-- [What tandem does, and what a planner does](#what-tandem-does-and-what-a-planner-does)
-- [Start here: `tandem planners new`](#start-here-tandem-planners-new)
-- [The protocol](#the-protocol)
-- [`Capabilities`, field by field](#capabilities-field-by-field)
-- [The `Planner` base class](#the-planner-base-class)
-- [In tandem's process, or in a sidecar](#in-tandems-process-or-in-a-sidecar)
-- [A runtime recipe](#a-runtime-recipe)
-- [Options, presets and doctor rows](#options-presets-and-doctor-rows)
-- [Registering it](#registering-it)
-- [The recording contract](#the-recording-contract)
-- [The conformance kit](#the-conformance-kit)
-- [Checklist](#checklist)
+On this page: [Quick start](#quick-start) · [Protocol](#the-protocol) · [Capabilities](#capabilities) ·
+[Planner base class](#the-planner-base-class) · [Sidecars](#sidecars) · [Runtime recipe](#a-runtime-recipe) ·
+[Options, presets, doctor](#options-presets-and-doctor-rows) · [Registering](#registering-it) ·
+[Recording contract](#the-recording-contract) · [Conformance kit](#the-conformance-kit) ·
+[Before collecting](#before-collecting)
 
----
+## Quick start
 
-## What tandem does, and what a planner does
+1. Generate a package:
 
-| tandem | the planner |
-|---|---|
-| Splits the instruction into ordered robot and human phases, invents predicates and magic operators, checks the plan hangs together, and repairs it with the model | Declares its goal language (`Capabilities`), which is all the phase planner reads about it |
-| Decides who does each phase, and when | Perceives the workspace: object labels, the table, an image |
-| Hands the arm to a person for a human phase, and checks their work from a photo | Plans one goal in one scene, and says why when it cannot |
-| Mints the trajectory id, merges every leg into one episode, and writes `hitl.json` | Executes that plan on the robot and records it as one leg, stamped with what tandem asked |
-| Everything in the session: prompts, labels, the UI, the events file | Lets go of the robot and cameras when asked, and takes them back |
+   ```bash
+   tandem planners new shelfbot              # runs in tandem's own process
+   tandem planners new armsim --sidecar      # runs as a script in an environment of its own
+   ```
 
-A planner never sees a phase list, an invented predicate or a person. It is asked, over and over:
-*achieve this goal in this scene, and record what you did.*
+   It is written to `./tandem-NAME` (`--dir` to choose). As generated it plans a stand-in world (one
+   block, one tray) in memory and passes the [conformance kit](#the-conformance-kit):
 
----
+   ```
+   tandem-shelfbot/
+   ├── pyproject.toml                  the package and its tandem.planners entry point
+   ├── README.md                       the TODOs, in order
+   ├── src/tandem_shelfbot/
+   │   ├── __init__.py
+   │   ├── planner.py                  CAPABILITIES and the ShelfbotPlanner class
+   │   └── sidecar.py                  (--sidecar only) the script the planner's environment runs
+   └── tests/test_conformance.py       the conformance kit, run against it
+   ```
 
-## Start here: `tandem planners new`
+2. Install it into the environment tandem runs in. tandem reads only its own environment's entry
+   points, and the package depends on `tandem-tamp`, which is not on PyPI. `planners new` prints the
+   right command; by install method:
 
-```bash
-tandem planners new shelfbot                 # a planner that runs in tandem's own process
-tandem planners new armsim --sidecar         # one that runs as a script in an environment of its own
-```
+   ```bash
+   cd tandem-shelfbot
+   pipx inject tandem-tamp --editable . pytest                   # tandem installed with pipx
+   uv tool install --reinstall git+https://github.com/SamratSahoo/tandem.git \
+       --with-editable . --with pytest                           # tandem installed with uv tool
+   pip install -e ".[test]"                                      # tandem in an active virtualenv
+   ```
 
-Each writes a package (default `./tandem-NAME`; `--dir` to choose) that passes tandem's conformance
-kit as generated. It plans in a stand-in world, one block and one tray, and "executes" in memory:
+3. Check it, using that environment's Python (`planners new` prints its path; a `pytest` on your
+   `PATH` may belong to an environment without tandem):
 
-```
-tandem-shelfbot/
-├── pyproject.toml                    the package, and its tandem.planners entry point
-├── README.md                         what to fill in, in order
-├── src/tandem_shelfbot/
-│   ├── __init__.py
-│   ├── planner.py                    CAPABILITIES and the ShelfbotPlanner class
-│   └── sidecar.py                    (--sidecar only) the script the planner's environment runs
-└── tests/test_conformance.py         tandem's conformance kit, run against it
-```
+   ```bash
+   python -m pytest                # the conformance kit: green as generated
+   tandem planners list            # shelfbot is listed as "no runtime needed"
+   tandem planners info shelfbot   # its goal language, as phase planning sees it
+   tandem planners use shelfbot    # the active profile now plans with it
+   ```
 
-Then:
+   What `planners use` changes in the profile: [CONFIGURATION.md](CONFIGURATION.md#planner-settings).
 
-Install it into the environment tandem runs in: tandem only sees the entry points of its own
-environment, and the package depends on `tandem-tamp`, which is not on PyPI, so it resolves only
-where tandem is already installed. `tandem planners new` prints the right command for the tandem that
-ran it; by install method:
+4. Replace each `TODO` in the order the generated README lists them, keeping `pytest` green:
+   1. The goal language: [`CAPABILITIES`](#capabilities).
+   2. `perceive`: object labels, the table, which objects are surfaces, a scene id, an image.
+   3. `plan`: one goal planned, or `ok=False` with the reason.
+   4. `execute`: run the plan and record the leg; then set `records_legs = True` in the test file.
+   5. `capture_frame`: a current frame from the camera asked for.
+   6. The `supports_*` switches, each turned on once honoured, and `initial_state_is_clean` /
+      `one_pick_per_object` set to what the solver assumes (the scaffold starts at the safe values).
+   7. A [runtime recipe](#a-runtime-recipe), if the planner needs more than pip.
+5. Work through [Before collecting](#before-collecting).
 
-```bash
-cd tandem-shelfbot
-pipx inject tandem-tamp --editable . pytest                   # tandem installed with pipx
-uv tool install --reinstall git+https://github.com/SamratSahoo/tandem.git \
-    --with-editable . --with pytest                           # tandem installed with `uv tool`
-pip install -e ".[test]"                                      # a virtualenv tandem is installed in, active
-```
+### Names
 
-Then, with that environment's Python (the path `planners new` printed; `pytest` on your PATH may be
-another environment's, which has no tandem to import):
-
-```bash
-python -m pytest                # tandem's conformance kit: green as generated
-tandem planners list            # shelfbot is listed, "no runtime needed"
-tandem planners info shelfbot   # its goal language, as the phase planner will see it
-tandem planners use shelfbot    # the active profile now plans with it
-```
-
-`tandem planners use` switches the profile's `planner.backend`. The previous planner's
-`planner.options` leave profile.yml, named, since the new planner would refuse them; they are kept
-beside it in `planner-options.<planner>.yml`, and switching back restores them (checked again by that
-planner). `--option KEY=VALUE` gives the new planner a setting it requires. It warns, and does not
-refuse, when the planner is not installed yet, and it works from the profile's file as written, so it
-also repairs a profile that names a planner this machine no longer has.
-
-Then replace each `TODO`, in the order the generated README lists them, and keep `pytest` green:
-
-1. **The goal language** (`CAPABILITIES`).
-2. **`perceive`**: every object's label, the table's, which objects are surfaces, a scene id, and
-   an image (`rgb_path`), which the kit requires.
-3. **`plan`**: one goal, planned; or `ok=False` with the reason.
-4. **`execute`**: run it, record the leg. Once legs are really recorded, set
-   `records_legs = True` in `tests/test_conformance.py` so the kit checks the recording too.
-5. **`capture_frame`**: a current frame from the camera asked for, which the kit requires.
-6. **The switches**: turn on `supports_movable_restriction`, `supports_return_home` and
-   `supports_cooperative_stop` as the planner learns to honour each. The kit checks every one
-   declared. Say what the solver assumes (`initial_state_is_clean`, `one_pick_per_object`); the
-   scaffold states both, with the safe values.
-7. **A runtime recipe**, if the planner needs more than pip.
-
-A name is `lowercase letters, digits, _ and -, starting with a letter` (`tandem/core/names.py`). The
-same rule holds for human executors. It is typed into YAML and onto command lines, and it becomes a
-directory name.
-
----
+A planner's name is lowercase letters, digits, `_` and `-`, starting with a letter
+(`src/tandem/core/names.py`). Human executors use the same rule.
 
 ## The protocol
 
-`tandem.planners.base.TampBackend`. You do not implement it by hand: subclass `Planner` (next
-sections), which supplies every verb but three. The lifecycle a session drives is:
+tandem drives a planner through `tandem.planners.base.TampBackend`. Don't implement it by hand:
+subclass [`Planner`](#the-planner-base-class), which supplies every verb except `perceive`, `plan` and
+`execute`. A session calls:
 
 ```
 factory.create(ctx) → require_ready() → warm()
@@ -121,298 +86,240 @@ factory.create(ctx) → require_ready() → warm()
     → home() → close()                            when the session stops
 ```
 
-| verb | when tandem calls it | contract |
+| verb | when | contract |
 |---|---|---|
 | `capabilities()` | Any time, before anything is built | Declared, cheap, static. |
 | `require_ready()` | Before `warm` | Raise `RuntimeNotReady` naming what is missing. |
-| `warm()` | Once per session | Open cameras, connect the robot, build solvers. |
-| `perceive(*, task_hint, save_dir, reset_arm=True, open_gripper=False)` | Before every robot leg, never before a person's step | `task_hint` is the whole instruction and steers detection only. `reset_arm` is True only for the attempt's first leg: never park an arm a person just handed back. `open_gripper` is True only for the first leg after a human phase. Returns a `SceneView`. |
-| `plan(scene_id, goal, *, surfaces=frozenset(), movables=None, return_home=True, save_dir, reuse_skeleton=None)` | After `perceive` | `goal` is a list of `GoalAtom(predicate, args)` in the planner's wire spelling. `surfaces` pins which objects are surfaces for the whole task. `movables` and `return_home` are passed **only** when declared (below). Returns a `PlanResult`. An unplannable goal is `ok=False` with `failure_reason`, not an exception. |
-| `execute(plan_handle, leg, *, save_dir, should_stop=None)` | After a plan succeeds | Run it and record it as one leg of `leg.trajectory_id` ([the recording contract](#the-recording-contract)). Returns an `ExecuteResult`. `ok=False` ends the trial (`tamp_execution`). |
-| `capture_frame(*, camera="external")` | For every check of a human phase, and of a robot leg's effects | One RGB frame written to a file; return its path. `camera` is `hitl.verification_camera`. (A robot leg's preconditions are checked on that pass's perception image instead.) |
-| `release_hardware()` / `reacquire_hardware()` | Around every human leg | Release blocks until the robot and every camera are really free. A person's executor opens them next. |
-| `home()` | When the session stops | Park the arm. Do not open the gripper: it may be holding something. |
+| `warm()` | Once per session, and again after a verb raised | Open cameras, connect the robot, build solvers. On a planner that is already warm, do nothing. |
+| `perceive(*, task_hint, save_dir, reset_arm=True, open_gripper=False)` | Before every robot leg | `task_hint` is the whole instruction and steers detection only. `reset_arm` is True only for an attempt's first leg: never park an arm a person just handed back. `open_gripper` is True only for the first leg after a human phase; open the hand and move nothing else. Returns a `SceneView`. |
+| `plan(scene_id, goal, *, surfaces=frozenset(), movables=None, return_home=True, save_dir, reuse_skeleton=None)` | After `perceive` | `goal` is a list of `GoalAtom(predicate, args)` in the planner's wire spelling. `surfaces` fixes which objects are surfaces for the whole task. `movables` and `return_home` are passed only when [declared](#capabilities). A goal it cannot plan is `ok=False` with `failure_reason`, not an exception. Returns a `PlanResult`. |
+| `execute(plan_handle, leg, *, save_dir, should_stop=None)` | After a plan succeeds | Run it and record it as one leg of `leg.trajectory_id` ([recording contract](#the-recording-contract)). Returns an `ExecuteResult`; `ok=False` ends the trial at `tamp_execution`. |
+| `capture_frame(*, camera="external")` | For every camera check of a human phase or a robot leg's effects | Write one RGB frame to a file and return its path. `camera` is `hitl.verification_camera`. A robot leg's preconditions are checked on that pass's `rgb_path` instead. |
+| `release_hardware()` / `reacquire_hardware()` | Around every human leg | Release blocks until the robot and every camera are really free. Reacquire takes them back from wherever the person left the arm. |
+| `home()` | When the session stops | Park the arm. Don't open the gripper: it may be holding something. |
 | `close()` | Last | Release everything. Safe twice, and safe on a planner that never warmed. |
 
-**What `perceive` returns.** A `SceneView` carries:
+A verb that raises ends the trial at its stage (`tamp_planning` for `perceive` and `plan`,
+`tamp_execution` for `execute`), and the session calls `warm()` again before the next task.
 
-- `object_labels`, not including the table;
-- `table_label`;
-- `surface_labels`: the objects that are surfaces;
-- `scene_id`, handed back to `plan`;
-- `rgb_path`: an image of what was seen;
-- `detected_goal`: the planner's own reading of the instruction, as `GoalAtom`s.
+**`SceneView`**, what `perceive` returns:
 
-With phase planning on, `rgb_path` is what the task is decomposed from. A pass with no image ends
-the trial at `invention`. With phase planning off, the leg's goal is `detected_goal`. Labels may
-differ from pass to pass; tandem rebinds its plan to them.
+| field | meaning |
+|---|---|
+| `object_labels` | Every object seen, not including the table. |
+| `table_label` | The support surface (default `table`). |
+| `surface_labels` | The objects that are surfaces. |
+| `scene_id` | Opaque; handed back to `plan`. |
+| `rgb_path` | An image of what was seen. With phase planning on, the task is split into phases from it, and a pass that must propose the plan (the first, or the first after a `replan`) without one ends the trial at `invention`. |
+| `detected_goal` | The planner's own reading of the instruction, as `GoalAtom`s. With phase planning off, this is the leg's goal. |
 
-**What `plan` returns.** A `PlanResult` carries:
+Labels may differ from pass to pass; tandem rebinds its plan to them.
 
-- `ok`, and `failure_reason` when it failed;
-- `planning_seconds`;
-- `plan_handle`: opaque, handed back to `execute`;
-- `task_plan`: the operators the plan runs, object arguments only, e.g.
-  `("Pick(bread)", "Place(bread, plate)")`. Written into `hitl.json`; nothing parses it;
-- `artifacts`: role → path;
-- `skeleton` and `skeleton_reused`: only with `supports_skeleton_reuse`.
+**`PlanResult`**, what `plan` returns. It must be JSON-safe: a sidecar sends it over the wire and it is
+written into the trial's record.
 
-It must be JSON-safe: a sidecar sends it over the wire, and it is written into the record.
+| field | meaning |
+|---|---|
+| `ok`, `failure_reason` | Whether it planned, and why not. |
+| `planning_seconds` | Time spent planning. |
+| `plan_handle` | Opaque; handed back to `execute`. |
+| `task_plan` | The operators the plan runs, object arguments only, e.g. `("Pick(bread)", "Place(bread, plate)")`. Written into `hitl.json`; nothing parses it. |
+| `artifacts` | Role → path of files the planner wrote. |
+| `skeleton`, `skeleton_reused` | Only with `supports_skeleton_reuse`. |
 
----
+## Capabilities
 
-## `Capabilities`, field by field
+`Capabilities` is everything phase planning reads about a planner. `Planner` checks the declaration
+when the class is defined. TiPToP's is `src/tandem/planners/tiptop/capabilities.py`; `tests/toy_planner.py`
+is a second example (`InBin(?obj: item, ?bin: container)`, no table, no exclusivity).
 
-The phase planner reads nothing else about a planner. A field it gets wrong is a planner that
-loads, lists, and then plans the wrong thing, so `Planner` checks the declaration when the class is
-defined (`sdk.capability_problems`).
+| field | meaning | TiPToP |
+|---|---|---|
+| `name` | Must equal `info.name`. | `"tiptop"` |
+| `goal_predicates` | Name → `Predicate(name, (Parameter(name, type), …))`: the goal language shown to the model. A robot phase may use nothing else. Shown in declaration order, so put the most important first. | `On(?obj: movable, ?surface: surface)`, `Holding(?obj: movable)`, `HandEmpty()` |
+| `robot_description` | One abstract sentence of what the robot does, read by the model instead of operator signatures. Required. | `"pick an object up and place it on a surface"` |
+| `goal_predicate_wire_names` | How each goal predicate is spelled in `plan(goal=)`. A predicate left out is one the planner supplies itself: it is dropped from goals, and a robot phase stating nothing else is sent back for repair. | `{"On": "on", "Holding": "holding"}` |
+| `achievable_predicates` | Everything some operator can make true. A robot phase asking for anything else is refused and repaired in the proposal's repair loop, before any robot leg is planned. Must include every goal predicate. | cuTAMP's add effects, plus what a fresh scene holds |
+| `reserved_predicate_names` | Names the model may not invent. Must include every goal predicate. | all 19 cuTAMP fluents |
+| `movable_type`, `surface_type` | The only two object types; must differ. tandem types every perceived object as one of them, so every parameter of a goal predicate and of a robot operator must use one. | `movable`, `surface` |
+| `moved_arguments` | Predicate → position of the argument naming the object a robot phase moves. Must point at a `movable_type` parameter. Used for `movables=`, for conjoining, and for the wasted-move warning. | `{"On": 0, "Holding": 0}` |
+| `exclusive_arguments` | Predicate → the argument that can hold in only one atom at a time. The contract check reads it as a free delete effect, and a phase asking for two atoms in one slot is sent back for repair. | `{"On": 0}` |
+| `predicate_descriptions` | `{0}`-templates saying what each goal predicate means, for the operator and the camera. Only `{0}`, `{1}`, … within the arity; write a literal brace as `{{`. | `"{0} is resting on top of {1}"`, … |
+| `checkable_predicates` | Goal predicates a camera can judge from one photo. Invented predicates are always checkable. | `{"On"}` (the gripper is usually out of shot) |
+| `robot_operators` | One signature per operator, for the record only: `Pick(?obj: movable)` or `Pick(obj: movable)`, any spacing, written to the record as `Pick(obj: movable)`. Types must be the declared ones. | `Pick(?obj: movable)`, `Place(?obj: movable, ?surface: surface)` |
+| `prompt_fragments` | Planner-specific paragraphs of the phase-planning prompt, by slot: `placement_semantics`, `precondition_vocabulary`, `delete_effect_example`, `work_division`, `intermediate_state_example`, `robot_phase_rules`. A missing slot gets a generic paragraph, so `{}` is valid. | all six, the paper's Appendix B wording |
+| `one_pick_per_object` | One plan picks each object at most once. Default `True` (safe: it only keeps phases apart). | `True` (cuTAMP deletes `HasNotPickedUp`, so `On(toy, table)` and `On(toy, shelf)` in one plan can't both be met) |
+| `initial_state_is_clean` | Every goal is planned from the same clean state, so consecutive robot phases may be conjoined. Default `False`: every robot phase is its own leg. Set it only when the solver really makes that promise. | `True` |
+| `supports_movable_restriction` | `plan(movables=)` is honoured: only those objects may be picked and every other one is an obstacle. A goal moving anything else is `ok=False` naming it. Requires `moved_arguments`. | `True` |
+| `supports_return_home` | `plan(return_home=False)` ends the leg where its last operation leaves the arm. tandem passes `False` for every leg except the task's last. | `True` |
+| `supports_cooperative_stop` | `execute` polls `should_stop` at step boundaries. Without it, the leg runs to its end and a preempt then aborts the trial. | `False` |
+| `supports_skeleton_reuse` | `plan` can reuse a previous `PlanResult.skeleton`. | `False` |
 
-TiPToP's declaration is `src/tandem/planners/tiptop/capabilities.py`. The toy planner the test suite
-drives (`tests/toy_planner.py`) drops items into bins, with no table and no exclusivity.
+**Only what is declared is passed.** tandem passes `movables` only with `supports_movable_restriction`,
+`return_home` only with `supports_return_home`, and `should_stop` only with `supports_cooperative_stop`.
+A planner declaring neither of the first two may leave them out of its `plan` signature.
 
-| field | what it is, and who reads it | TiPToP | toy |
-|---|---|---|---|
-| `name` | Must equal `info.name`. | `"tiptop"` | `"toy"` |
-| `goal_predicates` | Ψ₀: name → `Predicate(name, (Parameter(name, type), …))`. The goal language shown to the model; a robot phase may use nothing else. Declaration order is shown order: put the load-bearing one first. | `On(?obj: movable, ?surface: surface)`, `Holding(?obj: movable)`, `HandEmpty()` | `InBin(?obj: item, ?bin: container)` |
-| `robot_description` | One abstract sentence of what the robot does. The model reads it instead of real operator signatures. Required: there is no default, and an empty one is refused. | `"pick an object up and place it on a surface"` | `"drop an item into a bin"` |
-| `goal_predicate_wire_names` | How each goal predicate is spelled in `plan(goal=)`. A predicate **absent** here is one the planner supplies itself: it may be stated, and is dropped from goals. A robot leg stating nothing else would hand the planner an empty goal, so the proposal is sent back for repair. | `{"On": "on", "Holding": "holding"}` (no `HandEmpty`) | `{"InBin": "in_bin"}` |
-| `achievable_predicates` | Everything some operator can make true. A robot phase asking for anything else is refused, and repaired, before perception is paid for. Must include every goal predicate. | cuTAMP's add effects, plus what a fresh scene holds | `{"InBin"}` |
-| `reserved_predicate_names` | Names the model may not invent. Must include every goal predicate. | all 19 cuTAMP fluents | `{"InBin"}` |
-| `movable_type`, `surface_type` | The two object types, and which is which. Must differ. They are the only two: tandem types every perceived object as one or the other, so every parameter of a goal predicate and of a robot operator must be typed with one of them. A third type is refused, since no atom over it could ever be grounded. | `movable`, `surface` | `item`, `container` |
-| `predicate_descriptions` | `{0}`-templates saying what each goal predicate means, for the operator and for the camera. Only `{0}`, `{1}`, … inside braces, within the arity (write a literal brace as `{{`), the rule an invented predicate's template is held to. | `"{0} is resting on top of {1}"`, … | `"{0} is inside {1}"` |
-| `checkable_predicates` | Goal predicates a camera can judge from one photo. Invented predicates are always checkable. | `{"On"}` (the gripper is usually out of shot) | `{"InBin"}` |
-| `one_pick_per_object` | One plan picks each object at most once, so two phases moving the same object are never conjoined. Default `True`, the safe value: it only ever keeps phases apart. | `True` (cuTAMP deletes `HasNotPickedUp`) | `False` |
-| `initial_state_is_clean` | Every goal is planned from the same clean state, so consecutive robot phases may be conjoined into one goal (`hitl.conjoin_robot_phases`): one perception pass, the atoms sorted, the proposer's order between them dropped. Default `False`: every robot phase is its own leg. Set it only when the solver really makes that promise. | `True` | `False`: every robot phase is its own leg |
-| `supports_cooperative_stop` | `execute` polls `should_stop` at step boundaries. Otherwise a preempt is an abort. | `False` | `True` |
-| `supports_skeleton_reuse` | `plan` can reuse a previous `PlanResult.skeleton`. | `False` | `False` |
-| `prompt_fragments` | Planner-specific paragraphs of the segmentation prompt, by slot (`tandem.planning.prompts.PROMPT_SLOTS`): `placement_semantics`, `precondition_vocabulary`, `delete_effect_example`, `work_division`, `intermediate_state_example`, `robot_phase_rules`. A slot left out gets a generic paragraph rendered from the goal predicates, so `{}` is a complete declaration. | all six, the paper's Appendix-B wording (pinned byte for byte by a golden test) | `{}` |
-| `exclusive_arguments` | Predicate → the argument that can hold in one atom at a time. The contract check reads it as the delete effect a placement gets for free. A phase asking for two atoms in one slot is sent back for repair, and consecutive robot phases that would put one object in two places are never conjoined, whatever `one_pick_per_object` says. | `{"On": 0}` | `{}` |
-| `moved_arguments` | Predicate → the argument naming the object a robot phase moves. Must point at a `movable_type` parameter. Read for `movables=`, for conjoining, and for the wasted-move warning. | `{"On": 0, "Holding": 0}` | `{"InBin": 0}` |
-| `robot_operators` | Ω₀, one signature each, for the record only. `Pick(?obj: movable)` or `Pick(obj: movable)`, any spacing; types must be declared ones. The record writes each as `Pick(obj: movable)`. | `("Pick(?obj: movable)", "Place(?obj: movable, ?surface: surface)")` | `("Drop(?obj: item, ?bin: container)",)` |
-| `supports_movable_restriction` | `plan(movables=)` is honoured: only those objects may be picked, and every other one is an obstacle. A goal that moves anything else is `ok=False` naming it. Requires `moved_arguments`. | `True` | `True` |
-| `supports_return_home` | `plan(return_home=False)` ends the leg where its last operation leaves the arm. tandem passes `False` for every leg but the task's last. | `True` | `True` |
+**Conjoining** (`hitl.conjoin_robot_phases`) plans consecutive robot phases as one goal, with one
+perception pass; their atoms are sorted, and the proposal's order between them is dropped. It happens
+only when `initial_state_is_clean` is `True`, and stops before a phase that moves an object already moved
+in the run (with `one_pick_per_object`) or fills a slot of `exclusive_arguments` already filled.
 
-tandem passes `movables` only when `supports_movable_restriction` is set, and `return_home` only
-when `supports_return_home` is set. A planner declaring neither is never handed either, and may
-leave both out of its `plan` signature.
+## The Planner base class
 
----
+`tandem.planners.Planner` (`src/tandem/planners/sdk.py`) is an abstract base class and also its own
+factory: the registry uses the class, and an instance is the backend a session builds.
 
-## The `Planner` base class
-
-`tandem.planners.Planner` (`src/tandem/planners/sdk.py`) is an abstract base class, and it is also
-its own factory. The registry uses the class itself and never instantiates it to get a factory. An
-instance is a backend, built once per session.
+A declaration with a goal language of its own (the scaffold's `planner.py` is a complete, runnable one):
 
 ```python
-from tandem.planners import (
-    Capabilities, ExecuteResult, Parameter, Planner, PlannerInfo, PlanResult, Predicate, SceneView,
-)
+from tandem.planners import Capabilities, Parameter, Planner, PlannerInfo, Predicate
 
 IN_BIN = Predicate("InBin", (Parameter("obj", "item"), Parameter("bin", "container")))
 
 class BinPlanner(Planner):
     info = PlannerInfo(name="bins", display_name="Bin sorter", summary="Drops items into bins.")
     CAPABILITIES = Capabilities(
-        name="bins",
-        goal_predicates={"InBin": IN_BIN},
-        robot_description="drop an item into a bin",
-        goal_predicate_wire_names={"InBin": "in_bin"},
-        achievable_predicates=frozenset({"InBin"}),
-        reserved_predicate_names=frozenset({"InBin"}),
-        movable_type="item",
-        surface_type="container",
-        predicate_descriptions={"InBin": "{0} is inside {1}"},
-        checkable_predicates=frozenset({"InBin"}),
-        moved_arguments={"InBin": 0},
-        # What the solver assumes: each robot phase its own leg, and an item may be dropped more
-        # than once in one plan.
-        initial_state_is_clean=False,
-        one_pick_per_object=False,
+        name="bins", goal_predicates={"InBin": IN_BIN}, robot_description="drop an item into a bin",
+        goal_predicate_wire_names={"InBin": "in_bin"}, achievable_predicates=frozenset({"InBin"}),
+        reserved_predicate_names=frozenset({"InBin"}), movable_type="item", surface_type="container",
+        predicate_descriptions={"InBin": "{0} is inside {1}"}, checkable_predicates=frozenset({"InBin"}),
+        moved_arguments={"InBin": 0}, one_pick_per_object=False,  # an item may be dropped twice in one plan
     )
     OPTIONS = {"bins": "the bin names, left to right"}
 
-    def perceive(self, *, task_hint, save_dir, reset_arm=True, open_gripper=False) -> SceneView: ...
-    def plan(self, scene_id, goal, *, surfaces=frozenset(), save_dir, reuse_skeleton=None) -> PlanResult: ...
-    def execute(self, plan_handle, leg, *, save_dir, should_stop=None) -> ExecuteResult: ...
+    def perceive(self, *, task_hint, save_dir, reset_arm=True, open_gripper=False): ...        # -> SceneView
+    def plan(self, scene_id, goal, *, surfaces=frozenset(), save_dir, reuse_skeleton=None): ...  # -> PlanResult
+    def execute(self, plan_handle, leg, *, save_dir, should_stop=None): ...                      # -> ExecuteResult
 ```
 
-**Declarations** (class attributes):
+**Class attributes:**
 
 | attribute | required | what it is |
 |---|---|---|
-| `info` | yes | `PlannerInfo(name, display_name, summary, homepage, requires, sources)`. What `tandem planners list/info` show. `requires` is human-readable lines, shown and never checked. `sources` is filled in from `recipe` when left empty. |
-| `CAPABILITIES` | yes | Above. `CAPABILITIES.name` must equal `info.name`. |
-| `recipe` | no | A `RuntimeRecipe`, when the planner needs more than pip. None: pure Python. |
+| `info` | yes | `PlannerInfo(name, display_name, summary, homepage, requires, sources)`, shown by `tandem planners list` and `info`. `requires` is human-readable lines, never checked. `sources` is filled in from `recipe` when left empty. |
+| `CAPABILITIES` | yes | [Above](#capabilities). |
+| `recipe` | no | A [`RuntimeRecipe`](#a-runtime-recipe), when the planner needs more than pip. `None`: pure Python. |
 | `OPTIONS` | no | `planner.options` key → one line saying what it does. Any other key is refused when a profile loads. |
-| `importer` | no | A `ProfileImporter` (`find`, `configs`, `build`), for `tandem profile create --import-from` and `tandem init --import-from`. TiPToP's reads a hitl-tamp-vla checkout. `build` returns the profile, the extrinsics and notes; a note starting with `tandem.planners.base.WARNING_NOTE` (`"warning: "`) is shown as a warning. |
-| `presets_dir` | no | A directory of `<name>.yml` presets for this planner's options. |
+| `importer` | no | A `ProfileImporter` (`source`, `find`, `configs`, `build`) for `--import-from`. `build` returns the profile, the extrinsics and notes; a note starting with `WARNING_NOTE` (`"warning: "`) is shown as a warning. |
+| `presets_dir` | no | A directory of `<name>.yml` [presets](#options-presets-and-doctor-rows) for this planner's options. |
 
-**Checked when the class is defined.** Every problem is listed in one `TandemError` at import:
-
-- an unachievable or unreserved goal predicate;
-- a goal-predicate or robot-operator parameter typed as neither `movable_type` nor `surface_type`;
-- an empty `robot_description`;
-- a moved argument that points at a surface;
-- a wire name for a predicate that does not exist;
-- a misspelt prompt slot;
-- a pin that is not a full 40-character commit;
-- a recipe for another planner;
-- `info.name` and `CAPABILITIES.name` that disagree.
-
-A base class for other planners passes `abstract=True` (`class MyBase(Planner, abstract=True)`), and
-is then neither checked nor registrable.
+**Checked when the class is defined.** Every *must* in the tables above is checked, along with a wire
+name or description for an undeclared predicate, a misspelt prompt slot and a recipe for another planner.
+All problems are reported together, in one `TandemError` at import. A base class for other planners
+passes `abstract=True` (`class MyBase(Planner, abstract=True)`) and is neither checked nor registrable.
 
 **Defaults for everything else:**
 
 | member | default |
 |---|---|
-| `warm`, `close`, `home`, `release_hardware`, `reacquire_hardware` | Do nothing: right for a planner that holds no hardware. |
-| `require_ready` | Checks the declared recipe's runtime. No recipe: nothing to check. |
-| `capture_frame`, `move_to_joints` | Raise `UnsupportedVerb`. There is no honest default for a camera frame: a verifier shown a made-up one would pass or fail a person's work on nothing. Without `capture_frame`, human phases cannot be verified, so a session with `hitl.check_human_effects`, `check_human_preconditions` or `check_tamp_effects` on refuses to start on the planner; implement it, or turn those off. |
+| `warm`, `close`, `home`, `release_hardware`, `reacquire_hardware` | Do nothing (right for a planner that holds no hardware). |
+| `require_ready` | Checks the recipe's runtime is installed. No recipe: nothing to check. |
+| `capture_frame`, `move_to_joints` | Raise `UnsupportedVerb`. With phase planning on and `hitl.check_human_effects`, `check_human_preconditions` or `check_tamp_effects` on, a session refuses to start on a planner without `capture_frame`. |
 | `create(ctx)` (classmethod) | `validate_options(ctx.options)`, then `cls(ctx)`. Override when construction needs more. |
-| `validate_options(options)` | Refuses any key not in `OPTIONS`, with a difflib hint. |
-| `describe_options(profile, *, settings=None)` | `OptionsView.generic`: each option, as set. |
+| `validate_options(options)` | Refuses any key not in `OPTIONS`, suggesting the nearest. |
+| `describe_options(profile, *, settings=None)` | `OptionsView.generic`: each option as set. |
 | `doctor_checks(profile, *, settings=None, probe_hardware=True)` | `[]`. |
-| `replay(rollout_dir, *, settings=None)` | Raises `UnsupportedVerb`: no viewer (`tandem traj open`). |
-| `runtime(settings)` / `runtime_root(settings)` | A `RecipeRuntime` at `<runtimes dir>/<name>` (`~/.local/share/tandem/runtimes/<name>` on Linux, `$TANDEM_RUNTIMES_DIR` overrides). None without a recipe. |
+| `replay(rollout_dir, *, settings=None)` | Raises `UnsupportedVerb`: no viewer for `tandem traj open`. |
+| `runtime(settings)` / `runtime_root(settings)` | A runtime at `~/.local/share/tandem/runtimes/<name>` (`$TANDEM_RUNTIMES_DIR` overrides). `None` without a recipe. |
 
-**In your implementation:** `self.ctx` is the `BackendContext`: `profile`, `session_dir`,
-`output_dir`, `execute`, `record`, `options`, `settings`, `session_id`, `task`, `events_file` and
-`runtime_dir`. `self.options` is `planner.options` as validated. `self.log(text)` writes a line to
-the session log the operator watches.
+Inside the class, `self.ctx` is the `BackendContext` (`profile`, `session_dir`, `output_dir`,
+`execute`, `record`, `on_log`, `options`, `settings`, `session_id`, `task`, `events_file`,
+`runtime_dir`), `self.options` is `planner.options` as validated, and `self.log(text)` writes a line
+to the session log the operator watches.
 
-A factory that is not a `Planner` works too: any object with `info`, `capabilities()`,
-`create(ctx)` and `runtime(settings)`, plus any of the optional hooks above
-(`tandem.planners.base.BackendFactory`). TiPToP's is one (`planners/tiptop/factory.py`), because its
-backend predates the SDK.
+A factory that isn't a `Planner` also works: any object with `info`, `capabilities()`, `create(ctx)`
+and `runtime(settings)`, plus any of the optional hooks above (`tandem.planners.base.BackendFactory`).
+TiPToP's is one (`src/tandem/planners/tiptop/factory.py`).
 
----
+## Sidecars
 
-## In tandem's process, or in a sidecar
-
-tandem installs with pip and runs on a laptop. A planner that needs torch, CUDA kernels, a camera
-SDK or a robot client cannot live in tandem's process. It runs as a **sidecar**: a script launched
-with the planner's own interpreter, answering the protocol one JSON object per line.
-
-```
-tandem (pure Python)                              the planner's environment (pixi)
-  MyPlanner(SidecarPlanner).plan(goal)  ──JSON──►   my_sidecar.py:  plan(scene_id, goal, ...)
-                                        ◄──JSON──   {"ok": true, "plan_handle": ..., "task_plan": [...]}
-```
-
-**The class** (`tandem.planners.SidecarPlanner`, `src/tandem/planners/sidecar.py`):
+A planner that needs torch, CUDA kernels, a camera SDK or a robot client can't run in tandem's
+process. It runs as a **sidecar**: a script launched with the planner's own interpreter, answering
+the protocol one JSON object per line. tandem's side is a `tandem.planners.SidecarPlanner` subclass
+(`src/tandem/planners/sidecar.py`):
 
 ```python
 class ArmPlanner(SidecarPlanner):
     info = PlannerInfo(name="arm", ...)
     CAPABILITIES = Capabilities(name="arm", ...)
-    recipe = RECIPE                    # the environment the sidecar runs in; None: this interpreter
+    recipe = RECIPE                    # the environment the sidecar runs in; None: tandem's interpreter
     SIDECAR = "sidecar.py"             # relative to this module's directory; checked at class definition
-    TIMEOUTS = {"warm": 600.0}         # over sidecar.DEFAULT_TIMEOUTS
+    TIMEOUTS = {"warm": 600.0}         # overrides sidecar.DEFAULT_TIMEOUTS
 ```
 
-What it does for you:
+| behaviour | detail |
+|---|---|
+| Launch | The runtime's `python` via `pixi run`, from the runtime's working directory; tandem's own interpreter when there is no runtime. The sidecar gets its own process group, and `tandem_sidecar` goes first on its `PYTHONPATH`. |
+| Verbs | Every verb becomes a request, and each reply becomes tandem's type. A verb the sidecar doesn't list in its hello gets `Planner`'s default. A sidecar that doesn't answer `perceive`, `plan` and `execute` is refused at `warm`. |
+| Declared-only arguments | `movables`, `return_home` and `reuse_skeleton` go on the wire only when declared. Passing one to a planner that didn't declare it is an error. |
+| Output | Log lines and stderr go to the session log; events go to the session's events file (`on_event`). Pipes are decoded leniently and drained until they close. |
+| Timeouts | Defaults: `warm` 900 s, `perceive` 300, `plan` 900, `execute` 1800, `capture_frame`, `home`, `release_hardware`, `reacquire_hardware` 180 each. A sidecar that doesn't answer in time gets SIGTERM, then SIGKILL, to its whole process group. A timeout or crash ends the trial at its stage, and the next `warm()` starts a fresh sidecar. |
+| Cooperative stop | When declared, `should_stop` is polled in tandem and passed to the sidecar as a stop file named by `TANDEM_SIDECAR_STOP_FILE`. |
+| `close` | Asks the sidecar to quit, then makes sure its whole process group is gone, including helpers it started. |
 
-- **Launches** the script with the runtime's `python` (via `pixi run`, from the runtime's working
-  directory), or with tandem's own interpreter when there is no runtime. The sidecar gets its own
-  process group, and `tandem_sidecar` goes first on its `PYTHONPATH`.
-- **Maps every verb** onto a request, and each reply back onto tandem's types.
-- **Sends only what is declared.** `movables`, `return_home` and `reuse_skeleton` go on the wire
-  only when declared. A caller that passes one to a planner that did not declare it gets an error,
-  not a quietly unrestricted plan.
-- **Falls back for unanswered verbs.** A verb the sidecar does not list in its hello gets
-  `Planner`'s default. A sidecar that does not answer `perceive`, `plan` and `execute` is refused at
-  `warm`.
-- **Streams output.** Log lines and stderr go into the session log. Events go into the session's
-  events file (`on_event`).
-- **Times out** every verb. Defaults: `warm` 900 s, `perceive` 300, `plan` 900, `execute` 1800,
-  `capture_frame`, `home`, `release_hardware` and `reacquire_hardware` 180 each. A sidecar that
-  does not answer in time is stopped (SIGTERM, then SIGKILL, to its whole process group), so it is
-  not left holding the robot. A crash is reported with its exit code. Either way the trial ends as a
-  failure at the stage it was in (`tamp_planning` for `perceive` and `plan`, `tamp_execution` for
-  `execute`), and the session calls `warm` again before the next task, which relaunches the sidecar.
-  `warm` on a sidecar that is running and warm does nothing.
-- **Pipes** are decoded leniently and drained until they close, so a byte that is not UTF-8 in
-  what a library prints cannot stop the drain and leave the sidecar blocked on a full pipe.
-- **Stops cooperatively** when declared. While `execute` runs, `should_stop` is polled in tandem
-  and passed to the sidecar as a stop file (`TANDEM_SIDECAR_STOP_FILE`).
-- **`close`** asks the sidecar to quit, then makes sure the whole process group is gone, so nothing
-  is left holding a camera. That includes helpers the sidecar started itself, after it exits or
-  crashes.
-
-Override `launch_command`, `launch_cwd`, `launch_env`, `warm_args` (what the sidecar's `warm` is
-handed; by default `output_dir`, `execute`, `record`) or `on_event` when the defaults are wrong for
-your planner. `call(verb, **args)` reaches a verb of the sidecar's own. TiPToP's backend is this class
-plus its launch details (`planners/tiptop/backend.py`).
+Override `launch_command`, `launch_cwd`, `launch_env`, `warm_args` (by default `output_dir`,
+`execute`, `record`) or `on_event` when a default is wrong for your planner. `call(verb, **args)`
+reaches a verb of the sidecar's own. TiPToP's backend is this class plus its launch details
+(`src/tandem/planners/tiptop/backend.py`).
 
 **The script** imports nothing from tandem, only `tandem_sidecar`
-(`src/tandem/planners/sidecar_kit/tandem_sidecar.py`). That is one standard-library file, written
-for Python 3.8 and later, which tandem puts on the script's path:
+(`src/tandem/planners/sidecar_kit/tandem_sidecar.py`), a single standard-library file for Python 3.8+
+that tandem puts on the script's path. Its shape (the scaffold's `sidecar.py` is a complete one):
 
 ```python
 from tandem_sidecar import log, serve          # FIRST: it takes stdout for the protocol
 
 # isort: split
-# the planner's own imports below here -- or better, inside warm()
+# the planner's own imports below here, or better, inside warm()
 
-class World:
+class World:                                   # one method per verb, each returning a JSON-safe dict
     def warm(self, *, output_dir=None, execute=True, record=True, **planner_specific): ...
-    def perceive(self, *, task_hint, save_dir, reset_arm=True, open_gripper=False):
-        return {"scene_id": "s1", "object_labels": ["block", "tray"], "table_label": "table",
-                "surface_labels": ["tray"], "rgb_path": "/path/to/rgb.png"}
-    def plan(self, *, scene_id, goal, surfaces, save_dir):
-        return {"ok": True, "plan_handle": "p1", "task_plan": ["Move(block, tray)"]}
-    def execute(self, *, plan_handle, leg, save_dir):
-        return {"ok": True, "n_frames": 120, "rollout_dir": save_dir}
-    def capture_frame(self, *, camera):
-        return {"path": "/path/to/frame.png"}
+    def perceive(self, *, task_hint, save_dir, reset_arm=True, open_gripper=False): ...  # scene_id, object_labels, rgb_path, …
+    def plan(self, *, scene_id, goal, surfaces, save_dir): ...                            # ok, plan_handle, task_plan, …
+    def execute(self, *, plan_handle, leg, save_dir): ...                                 # ok, n_frames, rollout_dir, …
+    def capture_frame(self, *, camera): ...                                               # path
 
 if __name__ == "__main__":
     raise SystemExit(serve(World()))
 ```
 
-- `serve(handlers)` takes an object (answering every protocol verb it has a method for) or a
-  mapping of verb → callable. It answers until tandem says quit or closes stdin, then calls
-  `close` (or `on_exit`).
-- `log(message, level="info")` writes a line to the session log, safely from any thread.
-- `event(name, **fields)` writes one event to the session's events file.
-- `should_stop()` is true once tandem asks the execution in flight to stop.
-- A handler that raises is reported to tandem as `"<verb> failed -- <Type>: <message>"`, with the
-  traceback in the session log.
+| `tandem_sidecar` | what it does |
+|---|---|
+| `serve(handlers, verbs=None, on_exit=None)` | `handlers` is an object (every protocol verb it has a method for) or a mapping of verb → callable. Answers until tandem says quit or closes stdin, then calls `on_exit` or the `close` handler. |
+| `log(message, level="info")` | One line in the session log. Safe from any thread. |
+| `event(name, **fields)` | One event in the session's events file. `id`, `log` and `event` can't be field names. |
+| `should_stop()` | True once tandem asks the execution in flight to stop. |
+| a handler that raises | Reported to tandem as `"<verb> failed -- <Type>: <message>"`, with the traceback in the session log. |
 
-The full wire protocol, and what each verb is sent and returns, is in that file's docstring.
+The wire protocol, and what each verb is sent and returns, is in that file's docstring.
 
 **stdout belongs to the protocol.** Importing `tandem_sidecar` takes the real stdout and points fd 1
-at stderr. From then on, a CUDA banner or a stray `print()` lands in the session log instead of
-corrupting a reply. So import it before anything that might print. The conformance kit refuses a
-script that imports a non-standard-library module before it.
+at stderr, so a CUDA banner or a stray `print()` lands in the session log instead of corrupting a
+reply. Import it before anything that might print; the conformance kit refuses a script that imports
+a non-standard-library module first.
 
-**Two things to know about `PYTHONPATH`:**
+**`PYTHONPATH`:**
 
-- tandem adds the kit's directory to the sidecar's `PYTHONPATH` when it launches one. If your
-  environment's own activation *replaces* `PYTHONPATH` (a pixi `[activation.env]` that sets it, for
-  example), the kit is lost, and the sidecar dies at start with
-  `ModuleNotFoundError: No module named 'tandem_sidecar'` in the session log. Append to
-  `PYTHONPATH` rather than setting it. TiPToP's manifest sets none.
-- To run a sidecar by hand, outside tandem, put the kit on the path yourself. TiPToP's, for
-  example:
+- tandem adds the kit's directory to the sidecar's `PYTHONPATH`. If your environment's activation
+  *sets* `PYTHONPATH` (for example a pixi `[activation.env]`), the kit is lost and the sidecar dies at
+  start with `ModuleNotFoundError: No module named 'tandem_sidecar'`. Append to `PYTHONPATH` instead.
+- To run a sidecar by hand, put the kit on the path yourself. For TiPToP's:
 
   ```bash
   PYTHONPATH=<tandem>/planners/sidecar_kit \
       pixi run --manifest-path <runtime>/tiptop/pixi.toml python <tandem>/planners/tiptop/sidecar.py
   ```
 
-  `<tandem>` is the installed package's directory (`python -c "import tandem, os;
-  print(os.path.dirname(tandem.__file__))"`), and `<runtime>` is what `tandem runtime path` prints.
-
----
+  `<tandem>` is the installed package's directory
+  (`python -c "import tandem, os; print(os.path.dirname(tandem.__file__))"`), and `<runtime>` is what
+  `tandem runtime path` prints.
 
 ## A runtime recipe
 
-A planner that needs more than pip declares the runtime it runs in, as data. `tandem planners install
-NAME` builds it, `tandem planners list` says whether it is current, and `tandem planners remove NAME`
-deletes it. TiPToP's is `src/tandem/planners/tiptop/recipe.py`.
+A planner that needs more than pip declares its runtime as data. `tandem planners install NAME`
+builds it, `tandem planners list` says whether it is current, and `tandem planners remove NAME`
+deletes it. TiPToP's is `src/tandem/planners/tiptop/recipe.py`; installing and updating it is in
+[CONFIGURATION.md](CONFIGURATION.md#the-planner-runtime).
 
 ```python
 from pathlib import Path
@@ -427,7 +334,7 @@ RECIPE = RuntimeRecipe(
         Source(
             SourcePin("arm", "https://github.com/you/arm.git", "<40-hex commit>"),
             trim=("docs/videos",),                   # dropped after fetching; say why in a comment
-            patches=(HERE / "patches" / "0001-fix.patch",),   # applied in order; a patch that fails stops the install
+            patches=(HERE / "patches" / "0001-fix.patch",),   # applied in order; one that fails stops the install
             marker="pixi.toml",                      # exists only when the tree is really there
             persistent=("arm/.cache",),              # written at run time, must outlive a new tree
         ),
@@ -435,7 +342,7 @@ RECIPE = RuntimeRecipe(
     ),
     environment=PixiEnvironment(
         manifest="arm/pixi.toml",                    # inside one of the sources: the planner's own manifest and lock
-        home="env",                                  # the environment, OUTSIDE every source tree
+        home="env",                                  # the environment, outside every source tree
         env={"SOME_VAR": "{source:solver}"},
     ),
     steps=(
@@ -444,7 +351,7 @@ RECIPE = RuntimeRecipe(
             task="build-kernels",                    # a task the manifest defines
             env={"SOLVER_DIR": "{source:solver}", "SETUPTOOLS_SCM_PRETEND_VERSION": "{version:solver}"},
             produces=("solver/build/*.so",),         # globs that exist only once the step has run
-            description="compiling the solver's kernels — about 10 minutes",
+            description="compiling the solver's kernels (about 10 minutes)",
         ),
     ),
     assets=(Asset(HERE / "assets" / "weights.pt", "weights/weights.pt"),),   # files the package ships
@@ -452,17 +359,13 @@ RECIPE = RuntimeRecipe(
 )
 ```
 
-- **Pins are full commits.** A branch names a different planner next week, and a dataset has to be
-  traceable to the planner that produced it. The recipe refuses anything else when it is declared.
-  A pin may also name the branch its commit was taken from (`ref="main"`; TiPToP's tiptop and cuTAMP
-  follow their forks' `TANDEM` branches). It is never what is installed and takes no part in
-  comparing pins; it is shown next to the commit (`tandem planners info`, `tandem runtime status`),
-  written into the runtime's record and into every bundle's marker, and it is what a bump moves along.
-- **Fetching.** Each pin is fetched with `git fetch --depth 1 <url> <commit>` and exported with
-  `git archive`, so no VCS state or build artifact from anyone's working tree comes along. A server
-  that will not hand out a bare commit (`uploadpack.allowReachableSHA1InWant` off) is asked for the
-  pin's branch instead, when it names one, and the commit is looked for there. Without git, GitHub's
-  archive of the commit is used. Either way the commit is checked.
+- **Pins are full 40-character commits**; the recipe refuses anything else when it is declared.
+  `ref` names the branch the commit came from: it is shown next to the commit (`tandem planners info`,
+  `tandem runtime status`) and recorded, but never compared.
+- **Fetching** is `git fetch --depth 1 <url> <commit>`, then `git archive`, so no VCS state or build
+  artefact comes along. A server that won't hand out a bare commit (`uploadpack.allowReachableSHA1InWant`
+  off) is asked for the pin's `ref` branch instead. Without git, GitHub's archive of the commit is used.
+  The commit is always checked.
 - **Layout:**
 
   ```
@@ -470,75 +373,58 @@ RECIPE = RuntimeRecipe(
       arm/  solver/            each source at its pinned commit, trimmed and patched
       arm/.pixi -> ../env      where pixi looks for the environment
       env/                     the environment, outside every tree
-      cache/arm/arm/.cache/    each `persistent` directory; arm/arm/.cache links here
-      .tandem-runtime.json     what is installed (commit and branch), from where, verified or not, with each patch's digest
+      cache/arm/arm/.cache/    each persistent directory; arm/arm/.cache links here
+      .tandem-runtime.json     what is installed (commit and branch), from where, verified or not, patch digests
+      .install.lock            held by the install that is running
   ```
 
-  The environment lives outside the trees on purpose: moving a pin replaces a tree without solving
-  torch and CUDA again from nothing. So does anything the planner downloads into its own tree at run
-  time, once the recipe names it `persistent` (TiPToP's SAM-2 checkpoint is 0.9 GB). A tree the
-  record does not list is replaced only in a directory that holds the record, and never if it is a
-  git checkout, so a runtime path pointed at a workspace by mistake is refused, not emptied.
+  The environment sits outside the trees, so moving a pin replaces a tree without solving torch and CUDA
+  again. `persistent` keeps what the planner downloads into its own tree at run time (TiPToP's SAM-2
+  checkpoint) across that swap. The installer never deletes a git checkout, and replaces an unlisted tree
+  only inside a runtime that has `.tandem-runtime.json`.
 - **Placeholders** in `env` values are filled at build time:
-  - `{root}`: the runtime root;
-  - `{source:NAME}`: a tree's path;
-  - `{commit:NAME}`: its commit;
-  - `{version:NAME}`: that commit as a PEP 440 local version (`0.0.0+g4db8f92`), for a package whose
-    version would otherwise come from git metadata an exported tree does not have.
-- **Status** compares `.tandem-runtime.json` with the recipe. A tandem upgrade that moves a pin shows
-  the planner as `outdated` in `tandem planners list`, with the command that rebuilds it. That is
-  better than an ImportError forty seconds into a warm-up.
-- **Sources from a directory.** A workstation that cannot reach the sources takes them from a
-  directory holding one checkout or export per source, named as the recipe names them:
-  `tandem planners install NAME --sources DIR`, or `$TANDEM_PLANNER_SOURCES=DIR`. On a machine that
-  can reach them, `tandem planners bundle NAME --out DIR` makes one with the same tandem version (a
-  bundle is checked against the installing tandem's pins); each export carries a marker naming its
-  commit and a digest of its files, both of which the install checks. While a sources directory is in
-  force no source is fetched: a missing one is an error, not a hang. The environment is not in the
-  bundle: `pixi install` still solves it from conda-forge and PyPI (and any git dependency its lock
-  names), so this spares the source fetch, not the network.
-- **Assets** are small files the planner package itself ships (as package data) and the runtime
-  needs at a fixed path. TiPToP ships two DATAFARM checkpoints this way, because their source
-  repository is private.
-- **Tools.** The merge joins legs' videos with the ffmpeg in the built environment's `bin/`
-  (`registry.tools_dir`), the build that recorded the clips, and falls back to the one on `PATH`.
 
-`tandem planners install` asks before installing pixi into your home directory (`--yes` to accept),
-and writes the full build log to `~/.local/state/tandem/logs/runtime-build-<time>.log`.
+  | placeholder | value |
+  |---|---|
+  | `{root}` | the runtime root |
+  | `{source:NAME}` | a source tree's path |
+  | `{commit:NAME}` | its commit |
+  | `{version:NAME}` | that commit as a PEP 440 version (`0.0.0+g4db8f92`), for a package that reads its version from git metadata an exported tree lacks |
 
----
+- **Status** compares `.tandem-runtime.json` with the recipe; a moved pin shows as `outdated`, with the
+  command that rebuilds it.
+- **Sources from a directory** (`--sources DIR`, `$TANDEM_PLANNER_SOURCES`, `tandem planners bundle`):
+  [offline install](CONFIGURATION.md#offline-install).
+- **Assets** are small files the planner package ships as package data and the runtime needs at a
+  fixed path (TiPToP ships its two DATAFARM checkpoints this way).
+- **Tools.** The merge joins legs' videos with the `ffmpeg` in the built environment's `bin/`, and
+  falls back to the one on `PATH`.
+- The build log is listed in [DATA.md](DATA.md#logs-and-session-files).
 
 ## Options, presets and doctor rows
 
-**Options.** A profile's `planner.options` block belongs to the planner. The planner checks it
-when the profile loads (`validate_options`), so a mistake is found when the profile is edited, not
-when the arm is about to move. What `validate_options` returns is what the profile stores, and it is
-validated again on every read, so it must accept its own output unchanged. For options with
-structure, override it; a pydantic model is the natural tool. Raise `TandemError`, or `ValueError`
-(a pydantic `ValidationError` is one). Error locations are shown under `options.`, so a pydantic
-error at `tamp` reads as `planner.options.tamp`. What it returns is written into profile.yml as it
-stands, so it must be plain data -- mappings with string keys, lists, strings, numbers, booleans and
-None: from a pydantic model, return `model_dump(mode="json")`. A `Path`, an `Enum` or a numpy value is
-refused when the profile loads (`registry.options_for`), and the conformance kit fails it. A setting
-with no sensible default (a robot's address) may be required: refuse `{}` with a `TandemError` naming
-it. `tandem planners use NAME --option KEY=VALUE` is then how a person supplies it, and `planners use`
-or `profile create --planner` without it is refused with that hint rather than crashing.
+**Options.** A profile's `planner.options` block belongs to the planner, and `validate_options`
+checks it when the profile loads. The default refuses any key not in `OPTIONS`; override it for
+options with structure (a pydantic model works well).
 
-**Showing them.** `describe_options(profile, *, settings=None)` returns an `OptionsView`, which
-`tandem profile show`, the web editor and the session header all use:
+- What it returns is stored in the profile and validated again on every read, so it must accept its
+  own output unchanged.
+- It must return plain data: mappings with string keys, lists, strings, numbers, booleans, `None`.
+  From pydantic, return `model_dump(mode="json")`. A `Path`, an `Enum` or a numpy value is refused.
+- Raise `TandemError` or `ValueError` (a pydantic `ValidationError` is one). Errors are located under
+  `planner.options.`, so an error at `tamp` reads as `planner.options.tamp`.
+- A setting with no sensible default (a robot's address) may be required: refuse `{}` with a
+  `TandemError` naming it, and a person supplies it with `tandem planners use NAME --option KEY=VALUE`.
 
-- `summary`: one line;
-- `sections`: titled rows;
-- `receives`: exactly what the planner will be handed, resolved. This is what
-  `tandem profile show NAME --planner` prints: the answer to "did my setting apply?";
-- `receives_note`, and `warnings`.
-
-Over HTTP, `GET /api/profiles/{name}` carries the view as `planner_view`, and every profile card
-carries its one-line `planner_summary` next to `planner`.
+**Showing them.** `describe_options(profile, *, settings=None)` returns an `OptionsView` (`summary`,
+`sections`, `receives`, `receives_note`, `warnings`), used by `tandem profile show`, the web editor and
+the session header. `receives` is exactly what the planner will be handed, resolved; it is what
+`tandem profile show NAME --planner` prints.
 
 **Presets.** A planner may ship `<name>.yml` presets for its options in `presets_dir`.
-`tandem profile create NAME --preset PRESET` lays one over a new profile, and `tandem profile
-presets` lists them. The file (`tandem/core/presets.py`):
+`tandem profile create NAME --preset PRESET` applies one, and `tandem profile presets --planner NAME`
+lists them. What tandem's own `paper` preset sets is in [CONFIGURATION.md](CONFIGURATION.md#presets).
+The file format (`src/tandem/core/presets.py`):
 
 ```yaml
 title: One line                       # required
@@ -548,116 +434,112 @@ extends: paper                        # optional: one of tandem's presets, appli
 replace: [planner.options.tamp]       # optional: blocks substituted whole, not merged
 profile:                              # settings, spelled as a profile spells them
   planner:
-    options: {...}                    # under planner:, only options: -- the planner is chosen with --planner
+    options: {...}                    # a planner's preset states planner.options and nothing else
 ```
 
-A preset may not state `name`, `version` or `description`. A planner's preset may state
-`planner.options` and nothing else -- not `hitl`, `cameras` or the task, which would silently win over
-tandem's half it extends -- and not `planner.backend`. tandem's own presets may not state `planner` at
-all. A planner's preset with the
-same name as one of tandem's (tandem ships `paper`) must extend it, so tandem's half is never
-silently dropped for one planner. Ship the directory as package data: in
-`pyproject.toml`, `[tool.setuptools.package-data]` with a glob such as `"tandem_arm" =
-["presets/*.yml"]`. The scaffold does not add this for you.
+- No preset may state `name`, `version` or `description`.
+- A planner's preset may state only `planner.options`: not `planner.backend`, `hitl`, `cameras` or the
+  task. tandem's own presets may not state `planner` at all.
+- A planner's preset with the same name as one of tandem's (tandem ships `paper`) must `extends:` it.
+- `replace` may name only blocks the preset itself sets.
+- Ship the directory as package data, e.g. in `pyproject.toml` under `[tool.setuptools.package-data]`:
+  `"tandem_arm" = ["presets/*.yml"]`. The scaffold doesn't add this.
 
 **Doctor rows.** `doctor_checks(profile, *, settings=None, probe_hardware=True)` returns
-`tandem.core.probe.Check(name, state, detail, hint, group)` rows for `tandem doctor`. `state` is one
-of `probe.OK`, `WARN`, `FAIL` or `SKIP`. `profile` is None during `tandem init`'s preflight: check the
-machine only. `probe_hardware=False` (`--no-hardware`) means touch nothing on the network or the bus.
-A FAIL is something that stops a session, and `tandem init` stops on one before building the
-runtime. tandem already reports every planner's runtime; do not repeat it.
+`tandem.core.probe.Check(name, state, detail, hint, group)` rows for `tandem doctor`. `state` is
+`probe.OK`, `WARN`, `FAIL` or `SKIP`.
 
----
+- `profile` is `None` during `tandem init`'s preflight: check the machine only.
+- `probe_hardware=False` (`--no-hardware`): touch nothing on the network or the bus.
+- A FAIL is something that stops a session. `tandem init` stops on one (or asks, when interactive)
+  before building the runtime.
+- tandem already reports every planner's runtime; don't repeat it.
 
 ## Registering it
 
-Three ways, the first match winning:
+A name resolves in this order, first match wins:
 
-1. **`register_backend(name, factory)`** at runtime, from a script, a test or code embedding
-   tandem: `tandem.register_backend("arm", ArmPlanner)`. The factory may also be given as a
-   `"module:attribute"` string, imported only when the planner is used. Registering a taken name is
-   an error unless `replace=True`.
-2. **Built in**: the `_BUILTIN` table in `src/tandem/planners/registry.py`, for a planner that
-   ships inside tandem. TiPToP is the only one.
-3. **The `tandem.planners` entry point**, for a planner in its own package. This is what the
-   scaffold writes:
+1. **`register_backend(name, factory)`** (alias `register_planner`) at runtime, from a script, a test
+   or code embedding tandem: `tandem.register_backend("arm", ArmPlanner)`. The factory may be a
+   `"module:attribute"` string, imported only when the planner is used. A taken name is an error
+   unless `replace=True`.
+2. **Built in**: the `_BUILTIN` table in `src/tandem/planners/registry.py`. TiPToP is the only one.
+3. **The `tandem.planners` entry point**, for a planner in its own package. The scaffold writes it:
 
    ```toml
    [project.entry-points."tandem.planners"]
    arm = "tandem_arm.planner:ArmPlanner"     # a Planner subclass, or any BackendFactory
    ```
 
-Entry points are read by name when listing and imported only when used. So keep the module the
-entry point names light: torch and robot clients go inside `warm()`, or into a sidecar. A plugin
-that fails to import does not stop tandem. It is listed as `broken` with its error, and every other
-planner keeps working. A plugin that loses to a registered or built-in planner of the same name is
-listed with the reason it is not used. A plugin that calls `sys.exit()` at import (argv parsing,
-absl, hydra) is listed as broken too. A package installed while `tandem ui` runs is seen on the
-next listing, an editable one (`pip install -e .`) included: the `.pth` file that puts it on the
-path is read then.
+How plugins behave:
 
-Then `planner: {backend: arm}` in a profile (or `tandem planners use arm`) is all it takes.
-`tandem planners default arm` makes it the planner every new profile gets
-(`settings.default_planner`) and changes no profile; `tandem planners use arm --default` does both,
-switching the active profile too. Over HTTP, `GET /api/planners` and `GET /api/planners/{name}` return
-what `tandem planners list/info --json` print. `POST /api/planners/{name}/use` (body: `profile`,
-`options`) and `POST /api/planners/{name}/default` do what `use` and `default` do. Installing is deliberately not
-an endpoint: every catalog row carries the `install_command` to run in a terminal.
+- `tandem planners list` and `info` import every plugin to describe it, and loading a profile imports
+  its planner to check `planner.options`. Keep the module the entry point names light: import torch and
+  robot clients inside `warm()`, or in a sidecar.
+- A plugin that fails to import, or calls `sys.exit()` at import, is listed as `broken` with its
+  error. Every other planner keeps working, and a profile naming it still loads, its options unchecked.
+- A plugin that loses to a registered or built-in planner of the same name is listed with the reason
+  it isn't used.
+- Two installed packages registering the same name is an error naming both.
+- A package installed while `tandem ui` runs, editable ones included, appears on the next listing.
 
----
+Then `planner: {backend: arm}` in a profile, or `tandem planners use arm`, selects it.
+`tandem planners default arm` makes it the planner new profiles get ([commands](USAGE.md#commands)).
+The planner endpoints of the HTTP API are in [USAGE.md](USAGE.md#http-api).
 
 ## The recording contract
 
-`execute` records one **leg** of the trajectory `leg.trajectory_id`. tandem joins a trial's legs,
-the planner's and a person's, into one episode (`tandem/core/merge.py`). It finds them by that id,
-orders them by their recording windows, and requires exactly this in `save_dir` when `leg.record`
-is set:
+`execute` records one leg of the trial `leg.trajectory_id`. tandem's merge (`src/tandem/core/merge.py`)
+finds a trial's legs by that id, orders them by recording window, and joins them into one episode.
+When `leg.record` is set, `save_dir` must hold the three items below.
 
-- **`_meta.json`**:
-  - `trajectory_id` and `segment_source`, copied from `leg`. This is how merging finds the leg.
-    `segment_source` is `"tamp"` for a planner's leg.
-  - `phase_index`, `n_phases` and `phase_description`, copied from `leg` when `leg.phase_index` is
-    not None. This is how the merged episode says which frames were which phase.
-  - `instruction`: `leg.instruction`, the whole task and the dataset's language label.
-  - `record_start` and `record_stop`: epoch seconds. Legs are ordered by them.
-  - `fps`.
-  - `cameras`: dataset key → clip file name, e.g. `{"exterior_image_1_left": "external_cam.mp4"}`.
-- **`robot_state.npz`** with every array in `tandem.core.merge.STATE_KEYS`, one row per frame, and
-  nothing else except `OPTIONAL_STATE_KEYS` (`action_joint_velocity`):
+**`_meta.json`:**
 
-  | array | shape | |
-  |---|---|---|
-  | `joint_position` | `[F,7]` | measured |
-  | `gripper_position` | `[F]` | measured, in `[0,1]` |
-  | `cmd_joint_position` | `[F,7]` | commanded |
-  | `cmd_joint_velocity` | `[F,7]` | commanded |
-  | `cmd_gripper` | `[F]` | commanded, binary; the export skips an episode where it is not |
-  | `frame_time` | `[F]` | wall clock, float64 |
+| key | value |
+|---|---|
+| `trajectory_id`, `segment_source` | Copied from `leg` (`segment_source` is `"tamp"` for a planner's leg). This is how the merge finds the leg. |
+| `instruction` | `leg.instruction`: the whole task, which is the dataset's language label. |
+| `phase_index`, `n_phases`, `phase_description` | Copied from `leg` when `leg.phase_index` is not `None`. |
+| `record_start`, `record_stop` | Epoch seconds. Legs are ordered by them. |
+| `fps` | Frames per second. |
+| `cameras` | Dataset key → clip file name, e.g. `{"exterior_image_1_left": "external_cam.mp4"}`. |
+| `plan_file` (optional) | A bare file name for the planner's saved plan (e.g. `"plan.json"`), read by `tandem traj show` and the web UI's "plan: recorded". Without it they look for `tiptop_plan.json`. |
 
-- **The camera clips** `cameras` names. With none named, at least one of `external_cam.mp4`,
-  `external_cam_2.mp4` and `hand_cam.mp4`. Every clip is named from those three
-  (`trajectories.CAMERA_FILES`), whatever its dataset key: they are the only names the merge joins,
-  the viewer lists and the export decodes, and a person's teleop legs always use them. Only the
-  cameras every leg of a trial recorded are joined.
+**`robot_state.npz`:** every array in `tandem.core.merge.STATE_KEYS`, one row per frame, and nothing
+else except `OPTIONAL_STATE_KEYS` (`action_joint_velocity`, `[F,7]`).
 
-`tandem.core.trajectories.is_complete(leg_dir)` is the check. It does not ask for a planner's own
-plan file. `tiptop_plan.json` is TiPToP's, and any other file a leg holds is the recorder's own; the
-merge surfaces the first planner leg's files at the top of the episode. A planner that saves its
-plan can say where with `plan_file` in `_meta.json` (a bare file name, e.g. `"plan.json"`), which is
-what `tandem traj show` and the web UI's "plan: recorded" read; without it they look for
-`tiptop_plan.json`.
+| array | shape | |
+|---|---|---|
+| `joint_position` | `[F,7]` | measured |
+| `gripper_position` | `[F]` | measured, in `[0,1]` |
+| `cmd_joint_position` | `[F,7]` | commanded |
+| `cmd_joint_velocity` | `[F,7]` | commanded |
+| `cmd_gripper` | `[F]` | commanded, binary ([the export](USAGE.md#exporting) skips an episode where it isn't) |
+| `frame_time` | `[F]` | wall clock, float64 |
 
-**Stamp `_meta.json` even when execution fails part-way.** A leg on disk without its trajectory id
-is filed as an episode of its own. Return `rollout_dir` (usually `save_dir`) and `n_frames`.
-`ExecuteResult.stopped_early=True` means a cooperative stop was honoured: tandem passes `should_stop`
-only to a planner that declares `supports_cooperative_stop`, true once the operator preempts or the
-session stops. A leg that stopped early never advances the plan, whatever `ok` says, and the trial
-is filed as aborted rather than as a `tamp_execution` failure.
+Record the measured arrays from the robot, never as a copy of the command: a policy trained on a
+lagged copy of its own action learns to echo it.
 
-A planner that records nothing (`n_frames=0`) still stamps `_meta.json`, so the leg directory is
-kept. That is what the scaffold does until real recording is wired in.
+**Camera clips:** each named `external_cam.mp4`, `external_cam_2.mp4` or `hand_cam.mp4`
+(`tandem.core.trajectories.CAMERA_FILES`), whatever its dataset key: the merge, the viewer and the export
+read only these names. Every clip `cameras` names must exist; if it names none, at least one of the three
+must. Only cameras every leg of a trial recorded are joined.
 
----
+`tandem.core.trajectories.is_complete(leg_dir)` is the check. Any other file in the leg is the
+planner's own; the merge copies the first planner leg's to the top of the episode.
+
+**Edge cases:**
+
+- Stamp `_meta.json` even when execution fails part-way: a leg without its trajectory id is filed as
+  an episode of its own. Return `rollout_dir` (usually `save_dir`) and `n_frames`.
+- Stamp it even when the leg records nothing (`n_frames=0`), as the scaffold does until recording is
+  wired in.
+- `ExecuteResult.stopped_early=True` means a cooperative stop was honoured (`should_stop` is true once
+  the operator preempts or the session stops). A leg that stopped early never advances the plan,
+  whatever `ok` says. After a preempt the trial is filed as aborted; a stop nothing asked for is a
+  `tamp_execution` failure.
+
+What a merged episode looks like on disk is in [DATA.md](DATA.md#episode-layout).
 
 ## The conformance kit
 
@@ -675,77 +557,32 @@ class TestArmPlanner(PlannerConformance):
     task_hint = "put one thing where it belongs"
 ```
 
-It builds the planner through its factory into pytest's `tmp_path`, warms it, and always closes it.
-It has 16 tests:
+Each test builds the planner through its factory into pytest's `tmp_path`, warms it, and always
+closes it. The tests hold it to this page: the declarations, options, presets, doctor rows and sidecar
+script; the lifecycle (closing twice or before warming, hardware released and reacquired twice); and
+every verb, including the recording contract when `records_legs` is set. A test for something the planner
+doesn't declare or ship is skipped, with the reason.
 
-- the declarations;
-- every protocol keyword, with its default;
-- that the backend declares what its factory does;
-- that `validate_options` accepts its own output;
-- that every preset gives options the planner accepts;
-- that doctor rows are `Check`s;
-- that a sidecar script can run without tandem;
-- closing twice, and before warming;
-- a well-formed scene;
-- a JSON-safe plan that says what it runs;
-- the recorded leg, stamped as asked (and, with `records_legs`, meeting the recording contract);
-- a stop honoured when promised;
-- picks restricted when promised;
-- a leg that does not go home;
-- hardware handed over and back, twice;
-- a frame for the verifier that is an image on disk.
-
-A test for something the planner does not declare is skipped with the reason.
-
-Override `goal(scene, caps)` when the kit cannot guess a plannable goal from your scene, and
+Override `goal(scene, caps)` when the kit can't guess a plannable goal from your scene, and
 `make_backend(tmp_path)` to build the backend another way. Each check is also a plain function that
-raises `ConformanceError` listing every problem found: `check_declarations`, `check_protocol`,
-`check_scene`, `check_plan_result`, `check_leg`, `check_sidecar_script`, `check_presets`.
+raises `ConformanceError` listing every problem: `check_declarations`, `check_protocol`, `check_scene`,
+`check_plan_result`, `check_leg`, `check_sidecar_script`, `check_presets`.
 
-The kit checks the protocol, not your planner's quality. It does hold a planner to the two things
-phase planning needs of it, with two class switches that are on by default:
+The kit checks the protocol, not your planner's quality. Two class switches, on by default, hold it
+to what phase planning needs:
 
-- **`phase_planning = True`**: every scene's `rgb_path` must open as an image. Without it a task
-  cannot be decomposed, and every trial with `hitl.enabled` ends at `invention`.
+- **`phase_planning = True`**: every scene's `rgb_path` must open as an image. Without one, every trial
+  with `hitl.enabled` ends at `invention`.
 - **`verifies_human_phases = True`**: `capture_frame(camera="external")` must return an image. A
-  planner that raises `UnsupportedVerb` fails, naming `hitl.check_human_effects` and
-  `hitl.verify_final_phase`, since a session on it could verify no human phase.
+  planner that raises `UnsupportedVerb` fails, since no human phase could be verified.
 
-Turn one off, visibly, only for a planner that is never run that way. The scaffold returns a
-stand-in image for both until you wire the real cameras in. Before collecting with phase planning
-on, run a session with `--no-execute`, and run `tandem plan --planner NAME` on a photo of your
-workspace.
+Turn one off only for a planner that is never run that way. The scaffold returns a stand-in image for
+both until you wire in real cameras.
 
-With `records_legs`, the recording is held to the documented shapes too: `[F,7]` joint arrays,
-`[F]` gripper arrays and a float64 `frame_time`. `_meta.json` must carry `leg.instruction`, whether
-or not the leg records.
+## Before collecting
 
----
-
-## Checklist
-
-- [ ] `info.name` and `CAPABILITIES.name` are the same valid name, and nothing else claims it
-      (`tandem planners list`).
-- [ ] The goal language is the smallest set of predicates a phase needs. Every goal predicate is
-      achievable and reserved, and `predicate_descriptions` read well to a person.
-- [ ] `goal_predicate_wire_names` omits exactly the predicates the planner supplies itself.
-- [ ] `checkable_predicates` lists only what a third-person photo can settle.
-- [ ] `moved_arguments` point at the moved object. `exclusive_arguments` declares any "one place at
-      a time" predicate.
-- [ ] `one_pick_per_object` and `initial_state_is_clean` say what the solver really assumes. When
-      in doubt, `initial_state_is_clean=False`: every robot phase then gets its own leg.
-- [ ] `perceive` honours `reset_arm` and `open_gripper`, and returns an `rgb_path`.
-- [ ] `plan` returns `ok=False` with a reason instead of raising, and fills `task_plan`.
-- [ ] `execute` meets the recording contract, stamps `_meta.json` on every path, and
-      `records_legs = True` in the kit.
-- [ ] `capture_frame` returns an image from the camera it is asked for.
-- [ ] `release_hardware` blocks until the robot and every camera are free, and
-      `reacquire_hardware` takes them back from wherever a person left the arm.
-- [ ] Each `supports_*` flag is declared only once it is honoured, and the kit's test for it passes.
-- [ ] Nothing heavy is imported by the module the entry point names.
-- [ ] A sidecar imports `tandem_sidecar` first and never imports tandem. Its environment does not
-      overwrite `PYTHONPATH`.
-- [ ] Recipe pins are full commits, and every trim and patch says why.
-- [ ] `OPTIONS` or `validate_options` refuses what the planner does not read.
-- [ ] `pytest` is green. `tandem planners info NAME` shows what you meant. `tandem plan --planner
-      NAME` decomposes a real instruction into phases your planner can carry out.
+1. `python -m pytest` is green with `records_legs = True`.
+2. `tandem planners info NAME` shows the goal language you meant.
+3. `tandem plan --planner NAME --image workspace.png "<task>"` splits a real instruction, on a photo of
+   your workspace, into phases your planner can carry out ([USAGE.md](USAGE.md#planning-from-a-photo)).
+4. `tandem collect --no-execute` runs a session that perceives and plans without moving the robot.

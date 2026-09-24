@@ -1,25 +1,15 @@
 # Adding a human executor
 
-The paper gives every magic operator an executor, π_ωΔ: whatever brings about the effects the model
-invented for a human phase. TANDEM's own is a person driving the arm through teleoperation, and it
-is the only one that ships (`teleop`). It is not the only thing that could do the job. A phase is a
-person's because the planner cannot express what it asks for, not because only a person can do it.
-The HITL-TAMP baseline, for one, hands the same phase to a policy trained on earlier teleop legs.
+A [human executor](README.md#terms) carries out a human phase and records it as one leg. `teleop` (a person
+driving the arm) is the only one that ships. A package can add another, such as a learned policy, and a
+profile picks it with `hitl.human_executor`. Code: `src/tandem/executors/` (`base.py`, `teleop.py`).
 
-So the phase loop asks for an executor by name (`hitl.human_executor`), and a package can add one.
-The code is `src/tandem/executors/`: the protocol and registry in `base.py`, teleop in `teleop.py`.
+## What an executor does
 
-## What an executor decides, and what it does not
-
-- **It decides how a phase is carried out**, and records that as one leg of the trajectory, stamped
-  with the `LegSpec` it is given, so the merge can join it to the robot's legs.
-- **It does not decide the phase, its operator, or whether the phase happened.** The proposal fixed
-  the first two before the arm moved. The loop's camera check decides the third, against the same
-  effects whoever did the work. Swapping a person for a policy changes who drives the arm for one
-  leg; the plan does not know the difference.
-- **It does not own the hardware.** The planner holds the robot and every camera exclusively. The
-  loop releases them before the executor runs and takes them back after it. An executor starts
-  from an arm that is free, and must hand it back free.
+- It decides **how** a phase is carried out, and records that as one leg stamped from the `LegSpec` it gets.
+- It does **not** decide the phase, its magic operator (both fixed by the proposal), or whether the phase
+  happened (the loop's camera check decides).
+- It does **not** own the hardware. It starts from a free arm and must hand it back free ([custody](#custody)).
 
 ## The protocol
 
@@ -27,245 +17,201 @@ The code is `src/tandem/executors/`: the protocol and registry in `base.py`, tel
 class HumanExecutor(Protocol):            # tandem.executors.HumanExecutor
     name: str                             # the registered name
     segment_source: str                   # "teleop" or "policy": what its legs are, in _meta.json
-    display_name: str
+    display_name: str                     # display_name and summary are shown when choosing one
     summary: str
 
     def run(self, request: HumanPhaseRequest | None, leg: LegSpec, *,
             save_root: Path, should_stop: Callable[[], bool]) -> HumanPhaseResult: ...
     def kill(self) -> None: ...
-    # optional:
-    def close(self) -> None: ...
+    def close(self) -> None: ...          # optional
 ```
 
-**`run`** carries out one phase and records it. It returns once whatever drove the arm has let go
-of the robot and the cameras.
-
-- `request` is the phase (below). It is `None` only for a hand-off the operator asked for between
-  phases. The loop always gives those to `teleop`, since only an executor a person drives can take
-  an arm lent with no phase attached.
-- `leg` is the recording contract, exactly as a robot leg gets it. Write the leg under
-  `save_root/eval/<a new directory>/`, which is where the merge looks for it. Stamp its
-  `_meta.json` with `leg.trajectory_id` and `leg.segment_source` (the loop builds `leg` with your
-  `segment_source`), and with `phase_index`, `n_phases` and `phase_description` when
-  `leg.phase_index` is set. The rest of the contract is the planner's: `robot_state.npz` with
-  `tandem.core.merge.STATE_KEYS`, one row per frame, and the camera clips
-  ([ADDING_A_PLANNER.md](ADDING_A_PLANNER.md#the-recording-contract)).
-- `save_root` is the profile's trajectories directory.
-- `should_stop` turns true when the leg must end. That happens when the operator returns control
-  (`r` in `tandem collect`, "return control" in the UI), when the session is stopping, or after
-  an hour with nobody there. It is the only way a leg ends besides the executor finishing, so never
-  wait on anything without polling it. It is cheap and never blocks.
-
-**`kill`** ends the leg in flight at once. It is called from another thread by a forced stop. `run`
-then returns `aborted` as soon as it can. It is a no-op when nothing is running. A kill can land
-just before `run` is entered (the arm takes seconds to release), so do not clear the kill flag when
-`run` starts: clear it when `run` returns. A forced stop that arrives before the loop calls `run`
-at all never starts the leg.
-
-**`close`** is optional. Define it when building the executor starts something that outlives a leg
-(a policy server, a device it opened). It is called exactly once, when the session ends, on every
-way it ends (a failure and a forced stop included), after the arm is parked and the planner closed.
-It must not raise; one that does is logged.
-
-**Raise `CustodyError`** from `run` when the arm cannot be given back: a process that will not die
-still holds the cameras. The session then ends and says so, rather than reaching for hardware
-another process holds and reporting a failure that looks like broken hardware.
-
-### What a phase is asked as: `HumanPhaseRequest`
-
-| field | |
+| method | contract |
 |---|---|
-| `phase_index`, `n_phases` | 0-based, like every leg stamp. `n_phases` is 0 when there is no plan behind the phase (`stamped` is then false). |
+| `run` | Carry out one phase, record it, and return a [`HumanPhaseResult`](#humanphaseresult) only once whatever drove the arm has let go of the robot and cameras. |
+| `kill` | End the leg in flight at once; `run` then returns `aborted`. Called from another thread; a no-op when nothing runs. Clear the kill flag when `run` returns, not when it starts: a kill can land while the arm is still being released. |
+| `close` | Optional. Release what building the executor started (a policy server, a device). Called once when the session ends, however it ends, after the arm is parked. Must not raise. |
+
+| `run` argument | meaning |
+|---|---|
+| `request` | The phase ([`HumanPhaseRequest`](#humanphaserequest)). `None` only for a hand-off the operator asked for between phases, which always goes to `teleop`. |
+| `leg` | The `LegSpec` a robot leg gets. Write the leg in a new directory under `save_root/eval/` and stamp its `_meta.json` from `leg`: `trajectory_id`, `segment_source`, and `phase_index`/`n_phases`/`phase_description` when `leg.phase_index` is set. The rest is [the recording contract](ADDING_A_PLANNER.md#the-recording-contract). |
+| `save_root` | The profile's `trajectories/` directory. |
+| `should_stop` | Turns true when the operator returns control (`r`), the session stops, or an hour passes. It is the only other way a leg ends, so poll it and never block without it. It is cheap. |
+
+Raise `tandem.executors.CustodyError` from `run` when the arm can't be given back, for example because a
+process that won't die still holds the cameras. The session then ends and says why. `teleop` raises it
+when its driver outlives a kill.
+
+### `HumanPhaseRequest`
+
+| field | meaning |
+|---|---|
+| `phase_index`, `n_phases` | 0-based. `n_phases` is 0 when no plan is behind the phase; the leg then carries no phase (`leg.phase_index` is `None`). |
 | `description` | The phase in the model's words. |
 | `instructions` | What a person is shown. |
-| `operator` | The magic operator, as `HumanOperator.to_json()` writes it: `name`, `args`, `signature`, `instance`, `preconditions`, `add_effects`, `delete_effects`. `None` for a robot phase handed to a person under `on_robot_phase_failure: teleop`. |
+| `operator` | The magic operator as `HumanOperator.to_json()` writes it (`name`, `args`, `signature`, `instance`, `preconditions`, `add_effects`, `delete_effects`). `None` for a robot phase handed over under `on_robot_phase_failure: teleop`. |
 | `expected` | What the camera will be asked afterwards, in words. |
-| `attempt` | From 1. |
-| `missing` | On a retry, what the last check said is still not true, phrased for a person. |
+| `attempt` | Counts from 1. |
+| `missing` | On a retry: what the last check found still missing, phrased for a person. |
 
-`request.leg_spec(trajectory_id=, instruction=, segment_source=, record=)` builds the matching
-`LegSpec`. The loop already does this, so an executor only reads `leg`.
+### `HumanPhaseResult`
 
-### How a leg ended: `HumanPhaseResult(status, n_frames=0, leg_dir=None)`
+`HumanPhaseResult(status, n_frames=0, leg_dir=None, leg_dirs=())`
 
-| `status` | meaning | what the loop does next |
+| `status` | meaning | the loop then |
 |---|---|---|
-| `done` | The executor carried the phase through and handed the arm back. | Checks the phase's effects on a fresh frame (unless `check_human_effects` is off, or it is the last phase and `verify_final_phase` is off). A failed check gets another attempt while `verify_retries` last, then the trial is excluded (or failed, under `on_verification_failure: label`). |
-| `ended_by_operator` | The operator stopped the executor on purpose, to move on: the HITL-TAMP baseline's "continue" for a policy that runs until a step limit. | Accepts the phase **without** a camera check, recorded as unchecked in `hitl.json`. The leg is kept. |
-| `aborted` | The leg was cut off, or the executor could not carry the phase out (a policy server that never came up). | Ends the trial as a failure at `human_policy`. Nothing the arm did counts as the phase being done. |
+| `done` | The phase was carried through. | Checks its effects on a fresh camera image, as the [`hitl` keys](CONFIGURATION.md#phase-planning-hitl) set. A failed check gets `verify_retries` more attempts. |
+| `ended_by_operator` | The operator stopped the executor to move on, for example a policy that would run to a step limit. | Accepts the phase without a check, recorded as unchecked in [`hitl.json`](DATA.md#hitljson). Keeps the leg. |
+| `aborted` | The leg was cut off, or the executor couldn't carry the phase out (a policy server that never came up). | Ends the trial as a failure at `human_policy` ([outcomes](METHOD.md#how-a-trial-ends)). |
 
-`n_frames` counts every frame the leg wrote, and `leg_dir` is where. A leg with `n_frames=0`,
-whether `done` or `ended_by_operator`, recorded nothing. While recording, the loop refuses it and
-asks the operator again without spending a retry, unless `hitl.allow_unrecorded_human_phase` is set.
-An operator giving up is not `aborted`: that is the "give up" answer at the prompt, given before any
-executor runs.
+`n_frames` counts every frame the hand-off wrote. `leg_dir` is the last recording directory, or `None` when
+nothing was recorded. `leg_dirs` lists every recording directory in order, when the executor knows them;
+empty means `leg_dir` is the only one.
 
-Each attempt starts when the operator hands the phase over: `t` in `tandem collect`, or the button
-in the UI. On a retry the log tells them what is missing. For an executor other than `teleop` it
-says `Running the <name> executor on this phase again (N attempt(s) left).`
+- `run` is called once per attempt, when the operator hands the phase over (`t`, or the UI's button).
+- A leg with `n_frames=0` is refused while recording, and the operator is asked again without spending a
+  retry, unless [`hitl.allow_unrecorded_human_phase`](CONFIGURATION.md#phase-planning-hitl) is true.
+- An operator giving up is not `aborted`: that is `a` at the prompt, before any executor runs.
 
-### Custody, in order
+### Custody
 
-`PhaseLoop._lend_arm`:
+`PhaseLoop._lend_arm` runs every human leg in this order:
 
-1. `backend.release_hardware()`. It blocks until the robot and every camera are free. A failure
-   here is a warning, not the end of the leg: a person may already have their hands on the arm.
-2. `executor.run(request, leg, save_root=..., should_stop=...)`.
-3. The leg is counted as recorded, **before** the arm is taken back. Taking it back can fail and
-   end the session, and a leg on disk must still be labeled and merged on the way out.
-4. `backend.reacquire_hardware()`, on every way out except a `CustodyError`.
+1. `backend.release_hardware()` blocks until the robot and cameras are free. A failure is only a warning,
+   because a person may already have their hands on the arm.
+2. `executor.run(...)`. If a forced stop arrived during step 1, `run` is skipped and the result is `aborted`.
+3. The leg is counted as recorded, so it is still labeled and merged if step 4 fails.
+4. `backend.reacquire_hardware()`, unless `run` raised `CustodyError`. If this fails, the session ends with
+   a `CustodyError`.
+
+Any other exception from `run` ends the trial at `human_policy`. The arm is still taken back, and the session
+goes on.
 
 ## Registering one
 
-An executor is found through a factory, so that listing executors costs nothing and works on a
-laptop. Building one may start a process or load a policy, so it happens only when a session first
-needs it.
+Listing executors imports each one's module but builds nothing, so keep the module light. A session builds
+the executor the first time it needs it.
 
 ```python
-# my_package/executor.py -- keep it light: listing executors imports this module.
-from pathlib import Path
-
+# my_package/executor.py
 from tandem.executors import ExecutorFactory, HumanPhaseResult
 
-
 class PolicyExecutor:
-    """Runs a learned policy for a human phase, one leg per attempt."""
-
     name = "mypolicy"
     segment_source = "policy"
     display_name = "My policy"
     summary = "Runs a learned policy on the phase's instructions."
 
-    def __init__(self, ctx):
-        self.ctx = ctx               # ExecutorContext: profile, session_dir, settings, on_log, ...
+    def __init__(self, ctx):                     # an ExecutorContext
+        self.ctx = ctx
         self._killed = False
 
     def run(self, request, leg, *, save_root, should_stop):
-        if request is None:          # an arm lent with no phase: a person's to take, not a policy's
-            return HumanPhaseResult("aborted")
         try:
-            if self._killed:         # killed before the leg started: never start it
+            if request is None or self._killed:  # a hand-off with no phase is a person's; a kill came first
                 return HumanPhaseResult("aborted")
-            leg_dir, n_frames, stopped = self._run_policy(request, leg, Path(save_root), should_stop)
-            if self._killed:
-                return HumanPhaseResult("aborted", n_frames=n_frames, leg_dir=leg_dir)
-            status = "ended_by_operator" if stopped else "done"
+            leg_dir, n_frames, stopped = self._run_policy(request, leg, save_root, should_stop)
+            status = "aborted" if self._killed else "ended_by_operator" if stopped else "done"
             return HumanPhaseResult(status, n_frames=n_frames, leg_dir=leg_dir)
         finally:
-            self._killed = False     # cleared as the leg ends, never as it starts
+            self._killed = False                 # cleared as the leg ends, never as it starts
 
     def kill(self):
         self._killed = True
 
-    def close(self):
-        """Stop the policy server this executor started, once, when the session ends."""
+    def close(self):                             # optional: stop the policy server it started
+        pass
 
     def _run_policy(self, request, leg, save_root, should_stop):
-        """Yours: open the robot and cameras; run the policy on request.instructions (and
-        request.operator); record every frame into a new directory under save_root / "eval", with
-        _meta.json stamped from `leg`; poll should_stop() and self._killed at every step; release
-        the robot and cameras. Return (leg_dir, n_frames, whether should_stop ended it)."""
+        # Yours: run the policy on request.instructions, recording every frame into a new directory under
+        # save_root / "eval" stamped from `leg`; poll should_stop() and self._killed at every step; let go
+        # of the robot and cameras. Return (leg_dir, n_frames, whether should_stop ended it).
         raise NotImplementedError
 
-
-def unmet(settings) -> list[str]:
-    """What this machine lacks, in words. Cheap: read settings, stat a path. Start nothing."""
-    return []
-
-
 FACTORY = ExecutorFactory(
-    create=PolicyExecutor,                       # called with an ExecutorContext
+    create=PolicyExecutor,
     display_name=PolicyExecutor.display_name,
     summary=PolicyExecutor.summary,
-    segment_source="policy",                     # must equal what the built executor says
+    segment_source="policy",                     # must equal the built executor's
     requirements=("a policy checkpoint",),       # shown by `tandem executors list`
-    check=unmet,
+    check=lambda settings: [],                   # the unmet ones, in words; cheap, starts nothing
 )
 ```
 
-Then either register it in the process:
-
-```python
-import tandem
-tandem.register_human_executor("mypolicy", FACTORY)     # or "my_package.executor:FACTORY"
-```
-
-or declare it in the package's `pyproject.toml`:
+Register it in the process with `tandem.register_human_executor("mypolicy", FACTORY)` (or the path
+`"my_package.executor:FACTORY"`), or with an entry point in the package's `pyproject.toml`:
 
 ```toml
 [project.entry-points."tandem.human_executors"]
 mypolicy = "my_package.executor:FACTORY"
 ```
 
-- **The factory** may be an `ExecutorFactory`, or a class taking an `ExecutorContext` whose metadata
-  (`segment_source`, `display_name`, `summary`, `requirements`) are class attributes. Its summary
-  defaults to the first line of its docstring. Only an `ExecutorFactory` can carry a readiness
-  `check`.
-- **`segment_source`** is `"teleop"` or `"policy"`. An executor may not claim `"tamp"`: the merge
-  and the export treat those legs as the planner's.
-- **The name rule** is the planner rule: lowercase letters, digits, `_` and `-`, starting with a
-  letter.
-- **Taken names.** Registering a taken name is refused unless `replace=True`. Two installed packages
-  claiming one name is an error, not a guess, because a dataset recorded by one executor and
-  attributed to another cannot be interpreted afterwards.
-- **Broken plugins.** One that fails to import is listed with its error, and every other executor
-  keeps working.
+- **The factory** is an `ExecutorFactory` (`create`, `display_name`, `summary`, `segment_source`,
+  `requirements`, `check`, `validate_options`), or a class taking an `ExecutorContext`, with
+  `segment_source`, `display_name`, `summary` and `requirements` as class attributes and no `check` (its
+  summary defaults to its docstring's first line).
+- **`check(settings)`** returns the unmet requirements in words; an empty list means ready.
+- **The built executor** must have `name`, `segment_source`, `display_name`, `summary`, `run` and `kill`.
+- **`segment_source`** is the same on the factory and the executor: `"teleop"` or `"policy"`, never `"tamp"`,
+  which the merge and export treat as the planner's.
+- **The name** follows the [planner name rule](ADDING_A_PLANNER.md#names). A taken name is refused unless
+  you pass `replace=True`, and two installed packages claiming one name is an error.
+- **A plugin that fails to import** is listed with its error, and the other executors keep working.
 
-### What `create` is handed: `ExecutorContext`
+### `ExecutorContext`
 
-| field | |
+What `create` is called with, once per session.
+
+| field | meaning |
 |---|---|
 | `profile` | The validated profile (its cameras, for one). |
 | `session_dir` | The session's scratch directory, for anything that is not a recording. |
-| `settings` | The machine's settings. `None` re-reads them at every leg, so a `tandem config set` between two hand-offs takes effect at the next one. |
-| `on_log(stream, text)` | A line in the session log. |
-| `on_emit(payload)` | A message to every UI subscriber. |
-| `on_problem(message)` | A problem the operator must see now, shown until the leg ends. |
-| `options` | This executor's own settings: the profile's `hitl.human_executor_options.<name>` block, as your factory's optional `validate_options(options)` returned it when the profile loaded (a policy's checkpoint, say). Empty when the profile sets none. Keyed by executor, so switching executors and back loses nothing. Return plain data from `validate_options`: it is written into profile.yml. |
+| `settings` | The machine's settings. A session passes `None`: read them at each leg with `tandem.core.settings.load()`, so a `tandem config set` between hand-offs applies at the next one. |
+| `on_log(stream, text)` | Adds a line to the session log. |
+| `on_emit(payload)` | Sends a message to every UI subscriber. |
+| `on_problem(message)` | Shows the operator a problem, until the leg ends. |
+| `options` | This executor's `hitl.human_executor_options.<name>` block, as the factory's optional `validate_options(options)` returned it at profile load; `{}` when unset. `validate_options` returns plain data (it is written to `profile.yml`) or raises `TandemError` or `ValueError` naming the key. |
 
 ## Choosing one
 
 ```bash
-tandem executors list                 # every executor: ready, needs setup (and what), or broken
-tandem executors use mypolicy         # the active profile's human phases run with it (--profile P)
+tandem executors list           # ready, needs setup (and what), or broken; ● marks the profile's
+tandem executors use mypolicy   # the active profile's human phases now run with it (-p PROFILE for another)
 ```
 
-`executors use` sets `hitl.human_executor` and warns, without refusing, when the executor is not
-ready on this machine. `--json` on both prints what the web UI's `GET /api/executors` and
-`POST /api/executors/{name}/use` return.
+- `executors use` sets `hitl.human_executor`. It warns, without refusing, when the executor isn't ready
+  here, and refuses a name that is unknown or won't load. Flags: [USAGE.md](USAGE.md#commands); HTTP:
+  [HTTP API](USAGE.md#http-api).
+- A profile naming an executor this machine lacks won't load for collection, but can still be browsed,
+  exported and edited. `tandem executors use NAME` repairs it.
+- With phase planning on, a session looks the executor up before warm-up, so a broken plugin is found
+  then, and `tandem doctor` has a `human executor` row: OK, WARN (with what is missing) or FAIL (won't load).
+- While recording, an executor that isn't ready leaves only `a` (give up) at a human phase (`d` needs
+  [`hitl.allow_unrecorded_human_phase`](CONFIGURATION.md#phase-planning-hitl)).
 
-The name is checked when the profile loads for collection: a profile naming an executor this machine
-does not have is not collected with until the package providing it is installed. It can still be
-browsed, exported and edited here, and `tandem executors use NAME` repairs it (it works from the file
-as written). A session with phase planning on
-describes the executor before it warms anything, so a plugin that will not import is found then,
-not at the first human phase. `tandem doctor` has a `human executor` row: OK when ready, WARN with
-what is missing, FAIL when it will not load.
+## The teleop executor
 
-**While recording, a human phase can only be completed through a ready executor.** On a machine
-where it needs setup, the operator's only answer at a human step is to give up, unless the profile
-sets `hitl.allow_unrecorded_human_phase: true`, or the session runs with `--no-record`.
+`TeleopExecutor` (`executors/teleop.py`) runs the DROID teleop driver (`tandem/teleop/driver.py`), one
+process per leg. It needs:
 
-## The one that ships: `teleop`
+- the `teleop.*` settings ([keys](CONFIGURATION.md#machine-settings-and-credentials), [setup](../README.md#6-teleop));
+- a checkout of the [DROID fork](https://github.com/SamratSahoo/droid): the driver imports its
+  `droid.stable_camera_env`, which upstream DROID lacks;
+- a VR headset and controller, or a SpaceMouse.
 
-`TeleopExecutor` (`executors/teleop.py`) lends the arm to a person through the DROID teleop driver
-(`tandem/teleop/driver.py`), one driver process per leg. It needs:
+`tandem executors list` checks the settings (`teleop.enabled`, `teleop.python`, `teleop.droid_dir`), not the
+device, so a missing headset shows up as the driver's error when the leg starts.
 
-- `teleop.enabled: true`;
-- `teleop.python`: the DROID environment's interpreter;
-- `teleop.droid_dir`: a DROID checkout;
-- a VR headset and controller, or a SpaceMouse (`teleop.device`: `vr` or `spacemouse`;
-  `teleop.controller`: `right` or `left`).
-
-`tandem init` asks for them, or set them with `tandem config set teleop.<key> <value>`. Two
-behaviours are deliberate:
-
-- **A driver that cannot start does not end the leg.** The arm is already released and may be in
-  someone's hands, so the problem is shown and the leg waits for "return control" like any other.
-- **The frame count is read after the driver exits.** It arrives with the driver's last event,
-  after its videos are written.
+- **A driver that can't start doesn't end the leg.** The arm is already released and may be in someone's
+  hands, so the problem is shown and the leg waits for "return control" like any other.
+- **The frame count is read after the driver exits.** It arrives with the driver's last event, once its
+  videos are written.
+- **One hand-off can hold several recordings.** The driver starts a new one whenever one ends short of
+  quitting, and each is listed in `leg_dirs`.
 
 ## Known gaps
 
-- `ExecutorContext.options` carries only the profile's `hitl.human_executor_options.<name>`; the
-  importer never fills it from a monorepo config's `policy_*` keys (it refuses those configs).
+- Only `hitl.human_executor_options` fills `ExecutorContext.options`. The
+  [hitl-tamp-vla import](CONFIGURATION.md#importing-a-hitl-tamp-vla-setup) never maps a config's `policy_*`
+  keys into it: it refuses a learned-policy config with phase planning on, and otherwise drops those keys.
