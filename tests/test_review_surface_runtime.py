@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -98,8 +99,11 @@ def test_a_partial_bundle_says_so_instead_of_offering_the_install(tmp_path, monk
 
 def test_no_hint_sends_anyone_to_a_file_the_wheel_does_not_ship():
     for command in (["planners", "install", "--help"], ["runtime", "build", "--help"]):
-        # The help is drawn in a box: its borders out, and its wrapped lines joined back up.
-        shown = " ".join("".join(c for c in _run(*command).output if c not in "│╭╮╰╯─").split())
+        # The help is drawn in a box: its borders out, and its wrapped lines joined back up. Its styling
+        # out too: typer forces rich's terminal mode under GITHUB_ACTIONS, and NO_COLOR drops colour but
+        # not bold or dim, so on CI an escape code can sit between two words of the phrase looked for.
+        output = re.sub(r"\x1b\[[0-9;]*m", "", _run(*command).output)
+        shown = " ".join("".join(c for c in output if c not in "│╭╮╰╯─").split())
         assert "tools/bundle.py" not in shown and "planners bundle" in shown, command
         assert "conda-forge" in shown, "that the environment is still downloaded is said"
 
