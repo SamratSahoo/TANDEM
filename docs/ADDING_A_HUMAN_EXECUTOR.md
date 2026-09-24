@@ -204,7 +204,7 @@ mypolicy = "my_package.executor:FACTORY"
 | `on_log(stream, text)` | A line in the session log. |
 | `on_emit(payload)` | A message to every UI subscriber. |
 | `on_problem(message)` | A problem the operator must see now, shown until the leg ends. |
-| `options` | Executor-specific settings. **Nothing fills them yet:** a profile has no block for an executor's own settings, so read yours from your own configuration for now. |
+| `options` | This executor's own settings: the profile's `hitl.human_executor_options.<name>` block, as your factory's optional `validate_options(options)` returned it when the profile loaded (a policy's checkpoint, say). Empty when the profile sets none. Keyed by executor, so switching executors and back loses nothing. Return plain data from `validate_options`: it is written into profile.yml. |
 
 ## Choosing one
 
@@ -217,8 +217,10 @@ tandem executors use mypolicy         # the active profile's human phases run wi
 ready on this machine. `--json` on both prints what the web UI's `GET /api/executors` and
 `POST /api/executors/{name}/use` return.
 
-The name is checked when the profile loads: a profile naming an executor this machine does not have
-does not load until the package providing it is installed. A session with phase planning on
+The name is checked when the profile loads for collection: a profile naming an executor this machine
+does not have is not collected with until the package providing it is installed. It can still be
+browsed, exported and edited here, and `tandem executors use NAME` repairs it (it works from the file
+as written). A session with phase planning on
 describes the executor before it warms anything, so a plugin that will not import is found then,
 not at the first human phase. `tandem doctor` has a `human executor` row: OK when ready, WARN with
 what is missing, FAIL when it will not load.
@@ -252,4 +254,5 @@ behaviours are deliberate:
   holds a process or a model across legs must clean up on its own (at `kill`, or at exit).
 - A forced stop in the moment between the hand-off starting and `run` being entered is not a kill:
   `run` clears its kill flag on entry. `should_stop` still ends the leg.
-- `ExecutorContext.options` is always empty (above).
+- `ExecutorContext.options` carries only the profile's `hitl.human_executor_options.<name>`; the
+  importer does not yet map a monorepo config's `policy_*` keys into it.

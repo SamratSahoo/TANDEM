@@ -12,8 +12,12 @@ Presets ship in two places, split the same way a profile is:
     same whichever planner runs: phase planning (``hitl``), recording, the task. They may not state
     ``planner``, because a planner's options mean nothing to any other planner.
   * **a planner's own**, in the directory its factory names as ``presets_dir`` (TiPToP:
-    ``planners/tiptop/presets/``). These hold ``planner.options``, and only that planner's. A
-    planner's preset may say ``extends: <name>`` to build on one of tandem's, which is applied first.
+    ``planners/tiptop/presets/``). These may state ``planner.options`` and nothing else -- not
+    ``hitl``, not ``cameras``, not the task: the loader refuses anything more. A planner's half is
+    applied AFTER tandem's, so a ``hitl:`` in it would silently win over tandem's, and "the paper's
+    settings" would mean different phase planning depending on which planner ran them -- the very
+    thing ``available`` insists a same-named preset extend tandem's to prevent. A planner's preset
+    may say ``extends: <name>`` to build on one of tandem's, which is applied first.
     TiPToP's ``paper`` does this: the phase-planning half of the paper's settings is tandem's
     ``paper``, and TiPToP adds its own half, the TAMP and DATAFARM overrides.
 
@@ -159,6 +163,13 @@ def load(path: Path, *, origin: str) -> Preset:
             problems.append(f"profile.{key} is not a profile setting{_did_you_mean(str(key), sections)}")
     if "planner" in settings:
         problems.extend(_planner_problems(settings["planner"], origin))
+    if origin != TANDEM_ORIGIN:
+        for key in settings:
+            if key != "planner" and key in sections and key not in _NOT_IN_A_PRESET:
+                problems.append(
+                    f"it states {key!r}, which only tandem's presets may: a planner's preset states "
+                    f"planner.options (tandem's half, `extends:`, carries everything else)"
+                )
     replace = raw.get("replace") or []
     if not isinstance(replace, list) or not all(isinstance(p, str) for p in replace):
         problems.append("`replace:` must be a list of dotted paths, such as planner.options.tamp")

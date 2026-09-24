@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
-import subprocess
 from pathlib import Path
 
 import typer
@@ -37,7 +35,9 @@ def list_profiles(as_json: bool = typer.Option(False, "--json", help="Machine-re
     rows = []
     for name in names:
         try:
-            profile = profiles.load(name)
+            # Read-only: a profile naming a planner or executor this machine lacks is still listed (and
+            # its trajectories counted), with what is missing said beside it.
+            profile = profiles.load(name, require_installed=False)
             counts = _counts(profile)
             rows.append(
                 {
@@ -52,6 +52,7 @@ def list_profiles(as_json: bool = typer.Option(False, "--json", help="Machine-re
                     "failure": counts["failure"],
                     "path": str(profile.dir()),
                     "valid": True,
+                    "missing": missing_here(profile),
                 }
             )
         except ProfileError as exc:
@@ -73,6 +74,8 @@ def list_profiles(as_json: bool = typer.Option(False, "--json", help="Machine-re
             extra.append(f"[faint]{row['failure']} failed[/faint]")
         if row["eval"]:
             extra.append(f"[warn]{row['eval']} unlabeled[/warn]")
+        if row["missing"]:
+            extra.append(f"[warn]{', '.join(row['missing'])} not installed here[/warn]")
         table.add_row(
             marker,
             row["name"],
@@ -83,6 +86,27 @@ def list_profiles(as_json: bool = typer.Option(False, "--json", help="Machine-re
         )
     theme.console().print(table)
     theme.info(f"active profile: {cfg.active_profile}", str(cfg.profiles_root()))
+    for row in rows:
+        if not row.get("valid"):
+            from tandem.core.errors import one_line
+
+            theme.fail(f"{row['name']}: {one_line(row['error'])}")
+
+
+def missing_here(profile: profiles.Profile) -> list[str]:
+    """What a profile names that this machine does not have: "planner shelfbot", "executor policybot".
+
+    A profile read for browsing may name either (``profiles.load(require_installed=False)``); it
+    collects only where both are installed, so a listing says which is missing rather than nothing.
+    """
+    from tandem.executors import base as executors
+
+    missing = []
+    if profile.planner.backend not in registry.available():
+        missing.append(f"planner {profile.planner.backend}")
+    if profile.hitl.human_executor not in executors.available():
+        missing.append(f"executor {profile.hitl.human_executor}")
+    return missing
 
 
 @app.command("show", help="Show a profile in full.")
@@ -96,7 +120,8 @@ def show(
     ),
     as_json: bool = typer.Option(False, "--json", help="Machine-readable output."),
 ) -> None:
-    profile = profiles.load(name)
+    # Read-only: a profile collected with a plugin this machine does not have is still shown, whole.
+    profile = profiles.load(name, require_installed=False)
     cfg = settings_mod.load()
     backend = profile.planner.backend
     # The planner's own account of its options: this command knows no planner's schema.
@@ -189,11 +214,17 @@ def show(
             "set hitl.enabled to let a model split it into steps",
         )
 
-    if view.warnings:
+    missing = missing_here(profile)
+    if view.warnings or missing:
         theme.blank()
         theme.heading("warnings")
         for warning in view.warnings:
             theme.warn(warning)
+        for what in missing:
+            theme.warn(
+                f"{what} is not installed on this machine",
+                "this profile can be browsed and exported here, and collects where it is installed",
+            )
 
 
 @app.command("create", help="Create a profile.")
@@ -232,6 +263,18 @@ def create(
 ) -> None:
     if profiles.exists(name) and not force:
         raise ProfileError(f"Profile {name!r} already exists.", hint="Pass --force to overwrite it.")
+    if from_profile and (planner or import_from or tamp_config):
+        # A clone is the source as it is; these would be silently ignored, a planner name nothing checks
+        # included. Loud instead, with the way to get what was meant.
+        ignored = [
+            flag
+            for flag, value in (("--planner", planner), ("--import-from", import_from), ("--tamp-config", tamp_config))
+            if value
+        ]
+        raise ProfileError(
+            f"--from clones {from_profile!r} as it is, so {', '.join(ignored)} would be ignored.",
+            hint=f"Clone first, then `tandem planners use NAME --profile {name}` to switch its planner.",
+        )
 
     calibration: dict = {}
     notes: list[str] = []
@@ -254,11 +297,16 @@ def create(
 
         profile = profiles.load_file(resources.path("profile_template.yml"), name=name)
         profile.description = ""
-        # The machine's default planner (`tandem planners use NAME --default`), not the template's. The
+        # The machine's default planner (`tandem planners default NAME`), not the template's. The
         # template's options are its own planner's (TiPToP's), kept when that is the one chosen.
         chosen = planners_cli.planner_for_new_profile(planner)
         if profile.planner.backend != chosen:
-            profile.planner = profiles.PlannerSpec(backend=chosen)
+            if preset:
+                # A preset of that planner's own may supply what the planner requires: the options are
+                # checked once the preset is laid over them (presets.apply validates the result).
+                profile.planner = profiles.PlannerSpec.model_construct(backend=chosen, options={})
+            else:
+                profile.planner = profiles.planner_spec(chosen, profile=name)
         origin = "from the built-in template"
 
     # After the base -- template, clone or import -- and its planner are settled, since a preset is looked
@@ -282,17 +330,27 @@ def create(
     theme.info(str(path))
     show_notes(notes)
     if laid is not None:
-        _show_preset(profile, *laid)
-
-    missing = profiles.missing_calibration(profile)
-    if missing:
-        theme.warn(
-            f"No extrinsics for camera serial(s) {', '.join(missing)}",
-            f"add them to {profile.calibration_file().name}",
-        )
+        show_preset(profile, *laid)
+    warn_planner_profile_checks(profile)
 
     if activate:
         use(name)
+
+
+def warn_planner_profile_checks(profile: profiles.Profile) -> None:
+    """What the profile's planner says will stop it collecting with the profile it was just given: missing
+    extrinsics for TiPToP, say. Asked of the planner, as `tandem doctor` asks it, because only the planner
+    knows what it reads -- camera extrinsics mean nothing to a planner that never localises from them, and
+    telling its author to calibrate cameras it ignores sends them off to do exactly that. Only the
+    planner's failures: its softer findings are `tandem doctor`'s to list."""
+    from tandem.core import probe
+
+    checks = registry.doctor_checks(
+        profile.planner.backend, profile, settings=settings_mod.load(), probe_hardware=False
+    )
+    for check in checks:
+        if check.group == "profile" and check.state == probe.FAIL:
+            theme.warn(f"{check.name}: {check.detail}", check.hint or None)
 
 
 def show_notes(notes: list[str]) -> None:
@@ -306,7 +364,7 @@ def show_notes(notes: list[str]) -> None:
             theme.info(note)
 
 
-def _show_preset(profile: profiles.Profile, stack: list[presets.Preset], changes: dict[str, tuple]) -> None:
+def show_preset(profile: profiles.Profile, stack: list[presets.Preset], changes: dict[str, tuple]) -> None:
     """What ``--preset`` changed, setting by setting (a preset is exactly the changes it makes), and what
     its authors said a person must know before the arm moves."""
     preset = stack[-1]
@@ -385,18 +443,59 @@ def import_profile(
 def migrate(
     name: str = typer.Argument(None, help="Profile name (default: every profile)."),
 ) -> None:
-    """A profile in an older layout loads as it is, with a notice; saving it once writes the current one."""
+    """A profile in an older layout loads as it is, with a notice; saving it once writes the current one.
+
+    Only a profile that IS in an older layout is rewritten, after a copy of it is kept beside it
+    (profile.yml.v1.bak): a rewrite drops every comment and freezes every ``${oc.env:...}`` at the value
+    the environment has right now, which is a loss for a profile that gained nothing from it. One profile
+    that will not load does not stop the others; each is reported, and the command fails at the end.
+    """
+    if name and not profiles.exists(name):
+        known = profiles.list_names()
+        raise ProfileError(
+            f"Profile {name!r} does not exist.",
+            hint=f"Known profiles: {', '.join(known)}." if known else "Run `tandem init` first.",
+        )
     names = [name] if name else profiles.list_names()
     if not names:
         theme.info("No profiles yet.")
         return
+    failed: list[tuple[str, str]] = []
     for each in names:
-        before = (profiles.profiles_root() / each / "profile.yml").read_text()
-        path = profiles.save(profiles.load(each))
-        if path.read_text() == before:
-            theme.info(f"{each}: already current")
-        else:
-            theme.ok(f"{each}: rewritten in the current layout", str(path))
+        path = profiles.profiles_root() / each / "profile.yml"
+        try:
+            raw = profiles.read_data(path, name=each)
+            older = profiles.is_older_layout(raw)
+            moved = profiles.migrate(raw)[1] if older else []
+            # Validated either way, so a broken profile is reported rather than called current.
+            profile = profiles.load(each, require_installed=False)
+            if not older:
+                theme.info(f"{each}: already current")
+                continue
+            backup = path.with_name("profile.yml.v1.bak")
+            shutil.copy2(path, backup)
+            profiles.save(profile)
+        except (ProfileError, ValueError) as exc:
+            if name:
+                raise
+            message = exc.message if isinstance(exc, TandemError) else str(exc)
+            failed.append((each, message))
+            theme.fail(f"{each}: not migrated", _one_line(message))
+            continue
+        theme.ok(f"{each}: rewritten in the current layout", f"{path} (the old one is {backup.name})")
+        for line in moved:
+            theme.info(f"  {line}")
+    if failed:
+        raise ProfileError(
+            f"{len(failed)} profile(s) could not be migrated: {', '.join(n for n, _ in failed)}.",
+            hint="`tandem profile show NAME` says what is wrong with each; `tandem profile edit NAME` fixes it.",
+        )
+
+
+def _one_line(message: str) -> str:
+    from tandem.core.errors import one_line
+
+    return one_line(message)
 
 
 def _planner_title(backend: str) -> str:
@@ -428,13 +527,21 @@ def edit(name: str = typer.Argument(None, help="Profile name (default: the activ
     if not path.is_file():
         raise ProfileError(f"Profile {name!r} not found at {path}.")
 
+    from tandem.cli.editor import open_in_editor
+
     backup = path.with_suffix(".yml.bak")
+    # The names the profile had before the edit may be absent from this machine and stay accepted: an
+    # edit of its prompt on a laptop must not be refused over the planner it was collected with.
+    before = profiles.names_in_file(path)
     shutil.copy2(path, backup)
-    editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "vi"
-    subprocess.call([editor, str(path)])
+    try:
+        open_in_editor(path)
+    except TandemError:
+        backup.unlink(missing_ok=True)  # the editor never ran: profile.yml is as it was
+        raise
 
     try:
-        profiles.load(name)
+        profiles.load_file(path, name=name, keep_absent=before)
     except ProfileError as exc:
         # Never leave a broken profile in place: a session would fail at warmup, minutes
         # later, with a message about the wrong thing.
@@ -453,7 +560,8 @@ def delete(
     purge: bool = typer.Option(False, "--purge", help="Also delete every collected trajectory. Irreversible."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation."),
 ) -> None:
-    profile = profiles.load(name)
+    # Read-only: deleting a profile must not need the plugin it was collected with.
+    profile = profiles.load(name, require_installed=False)
     counts = _counts(profile)
     total = sum(counts.values())
 
@@ -478,7 +586,7 @@ def delete(
 
 @app.command("path", help="Print a profile's directory.")
 def path_(name: str = typer.Argument(None, help="Profile name (default: the active one).")) -> None:
-    typer.echo(str(profiles.load(name).dir()))
+    typer.echo(str(profiles.load(name, require_installed=False).dir()))
 
 
 # --------------------------------------------------------------------------- helpers

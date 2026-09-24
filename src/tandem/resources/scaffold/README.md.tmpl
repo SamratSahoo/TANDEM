@@ -17,9 +17,23 @@ planner and keep the kit green as you go.
 
 ## Try it
 
+Install it into the environment tandem runs in: the entry point in pyproject.toml is what makes tandem
+see it, and tandem only reads its own environment's entry points. That environment also has to hold
+tandem-tamp, which this package depends on and which is not on PyPI -- so the plain `pip install` of a
+shell that is not tandem's fails to resolve it. For the way tandem was installed:
+
 ```bash
-pip install -e ".[test]"        # the entry point in pyproject.toml is what makes tandem see it
-pytest                          # tandem's conformance kit, run against {{class_name}}
+pipx inject tandem-tamp --editable . pytest                   # tandem installed with pipx
+uv tool install --reinstall git+https://github.com/SamratSahoo/tandem.git \
+    --with-editable . --with pytest                           # tandem installed with `uv tool`
+pip install -e ".[test]"                                      # a virtualenv tandem is installed in (active)
+```
+
+`tandem planners new` printed the exact command for the tandem that made this package. Then, with that
+environment's Python (`tandem planners new` printed its path too):
+
+```bash
+python -m pytest                # tandem's conformance kit, run against {{class_name}}
 tandem planners list            # {{name}} is listed next to the planners tandem ships
 tandem planners info {{name}}   # what a robot phase may ask it for
 tandem planners use {{name}}    # plan with it in the active profile

@@ -232,6 +232,9 @@ hitl:
   # Who carries out a human step. `teleop` — you, driving the arm — is the only one that
   # ships; others can be installed and registered under their own name.
   human_executor: teleop
+  # Each executor's own settings, under its name (a policy executor's checkpoint, say).
+  # Kept per executor, so switching to another one and back loses nothing. Teleop has none.
+  human_executor_options: {}
   # Allow answering "done" for a human step without teleoperating it while recording. That
   # step then has no recording, and the episode is missing exactly the demonstration it
   # exists to capture while looking complete. Always allowed when nothing is recorded.

@@ -37,12 +37,13 @@ def plan(
         help="Pin an object label instead of asking a model to name them. Repeatable. Use it to "
         "reproduce a session's decomposition from the labels its perception actually produced.",
     ),
-    backend: str = typer.Option(
+    planner: str = typer.Option(
         None,
+        "--planner",
         "--backend",
         "-b",
         help="Whose goal language to plan in: by default --profile's planner, else the machine's default "
-        f"planner. One of: {', '.join(registry.available())}.",
+        f"planner. One of: {', '.join(registry.available())}. (--backend is its older name.)",
     ),
     profile_name: str = typer.Option(
         None, "--profile", "-p", help="Take the planning settings from this profile."
@@ -61,7 +62,7 @@ def plan(
 
     # The same steps `tandem.plan_task` takes (tandem/api.py), split open here only so progress can be
     # printed between naming the objects and proposing the plan.
-    backend = backend or _planner_for(profile_name)
+    backend = planner or _planner_for(profile_name)
     caps = registry.capabilities(backend)
     cfg = _config_for(profile_name)
     picture = api._picture(image)
@@ -196,7 +197,7 @@ def _goal_of(phase, caps):
 
 
 def _planner_for(profile_name: str | None) -> str:
-    """The planner a plan is proposed for when --backend does not say: the profile's, or the machine's default."""
+    """The planner a plan is proposed for when --planner does not say: the profile's, or the machine's default."""
     from tandem import api
 
     return api._planner_name(profile_name)

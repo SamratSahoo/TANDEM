@@ -119,6 +119,16 @@ export function renderReview(container, { profile, trajectory }) {
  * no ribbon. Widths are proportional to each leg's share of the CLIP, which is what the
  * viewer is actually scrubbing.
  */
+// A human phase's leg is any that is not the planner's ("tamp"): teleop, or a policy executor standing in
+// for the person. Only "teleop" used to count, so a policy's legs showed as the planner's.
+export function isHumanSegment(segment) {
+  return (segment.source || "tamp") !== "tamp";
+}
+
+function humanKind(segment) {
+  return segment.source === "teleop" ? "human" : `human · ${segment.source}`;
+}
+
 function segmentRibbon(segments, onSeek) {
   const total = segments[segments.length - 1].video_stop || 0;
   if (!(total > 0)) return h("div");
@@ -126,17 +136,18 @@ function segmentRibbon(segments, onSeek) {
   const bar = h("div.seg-ribbon", { title: "Hand-off segments — click one to jump the videos to it" },
     ...segments.map((segment) => {
       const width = ((segment.video_stop - segment.video_start) / total) * 100;
-      const human = segment.source === "teleop";
+      const human = isHumanSegment(segment);
+      const kind = human ? humanKind(segment) : "TAMP";
       const seconds = Math.round(segment.video_stop - segment.video_start);
       return h(`button.seg.${human ? "seg-human" : "seg-tamp"}`, {
         style: { width: `${width}%` },
-        title: `${human ? "Human" : "TAMP"} · ${segment.timestamp} · ${seconds}s · ${segment.n_frames} frames`,
+        title: `${kind} · ${segment.timestamp} · ${seconds}s · ${segment.n_frames} frames`,
         onclick: () => onSeek(segment.video_start),
-      }, width > 8 ? (human ? "human" : "TAMP") : "");
+      }, width > 8 ? kind : "");
     })
   );
 
-  const humanLegs = segments.filter((s) => s.source === "teleop").length;
+  const humanLegs = segments.filter(isHumanSegment).length;
   return h("div",
     bar,
     h("div.faint.small",

@@ -106,7 +106,8 @@ function renderList(host, profile, payload, reload) {
 function row(profile, traj, reload) {
   const flags = [];
   if (traj.merged) {
-    const human = (traj.segments || []).filter((s) => s.source === "teleop").length;
+    // Any leg that is not the planner's is a human phase's, a policy executor's included (review.js).
+    const human = (traj.segments || []).filter((s) => (s.source || "tamp") !== "tamp").length;
     flags.push(h("span.chip.violet", `hand-off ×${human}`));
   }
   if (!traj.complete) flags.push(h("span.chip", "incomplete"));

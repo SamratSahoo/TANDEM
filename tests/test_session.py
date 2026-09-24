@@ -314,12 +314,13 @@ def test_a_preempt_mid_task_still_reaches_the_label_prompt(live_session, backend
     session.label(True)
     assert wait_for(lambda: session.state is State.AWAITING_TASK)
 
-    # Now preempt one mid-flight. The stand-in records instantly, so preempt after the leg exists.
+    # A preempt that lands once the stand-in has already finished the task: still labeled. The preempt
+    # of an attempt that is still RUNNING -- the case the docstring is about -- is driven for real in
+    # tests/test_preempt.py, which holds the attempt at a human phase to preempt it there.
     session.next_task()
     assert wait_for(lambda: len(backend(backends).legs) == 2)
     session.preempt()
-    # Recorded, therefore labelable — not silently discarded.
-    assert wait_for(lambda: session.state in (State.AWAITING_LABEL, State.AWAITING_TASK))
+    assert wait_for(lambda: session.state is State.AWAITING_LABEL), f"stuck in {session.state}"
 
 
 def test_a_pass_that_records_nothing_leaves_no_phantom_episode(live_session, backends, profile):
@@ -376,8 +377,20 @@ def test_a_teleop_handoff_with_no_phase_plan_gives_the_task_back_to_the_planner(
             started.append(message)
 
     session.subscribe(on_message)
+    # The hand-off is honoured at the loop's first turn, and the stand-in reaches the end of the task
+    # in a few milliseconds: a test thread slowed down (a loaded CI runner) requested the arm after
+    # the task had already finished, and waited for a hand-off that never came. So the first
+    # perception pass is held until the request is in, and the hand-off lands at the first turn
+    # every time -- as test_hitl.py holds reacquire_hardware.
+    import threading
+
+    fake = backend(backends)
+    requested = threading.Event()
+    perceive = fake.perceive
+    fake.perceive = lambda **kw: (requested.wait(timeout=5.0), perceive(**kw))[1]
     session.next_task()
     session.request_teleop()
+    requested.set()
     assert wait_for(lambda: session.state is State.TELEOP_HANDOFF), f"stuck in {session.state}"
     assert wait_for(lambda: bool(started))
     session.resume_from_teleop()

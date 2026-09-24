@@ -140,6 +140,7 @@ def test_every_key_survives_the_trip_to_the_planner(monkeypatch):
         "on_robot_phase_failure": "replan",
         "conjoin_robot_phases": False,
         "human_executor": "diffusion-policy",
+        "human_executor_options": {"diffusion-policy": {"checkpoint": "policy.ckpt"}},
         "allow_unrecorded_human_phase": True,
         "verification_camera": "hand",
     }

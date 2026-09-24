@@ -15,6 +15,8 @@ installs it (``install_command``), and the page shows it.
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter
 from pydantic import BaseModel
 
@@ -24,6 +26,12 @@ router = APIRouter(tags=["planners"])
 class ProfileBody(BaseModel):
     # The profile to change; the active one when absent.
     profile: str | None = None
+
+
+class UseBody(ProfileBody):
+    # Settings for the planner's planner.options, for one that needs a setting no default can give
+    # (what `tandem planners use NAME --option KEY=VALUE` passes).
+    options: dict[str, Any] | None = None
 
 
 @router.get("/planners")
@@ -41,11 +49,16 @@ async def planner_info(name: str, profile: str | None = None) -> dict:
 
 
 @router.post("/planners/{name}/use")
-async def use_planner(name: str, body: ProfileBody | None = None) -> dict:
-    """Make a profile plan with ``name``. A planner that is not installed is accepted and said so."""
+async def use_planner(name: str, body: UseBody | None = None) -> dict:
+    """Make a profile plan with ``name``. A planner that is not installed is accepted and said so.
+
+    The old planner's options are set aside beside the profile and come back on a switch back; the
+    result says which (``dropped_options``, ``saved_to``, ``restored_options``), and the page shows it.
+    """
     from tandem.cli import planners as planners_cli
 
-    return planners_cli.use_planner(name, profile_name=(body or ProfileBody()).profile)
+    body = body or UseBody()
+    return planners_cli.use_planner(name, profile_name=body.profile, options=body.options)
 
 
 @router.post("/planners/{name}/default")

@@ -94,7 +94,8 @@ def test_a_registered_planner_is_one_a_profile_can_name():
         profiles.PlannerSpec(backend="toyy")
 
     registry.unregister_backend("toy")
-    with pytest.raises(ValueError, match="must be one of"):
+    # Not a typo but a planner this machine does not have: said as that, not as "must be one of".
+    with pytest.raises(ValueError, match="no planner named 'toy' is installed on this machine"):
         profiles.PlannerSpec(backend="toy")
 
 

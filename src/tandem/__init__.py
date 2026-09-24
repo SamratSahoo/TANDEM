@@ -68,6 +68,7 @@ _EXPORTS = {
     "Parameter": "tandem.planning.symbols",
     "RuntimeRecipe": "tandem.planners.runtime",
     "register_backend": "tandem.planners.registry",
+    "register_planner": "tandem.planners.registry",
     "register_human_executor": "tandem.executors.base",
     "TandemError": "tandem.core.errors",
 }
@@ -88,6 +89,7 @@ __all__ = [
     "plan_task_async",
     "register_backend",
     "register_human_executor",
+    "register_planner",
 ]
 
 if TYPE_CHECKING:  # pragma: no cover - for editors and type checkers only
@@ -95,7 +97,7 @@ if TYPE_CHECKING:  # pragma: no cover - for editors and type checkers only
     from tandem.core.errors import TandemError
     from tandem.executors.base import register_human_executor
     from tandem.planners.base import Capabilities, PlannerInfo
-    from tandem.planners.registry import register_backend
+    from tandem.planners.registry import register_backend, register_planner
     from tandem.planners.runtime import RuntimeRecipe
     from tandem.planners.sdk import Planner
     from tandem.planners.sidecar import SidecarPlanner

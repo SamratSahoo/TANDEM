@@ -4,14 +4,17 @@ Everything a planner author needs is importable from here::
 
     from tandem.planners import Capabilities, Parameter, Planner, PlannerInfo, Predicate, register_backend
 
+and what its hooks deal in: ``OptionsView`` (describe_options), ``ProfileImporter`` and ``WARNING_NOTE``
+(importer), ``RuntimeNotReady`` (require_ready) and ``TandemError`` (any refusal a person reads).
+
 - ``Planner``: the base class. Declare ``info`` and ``CAPABILITIES``, implement ``perceive``,
   ``plan`` and ``execute``; every other verb has a default, and the class is its own factory.
 - ``SidecarPlanner``: the same, for a planner that runs in an environment of its own; its work is
   done by a sidecar script written with ``tandem_sidecar`` (``planners/sidecar_kit``).
 - ``RuntimeRecipe`` (with ``Source``, ``SourcePin``, ``PixiEnvironment``, ``BuildStep``, ``Asset``):
   the runtime such a planner needs built, declared rather than scripted.
-- ``register_backend``: make a planner available under a name. A package does the same with a
-  ``tandem.planners`` entry point.
+- ``register_backend`` (or ``register_planner``, the same function): make a planner available under a
+  name. A package does the same with a ``tandem.planners`` entry point.
 - ``tandem.planners.testing``: a conformance kit a planner's own test suite subclasses.
 
 Underneath: ``base`` is the protocol and the wire types, ``registry`` resolves a planner by name,
@@ -53,6 +56,12 @@ _EXPORTS = {
     "Predicate": "tandem.planning.symbols",
     "Parameter": "tandem.planning.symbols",
     "register_backend": "tandem.planners.registry",
+    "register_planner": "tandem.planners.registry",
+    "OptionsView": "tandem.planners.base",
+    "ProfileImporter": "tandem.planners.base",
+    "WARNING_NOTE": "tandem.planners.base",
+    "RuntimeNotReady": "tandem.core.errors",
+    "TandemError": "tandem.core.errors",
 }
 
 __all__ = [
@@ -64,37 +73,47 @@ __all__ = [
     "ExecuteResult",
     "GoalAtom",
     "LegSpec",
+    "OptionsView",
     "Parameter",
     "PixiEnvironment",
     "PlanResult",
     "Planner",
     "PlannerInfo",
     "Predicate",
+    "ProfileImporter",
+    "RuntimeNotReady",
     "RuntimeRecipe",
     "SceneView",
     "SidecarPlanner",
     "Source",
     "SourcePin",
     "TampBackend",
+    "TandemError",
     "UnsupportedVerb",
+    "WARNING_NOTE",
     "register_backend",
+    "register_planner",
 ]
 
 if TYPE_CHECKING:  # pragma: no cover - for editors and type checkers only
+    from tandem.core.errors import RuntimeNotReady, TandemError
     from tandem.planners.base import (
+        WARNING_NOTE,
         BackendContext,
         BackendError,
         Capabilities,
         ExecuteResult,
         GoalAtom,
         LegSpec,
+        OptionsView,
         PlannerInfo,
         PlanResult,
+        ProfileImporter,
         SceneView,
         SourcePin,
         TampBackend,
     )
-    from tandem.planners.registry import register_backend
+    from tandem.planners.registry import register_backend, register_planner
     from tandem.planners.runtime import Asset, BuildStep, PixiEnvironment, RuntimeRecipe, Source
     from tandem.planners.sdk import Planner, UnsupportedVerb
     from tandem.planners.sidecar import SidecarPlanner

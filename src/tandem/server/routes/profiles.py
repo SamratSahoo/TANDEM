@@ -26,8 +26,12 @@ class ActivateBody(BaseModel):
 
 
 def _card(name: str, active: str) -> dict:
+    from tandem.cli.profile import missing_here
+
     try:
-        profile = profiles_mod.load(name)
+        # Read-only: a profile collected with a plugin this machine does not have is still a card, with
+        # what is missing said on it -- a laptop is where such a profile is browsed.
+        profile = profiles_mod.load(name, require_installed=False)
     except ProfileError as exc:
         return {"name": name, "active": name == active, "valid": False, "error": exc.message}
     counts = trajectories.counts(profile)
@@ -35,6 +39,7 @@ def _card(name: str, active: str) -> dict:
         "name": name,
         "active": name == active,
         "valid": True,
+        "missing": missing_here(profile),
         "description": profile.description,
         "prompt": profile.task.prompt,
         "goal": profile.task.goal,
@@ -74,7 +79,7 @@ async def list_profiles() -> dict:
 @router.get("/profiles/{name}")
 async def get_profile(name: str) -> dict:
     cfg = settings_mod.load()
-    profile = profiles_mod.load(name)
+    profile = profiles_mod.load(name, require_installed=False)
     view = _view(profile, cfg)
     return {
         **_card(name, cfg.active_profile),
@@ -89,12 +94,26 @@ async def get_profile(name: str) -> dict:
 @router.put("/profiles/{name}")
 async def update_profile(name: str, body: dict[str, Any] = Body(...)) -> dict:
     """Replace a profile wholesale. Validation happens before anything is written, so a bad
-    edit from the browser cannot leave a profile that fails at session start."""
-    existing = profiles_mod.load(name)
+    edit from the browser cannot leave a profile that fails at session start.
+
+    The profile on disk is read as written, not validated: the editor is how a profile that no longer
+    loads gets fixed, and refusing the corrected body because the old one was broken left no way to.
+    A planner or executor the file already named may be absent from this machine and stay; a name the
+    edit introduces must be installed.
+    """
+    path = profiles_mod.profiles_root() / name / "profile.yml"
+    if not profiles_mod.exists(name):
+        raise ProfileError(f"Profile {name!r} does not exist.")
+    try:
+        previous_prompt = (profiles_mod.read_data(path, name=name).get("task") or {}).get("prompt")
+    except ProfileError:
+        previous_prompt = None
     payload = dict(body)
     payload["name"] = name  # the directory is the identity
     try:
-        updated = profiles_mod.Profile.model_validate(payload)
+        updated = profiles_mod.Profile.model_validate(
+            payload, context={profiles_mod.ABSENT_OK: profiles_mod.names_in_file(path)}
+        )
     except Exception as exc:
         # A raw pydantic error would surface as a 500 and a wall of text. The editor needs a
         # 400 with the message the user can act on — usually a mistyped planner option.
@@ -104,14 +123,15 @@ async def update_profile(name: str, body: dict[str, Any] = Body(...)) -> dict:
         ) from exc
     profiles_mod.save(updated)
     cfg = settings_mod.load()
-    updated = profiles_mod.load(name)  # as saved: the planner's options as it normalised them
+    # As saved: the planner's options as it normalised them.
+    updated = profiles_mod.load(name, require_installed=False)
     view = _view(updated, cfg)
     return {
         **_card(name, cfg.active_profile),
         "profile": updated.model_dump(mode="json"),
         "planner_view": view.to_dict(),
         "warnings": list(view.warnings),
-        "previous_prompt": existing.task.prompt,
+        "previous_prompt": previous_prompt,
     }
 
 
@@ -125,10 +145,39 @@ async def set_active(body: ActivateBody) -> dict:
     return {"active": body.name}
 
 
+#: What POST /profiles reads. Anything else is refused rather than dropped: a field the page sends and
+#: the server ignores (a preset, once) is a setting the person chose and never got.
+CREATE_KEYS = ("name", "from", "prompt", "preset")
+
+
+@router.get("/presets")
+async def list_presets(planner: str | None = None) -> dict:
+    """The presets a new profile can be created with, for the planner it will plan with.
+
+    What `tandem profile presets --json` prints. The planner is the machine's default unless named.
+    """
+    from tandem.cli import planners as planners_cli
+    from tandem.core import presets
+
+    chosen = planners_cli.planner_for_new_profile(planner)
+    rows = []
+    for preset_name, preset in sorted(presets.available(chosen).items()):
+        stack = presets.layers(preset_name, chosen)
+        rows.append({**preset.to_dict(), "layers": [layer.origin for layer in stack]})
+    return {"planner": chosen, "presets": rows}
+
+
 @router.post("/profiles")
 async def create_profile(body: dict[str, Any] = Body(...)) -> dict:
     from tandem import resources
+    from tandem.core import presets
 
+    unknown = sorted(set(body) - set(CREATE_KEYS))
+    if unknown:
+        raise TandemError(
+            f"A new profile does not take {', '.join(unknown)}.",
+            hint=f"It takes {', '.join(CREATE_KEYS)}; edit the rest once it exists.",
+        )
     name = str(body.get("name") or "").strip()
     if not name:
         raise ProfileError("A profile needs a name.")
@@ -151,8 +200,23 @@ async def create_profile(body: dict[str, Any] = Body(...)) -> dict:
         # options when the template already names that planner.
         chosen = planners_cli.planner_for_new_profile()
         if profile.planner.backend != chosen:
-            profile.planner = profiles_mod.PlannerSpec(backend=chosen)
+            if body.get("preset"):
+                # Its own preset may supply what the planner requires; apply() validates the result.
+                profile.planner = profiles_mod.PlannerSpec.model_construct(backend=chosen, options={})
+            else:
+                profile.planner = profiles_mod.planner_spec(chosen, profile=name)
         calibration = {}
+
+    # As `tandem profile create --preset` lays one: after the base and its planner are settled, before the
+    # prompt, which is this profile's own. An unknown name is a TandemError (400) naming the nearest.
+    changes: dict = {}
+    caution: list[str] = []
+    preset = body.get("preset")
+    if preset:
+        before = profile
+        profile = presets.apply(profile, str(preset))
+        changes = presets.differences(before.model_dump(mode="python"), profile.model_dump(mode="python"))
+        caution = [line for layer in presets.layers(str(preset), profile.planner.backend) for line in layer.caution]
 
     if body.get("prompt"):
         profile.task.prompt = str(body["prompt"])
@@ -164,11 +228,19 @@ async def create_profile(body: dict[str, Any] = Body(...)) -> dict:
         profile.calibration_file().write_text(json.dumps(calibration, indent=2) + "\n")
 
     cfg = settings_mod.load()
-    return _card(name, cfg.active_profile)
+    card = _card(name, cfg.active_profile)
+    if preset:
+        card["preset"] = {
+            "name": str(preset),
+            "changed": {key: [old, new] for key, (old, new) in changes.items()},
+            "caution": caution,
+        }
+    return card
 
 
 @router.delete("/profiles/{name}")
 async def delete_profile(name: str, purge: bool = False) -> dict:
+    # profiles.delete checks the name before it becomes a path: `%2E%2E` reaches here as "..".
     cfg = settings_mod.load()
     profiles_mod.delete(name, keep_data=not purge)
     if cfg.active_profile == name:

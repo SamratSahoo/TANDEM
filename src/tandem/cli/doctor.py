@@ -17,7 +17,7 @@ import typer
 from tandem.cli import theme
 from tandem.core import probe, profiles, secrets
 from tandem.core import settings as settings_mod
-from tandem.core.errors import ProfileError, TandemError
+from tandem.core.errors import ProfileError, TandemError, one_line
 
 GROUP_TITLES = {
     "core": "environment",
@@ -60,7 +60,7 @@ def collect_checks(*, profile_name: str | None = None, probe_hardware: bool = Tr
     except ProfileError as exc:
         checks.append(_gemini_check(None, runtime_ready))
         checks.append(
-            probe.Check("profile", probe.FAIL, exc.message.split("\n")[0], exc.hint or "", group="profile")
+            probe.Check("profile", probe.FAIL, one_line(exc.message), exc.hint or "", group="profile")
         )
         return checks
 
@@ -145,7 +145,7 @@ def _runtime_check(profile_name: str | None, cfg) -> tuple[probe.Check, bool, Pa
         # The profile row below says what is wrong with the profile; this one only says that without
         # it, there is no telling whose runtime to look at.
         return (
-            probe.Check(RUNTIME_ROW, probe.WARN, "unknown: " + exc.message.split("\n")[0], group="runtime"),
+            probe.Check(RUNTIME_ROW, probe.WARN, "unknown: " + one_line(exc.message), group="runtime"),
             False,
             None,
             None,

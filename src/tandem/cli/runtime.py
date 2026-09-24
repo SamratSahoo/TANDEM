@@ -42,7 +42,7 @@ def active_planner(profile_name: str | None = None) -> str:
     """The planner a profile names -- the active profile unless one is named.
 
     A profile that does not exist yet has the planner a new one would get: the machine's default
-    (``default_planner``, which `tandem planners use NAME --default` sets). That is the one case with
+    (``default_planner``, which `tandem planners default NAME` sets). That is the one case with
     no profile to ask, and it is the first thing `tandem init` meets: it builds the runtime before it
     creates the first profile. A profile that exists but does not load is an error, not a reason to
     guess: installing the wrong planner's runtime is twenty minutes and 25 GB spent on nothing.
@@ -235,8 +235,9 @@ def build(
     sources: Path = typer.Option(
         None,
         "--sources",
-        help="Install from this directory of checkouts or exports instead of fetching "
-        "(default: $TANDEM_PLANNER_SOURCES). `python tools/bundle.py` makes one.",
+        help="Take the planner's sources from this directory of checkouts or exports instead of fetching "
+        "them from GitHub (default: $TANDEM_PLANNER_SOURCES). `tandem planners bundle NAME --out DIR` makes "
+        "one, on a machine with network. The environment is still downloaded (conda-forge, PyPI).",
         file_okay=False,
     ),
     planner: str = _PLANNER,
@@ -246,11 +247,22 @@ def build(
     if rt is None:
         theme.ok(f"The {name!r} planner is pure Python", "there is nothing to build")
         return
-    run_build(rt, force=force, env_only=env_only, sources_dir=sources)
+    run_build(rt, force=force, env_only=env_only, sources_dir=sources, planner=name)
 
 
-def run_build(rt, *, force: bool = False, env_only: bool = False, sources_dir: Path | None = None) -> None:
-    """Shared by `runtime build` and `init`, so they cannot drift apart."""
+def run_build(
+    rt,
+    *,
+    force: bool = False,
+    env_only: bool = False,
+    sources_dir: Path | None = None,
+    planner: str | None = None,
+) -> None:
+    """Shared by `runtime build`, `planners install` and `init`, so they cannot drift apart.
+
+    ``planner`` is whose runtime this is, for the error: a failed build says which command re-runs
+    THIS build and which log has it, not `tandem runtime build`, which builds the active profile's.
+    """
     from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
     from tandem.planners.runtime import RecipeRuntime
@@ -305,6 +317,18 @@ def run_build(rt, *, force: bool = False, env_only: bool = False, sources_dir: P
                 rt.install(on_progress=on_progress, sources_dir=sources_dir, force=force)
             progress.advance(task)
             progress.update(task, step="done", description="environment only" if env_only else "done")
+    except TandemError as exc:
+        name = planner or getattr(getattr(rt, "recipe", None), "planner", None)
+        if name:
+            command = f"tandem planners install {name}" + (f" --sources {sources_dir}" if sources_dir else "")
+            again = f"`{command}`"
+        else:
+            again = "the same command"
+        raise TandemError(
+            exc.message,
+            hint=f"The full log is {log_path}. Re-run {again} once the cause is fixed"
+            + (f"; {exc.hint}" if exc.hint else "."),
+        ) from exc
     finally:
         log_file.close()
 
@@ -393,8 +417,10 @@ def needs_pixi(rt: Any) -> bool:
 def ensure_pixi(title: str, *, ask: bool, allowed: bool) -> None:
     """The consent flow before pixi is installed into the home directory: `init`'s and `planners install`'s.
 
-    pixi's installer is `curl | bash` into ~/.pixi, and it edits the shell's rc file on the way. That
-    is done on an explicit yes and nothing less: ``ask`` puts the question to the person at the
+    pixi's installer is `curl | bash` into ~/.pixi. Left to itself it would also append ~/.pixi/bin to
+    the shell's rc file; tandem tells it not to (``install_pixi``), since it finds pixi in ~/.pixi/bin
+    without that, so what the question says is what happens. That is done on an explicit yes and
+    nothing less: ``ask`` puts the question to the person at the
     terminal, and ``allowed`` is a yes given in advance (``--yes``, or `tandem init`'s own "accept
     every default"). With neither, the answer is an error saying how to give it -- never a silent
     install, and never a build that fails twenty seconds in because the tool it needs is missing.
@@ -402,7 +428,10 @@ def ensure_pixi(title: str, *, ask: bool, allowed: bool) -> None:
     if _pixi_installed():
         return
     theme.info(f"pixi is the environment manager {title}'s planner stack needs.")
-    theme.info("It installs to ~/.pixi and touches nothing else.")
+    if _path_update_skipped():
+        theme.info("It installs to ~/.pixi and touches nothing else: your shell's rc file is left alone.")
+    else:
+        theme.info("It installs to ~/.pixi, and (PIXI_NO_PATH_UPDATE is empty) adds ~/.pixi/bin to your shell's rc file.")
     if ask:
         if not typer.confirm("  Install pixi now?", default=True):
             raise TandemError(
@@ -417,11 +446,27 @@ def ensure_pixi(title: str, *, ask: bool, allowed: bool) -> None:
         )
     theme.busy("Installing pixi")
     install_pixi(log=lambda _line: None)
-    theme.ok("pixi installed")
+    if _path_update_skipped():
+        theme.ok("pixi installed", "in ~/.pixi/bin, where tandem finds it; add that to PATH to run pixi yourself")
+    else:
+        theme.ok("pixi installed")
+
+
+def _path_update_skipped() -> bool:
+    """Whether the pixi installer will leave the shell's rc file alone (it does unless told otherwise).
+
+    tandem asks it to, by default: tandem finds pixi in ~/.pixi/bin itself, and consent given to
+    "installs to ~/.pixi" is not consent to an edited ~/.zshrc. PIXI_NO_PATH_UPDATE set to an empty
+    string by the person is their choice to let it edit the file.
+    """
+    return os.environ.get("PIXI_NO_PATH_UPDATE", "1") != ""
 
 
 def install_pixi(log=None) -> None:
-    """Install pixi with the official script. Only ever called after explicit consent."""
+    """Install pixi with the official script. Only ever called after explicit consent.
+
+    With PIXI_NO_PATH_UPDATE=1 unless the person set it themselves: see ``_path_update_skipped``.
+    """
     import shutil
 
     if _pixi_installed():
@@ -436,7 +481,7 @@ def install_pixi(log=None) -> None:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        env={**os.environ, "PIXI_NO_PATH_UPDATE": os.environ.get("PIXI_NO_PATH_UPDATE", "")},
+        env={**os.environ, "PIXI_NO_PATH_UPDATE": os.environ.get("PIXI_NO_PATH_UPDATE", "1")},
     )
     assert proc.stdout is not None
     for line in proc.stdout:

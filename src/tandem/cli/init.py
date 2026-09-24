@@ -18,7 +18,7 @@ from tandem.cli import runtime as runtime_cli
 from tandem.cli import theme
 from tandem.core import paths, probe, profiles, secrets
 from tandem.core import settings as settings_mod
-from tandem.core.errors import TandemError
+from tandem.core.errors import TandemError, one_line
 from tandem.planners import registry
 
 
@@ -29,7 +29,12 @@ def init(
         help="Set up for browsing and visualizing trajectories only — no GPU runtime, no robot.",
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Accept every default; ask nothing."),
-    repair: bool = typer.Option(False, "--repair", help="Redo steps that are already done."),
+    repair: bool = typer.Option(
+        False,
+        "--repair",
+        help="Redo steps that are already done: rebuild the planner's runtime, and ask again for the key "
+        "and the teleop settings. An existing profile is never touched by it.",
+    ),
     profile_name: str = typer.Option("default", "--profile", help="Name for the profile to create."),
     import_from: Path = typer.Option(
         None,
@@ -44,6 +49,12 @@ def init(
         "--planner",
         help="The planner the profile plans with, and whose runtime is built (see `tandem planners list`). "
         "Default: the profile's own, or for a new one the machine's default (tiptop).",
+    ),
+    preset: str = typer.Option(
+        None,
+        "--preset",
+        help="Lay a named preset over the profile init creates, such as `paper` (the paper's collection "
+        "settings). `tandem profile presets` lists them. An existing profile is left as it is.",
     ),
 ) -> None:
     interactive = theme.is_tty() and not yes
@@ -93,7 +104,7 @@ def init(
     if not viz_only:
         theme.rule("planner")
         planner = _choose_planner(profile_name, planner, interactive=interactive)
-        _planner_preflight(planner, interactive=interactive)
+        _planner_preflight(planner, interactive=interactive, repair=repair)
         theme.blank()
 
     # ---- 5. the planner's runtime -------------------------------------------
@@ -126,13 +137,26 @@ def init(
 
     # ---- 7. the first profile -----------------------------------------------
     theme.rule("profile")
-    if profiles.exists(profile_name) and not repair:
+    # An existing profile is kept, --repair or not: it is somebody's collection setup (phase planning on,
+    # a preset's settings, the rig's cameras), and rebuilding it from the template to repair a runtime
+    # would lose all of it without a word. It is only pointed at the planner init was asked to set up.
+    if profiles.exists(profile_name):
         theme.ok(f"Profile {profile_name!r} already exists", str(profiles.profiles_root() / profile_name))
         if planner is not None:
             _switch_planner(profile_name, planner)
+        if preset:
+            theme.warn(
+                f"--preset {preset} was not applied to the existing profile {profile_name!r}",
+                f"`tandem profile create NEW --from {profile_name} --preset {preset}` makes a copy with it",
+            )
     else:
         _create_profile(
-            profile_name, import_from=import_from, interactive=interactive, viz_only=viz_only, planner=planner
+            profile_name,
+            import_from=import_from,
+            interactive=interactive,
+            viz_only=viz_only,
+            planner=planner,
+            preset=preset,
         )
     cfg = settings_mod.load()
     cfg.active_profile = profile_name
@@ -169,8 +193,13 @@ def _choose_planner(profile_name: str, requested: str | None, *, interactive: bo
         if row["status"] == planners_cli.BROKEN:
             theme.fail(f"{row['name']}: {row['detail']}")
 
-    # A profile that exists but does not load is an error, not a reason to guess its planner.
-    existing = profiles.load(profile_name).planner.backend if profiles.exists(profile_name) else None
+    # Read as written: a profile naming a planner this machine does not have is exactly the one --planner
+    # is used to repair. Without --planner, that planner is what is checked below, and refused by name.
+    existing = (
+        profiles.load(profile_name, require_installed=False).planner.backend
+        if profiles.exists(profile_name)
+        else None
+    )
     usable = [row["name"] for row in payload["planners"] if row["ok"]]
     if requested:
         choice = requested
@@ -194,15 +223,11 @@ def _switch_planner(profile_name: str, planner: str) -> None:
     """Point an existing profile at the planner init was asked to set up, saying what changed."""
     from tandem.cli import planners as planners_cli
 
-    if profiles.load(profile_name).planner.backend == planner:
-        return
     result = planners_cli.use_planner(planner, profile_name=profile_name)
+    if not result["changed"]:
+        return
     theme.ok(f"Profile {profile_name!r} now plans with {result['display_name']}", f"was {result['previous']}")
-    if result["dropped_options"]:
-        theme.warn(
-            f"Removed planner.options {', '.join(sorted(map(str, result['dropped_options'])))}",
-            f"they were {result['previous']}'s own settings",
-        )
+    planners_cli.describe_switch(result)
 
 
 def _build_runtime(profile_name: str, *, interactive: bool, repair: bool, planner: str | None = None) -> None:
@@ -233,34 +258,58 @@ def _build_runtime(profile_name: str, *, interactive: bool, repair: bool, planne
     if interactive and not typer.confirm("  Build it now?", default=True):
         theme.warn("Skipped", f"run `tandem planners install {planner}` when you are ready")
     else:
-        runtime_cli.run_build(runtime, force=repair)
+        runtime_cli.run_build(runtime, force=repair, planner=planner)
 
 
 
 def _preflight(*, viz_only: bool) -> list[probe.Check]:
-    """What tandem itself needs of the machine. What the planner needs is asked once it is chosen."""
-    cfg = settings_mod.load()
-    checks = [probe.check_python(), probe.check_platform()]
-    if viz_only:
-        checks.append(probe.check_ffmpeg())
-        return checks
+    """What tandem itself needs of the machine. What the planner needs is asked once it is chosen.
 
-    checks += [
-        probe.check_disk(cfg.resolved_runtime_dir()),
-        probe.check_pixi(),
-        probe.check_ffmpeg(),
-    ]
+    Disk space and pixi are not asked here. They are what a planner's RUNTIME needs, and before the
+    planner is chosen there is no telling whether it has one: a pure-Python planner needs neither, and
+    stopping on a missing pixi before init has had the chance to install it stopped `init --yes` on
+    every fresh machine.
+    """
+    checks = [probe.check_python(), probe.check_platform()]
+    checks.append(probe.check_ffmpeg())
     return checks
 
 
-def _planner_preflight(planner: str, *, interactive: bool) -> None:
-    """What the chosen planner needs of this machine -- a GPU, a camera SDK -- before its runtime is built.
+def _runtime_checks(planner: str, *, repair: bool) -> list[probe.Check]:
+    """Disk and pixi, for the chosen planner's runtime only, and only when it is about to be built.
 
-    The planner's own doctor checks, with no profile yet: they are the only ones that know. Stops on
-    a failure the same way the machine checks do, so twenty minutes are not spent building a runtime
-    that cannot run here.
+    A missing pixi is not a blocking problem here: the runtime step installs it (with consent at a
+    terminal, and under --yes without asking, as "accept every default" promises).
     """
-    checks = registry.doctor_checks(planner, None, settings=settings_mod.load(), probe_hardware=True)
+    cfg = settings_mod.load()
+    try:
+        rt = registry.runtime(planner, cfg)
+    except Exception:  # the runtime step reports a planner whose runtime cannot be located
+        return []
+    if rt is None:
+        return [probe.Check("runtime", probe.SKIP, f"not needed · {planner} is pure Python", group="runtime")]
+    status = rt.status()
+    if status.installed and not repair:
+        return []
+    checks = [probe.check_disk(Path(status.path) if status.path else cfg.resolved_runtime_dir())]
+    if runtime_cli.needs_pixi(rt):
+        pixi = probe.check_pixi()
+        if pixi.state == probe.FAIL:
+            pixi = probe.Check("pixi", probe.WARN, "not found · init installs it, into ~/.pixi", group="runtime")
+        checks.append(pixi)
+    return checks
+
+
+def _planner_preflight(planner: str, *, interactive: bool, repair: bool = False) -> None:
+    """What the chosen planner needs of this machine -- disk and pixi for its runtime, a GPU, a camera SDK
+    -- before its runtime is built.
+
+    The runtime's needs as `tandem doctor` asks them, then the planner's own doctor checks, with no
+    profile yet: they are the only ones that know. Stops on a failure the same way the machine checks
+    do, so twenty minutes are not spent building a runtime that cannot run here.
+    """
+    checks = _runtime_checks(planner, repair=repair)
+    checks += registry.doctor_checks(planner, None, settings=settings_mod.load(), probe_hardware=True)
     if not checks:
         return
     theme.blank()
@@ -283,9 +332,11 @@ def _stop_on_blocking(checks: list[probe.Check], *, interactive: bool) -> None:
         if not typer.confirm("  Continue anyway?", default=False):
             raise typer.Abort()
     else:
+        runtime_only = all(c.group == "runtime" for c in blocking)
         raise TandemError(
             "Preflight found blocking problems: " + ", ".join(c.name for c in blocking),
-            hint="Fix them and re-run `tandem init`, or use --viz-only for a laptop setup.",
+            hint="Fix them and re-run `tandem init`."
+            + ("" if runtime_only else " On a laptop, --viz-only sets up for browsing only."),
         )
 
 
@@ -306,9 +357,11 @@ def _create_profile(
     interactive: bool,
     viz_only: bool = False,
     planner: str | None = None,
+    preset: str | None = None,
 ) -> None:
     from tandem.cli import planners as planners_cli
     from tandem.cli import profile as profile_cli
+    from tandem.core import presets
 
     # Resolved before anything is written: a default naming a planner this machine no longer has
     # stops here, not in a profile that every later command refuses.
@@ -357,15 +410,27 @@ def _create_profile(
         profile.cameras = profiles.CamerasSpec()
         profile.description = profile.description or "trajectories collected elsewhere"
 
+    typed = None
     if interactive:
-        profile.task.prompt = typer.prompt("  Task prompt", default=profile.task.prompt).strip()
+        typed = typer.prompt("  Task prompt", default=profile.task.prompt).strip()
+        profile.task.prompt = typed
 
     # The planner init set this machine up for, whether the rest came from the template or an import:
     # a profile naming a different planner from the runtime just built would not collect. An import
     # is already that planner's, options and all; the template's options are TiPToP's, and go when
     # the planner is another.
     if profile.planner.backend != planner:
-        profile.planner = profiles.PlannerSpec(backend=planner)
+        profile.planner = profiles.planner_spec(planner, profile=name)
+    # After the planner is settled, as `tandem profile create --preset` does: a preset is looked up for
+    # the profile's planner. The prompt typed above is this profile's own, and wins over the preset.
+    laid = None
+    if preset:
+        before = profile
+        profile = presets.apply(profile, preset)
+        changes = presets.differences(before.model_dump(mode="python"), profile.model_dump(mode="python"))
+        laid = (presets.layers(preset, profile.planner.backend), changes)
+        if typed:
+            profile.task.prompt = typed
     path = profiles.save(profile)
     if calibration:
         profile.calibration_file().write_text(json.dumps(calibration, indent=2) + "\n")
@@ -373,13 +438,9 @@ def _create_profile(
     theme.ok(f"Created profile {name!r}", origin)
     theme.info(str(path))
     profile_cli.show_notes(notes)
-
-    missing = profiles.missing_calibration(profile)
-    if missing:
-        theme.warn(
-            f"No extrinsics for camera serial(s) {', '.join(missing)}",
-            "collection will refuse to start until they exist",
-        )
+    if laid is not None:
+        profile_cli.show_preset(profile, *laid)
+    profile_cli.warn_planner_profile_checks(profile)
 
 
 def _setup_teleop(*, interactive: bool, repair: bool) -> None:
@@ -424,7 +485,7 @@ def _summary(*, viz_only: bool, profile_name: str) -> None:
         planner, runtime = runtime_cli.planner_runtime(profile_name=profile_name)
         where = runtime.status().path if runtime is not None else "none needed (pure Python)"
     except TandemError as exc:
-        planner, where = "unknown", exc.message.splitlines()[0]
+        planner, where = "unknown", one_line(exc.message)
     theme.kv(
         [
             ("profile", profile_name),

@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from tandem import __version__
-from tandem.core.errors import ProfileError, SessionConflict, TandemError
+from tandem.core.errors import ProfileError, ProfileInvalid, SessionConflict, TandemError
 from tandem.server.routes import planners as planners_routes
 from tandem.server.routes import profiles as profiles_routes
 from tandem.server.routes import sessions as sessions_routes
@@ -23,20 +23,26 @@ from tandem.server.routes import trajectories as trajectories_routes
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
-def create_app(*, initial_profile: str | None = None) -> FastAPI:
+def create_app() -> FastAPI:
+    # No "initial profile": the page works on the active one, and `tandem ui --profile NAME` makes NAME
+    # the active one before serving (cli/ui.py).
     app = FastAPI(
         title="tandem",
         version=__version__,
         docs_url="/api/docs",
         openapi_url="/api/openapi.json",
     )
-    app.state.initial_profile = initial_profile
 
     @app.exception_handler(SessionConflict)
     async def _session_conflict(_request: Request, exc: SessionConflict) -> JSONResponse:
         # 409, not 500: "you cannot do that right now" is a normal answer for a UI whose
         # buttons race the robot's state.
         return JSONResponse(status_code=409, content={"error": exc.message, "hint": exc.hint})
+
+    @app.exception_handler(ProfileInvalid)
+    async def _profile_invalid(_request: Request, exc: ProfileInvalid) -> JSONResponse:
+        # 422, not 404: the profile is there, and the editor that gets this can offer to fix it.
+        return JSONResponse(status_code=422, content={"error": exc.message, "hint": exc.hint})
 
     @app.exception_handler(ProfileError)
     async def _profile_error(_request: Request, exc: ProfileError) -> JSONResponse:

@@ -48,6 +48,9 @@ profile:
     # [lj] policy_type was not set, so its default "human" applied: the teleop hand-off,
     # tandem's `teleop` executor. (The *_diffusion configs are the HITL-TAMP baseline.)
     human_executor: teleop
+    # Stated for completeness and empty: teleop takes no settings, and an executor's own
+    # settings (a checkpoint path) are the rig's, so a mapping laid over them keeps them.
+    human_executor_options: {}
     # [paper] Sec. III-E: a demonstration is the recorded trajectory of every phase. A human
     # phase answered "done" without teleoperating would leave a hole in it.
     allow_unrecorded_human_phase: false
