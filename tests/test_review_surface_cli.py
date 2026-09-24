@@ -3,7 +3,6 @@
 - `tandem init` stopped on pixi and on TiPToP's disk budget before the planner was even chosen, so
   `init --yes` failed on every machine without pixi and a pure-Python planner could not be set up.
 - `init --repair` rebuilt an existing profile from the template, silently.
-- Presets could only be applied by `tandem profile create`; not by the web, not by `init`.
 - A profile for another planner was warned about TiPToP's camera extrinsics.
 - `profile migrate` crashed on an unknown name, rewrote current profiles (dropping comments, freezing
   ``${oc.env}``) and stopped at the first broken one.
@@ -14,7 +13,6 @@
 - `tandem plan` alone said --backend, and names the docs tell planner authors to import were not there.
 - pixi's consent text said it touched nothing else, while its installer edited the shell's rc file.
 - `planners new` told a pipx user to `pip install` into the wrong environment.
-- A planner's preset could override tandem's phase planning under the paper's name.
 """
 
 from __future__ import annotations
@@ -40,7 +38,6 @@ from tandem.core import settings as settings_mod
 from tandem.core.errors import ProfileError, TandemError
 from tandem.executors import base as executors
 from tandem.planners import registry
-from tandem.server.app import create_app
 
 FIXTURES = Path(__file__).parent / "fixtures" / "profiles"
 
@@ -136,31 +133,6 @@ def test_init_repair_leaves_an_existing_profile_as_it_was(isolated_env):
     assert after.hitl.enabled and after.task.prompt == "fold it"
     assert after.planner == before.planner
     assert "Created profile" not in result.output
-
-
-# --- presets, in the web (until its create takes a prompt) ---------------------------------------------
-
-
-def test_the_web_creates_a_profile_with_a_preset_and_lists_them(profile):
-    _activate(profile.name)
-    client = TestClient(create_app())
-    assert "paper" in [p["name"] for p in client.get("/api/presets").json()["presets"]]
-
-    made = client.post(
-        "/api/profiles", json={"name": "bread", "from": profile.name, "preset": "paper", "prompt": "bread in the box"}
-    )
-    assert made.status_code == 200, made.text
-    bread = profiles.load("bread")
-    assert bread.hitl.enabled and bread.planner.options["tamp"]["blend_mode"] == "vae"
-    assert bread.task.prompt == "bread in the box", "the prompt is the profile's own and wins"
-    assert made.json()["preset"]["name"] == "paper" and made.json()["preset"]["changed"]
-
-    typo = client.post("/api/profiles", json={"name": "bun", "preset": "papr"})
-    assert typo.status_code == 400 and "paper" in typo.json()["error"]
-    assert not (profiles.profiles_root() / "bun").exists()
-
-    unknown = client.post("/api/profiles", json={"name": "bun", "presett": "paper"})
-    assert unknown.status_code == 400 and "presett" in unknown.json()["error"]
 
 
 # --- the planner says what is wrong with a new profile, not TiPToP -------------------------------------------
@@ -451,28 +423,3 @@ def test_planners_new_names_the_install_for_how_tandem_is_installed(tmp_path, mo
 
     readme = (Path(planners_cli.__file__).parents[1] / "resources/scaffold/README.md.tmpl").read_text()
     assert "pipx inject tandem-tamp --editable ." in readme and "--with-editable ." in readme
-
-
-# --- a planner's preset states planner.options and nothing else -----------------------------------------------------
-
-
-def test_a_planner_preset_may_not_override_tandems_phase_planning_or_state_cameras(tmp_path):
-    from tandem.core import presets
-    from tandem.planners.testing import ConformanceError, check_presets
-
-    directory = tmp_path / "presets"
-    directory.mkdir()
-    path = directory / "paper.yml"
-    path.write_text(
-        "title: Mine\nextends: paper\nprofile:\n  hitl: {verify_final_phase: false}\n"
-        "  cameras: {perception: hand}\n  planner: {options: {items: [duck]}}\n"
-    )
-    registry.register_backend("toy", type("Toy", (ToyPlanner,), {"__module__": __name__, "presets_dir": directory}))
-    with pytest.raises(TandemError) as caught:
-        presets.load(path, origin="toy")
-    # Cameras are no profile's at all now: the rig's.
-    assert "'hitl'" in caught.value.message and "profile.cameras is not a profile setting" in caught.value.message
-    with pytest.raises(TandemError):
-        presets.available("toy")
-    with pytest.raises(ConformanceError):
-        check_presets("toy")

@@ -8,8 +8,8 @@ a twenty-second warm-up does. The session only hands over a ``BackendContext`` a
 So is everything else tandem asks of TiPToP by name: its settings checked and shown -- the task's
 ``planner.options`` (``OPTIONS``: tamp) and this machine's ``planners.tiptop`` in rig.yml
 (``RIG_OPTIONS``: robot, perception; ``options.py``, ``doctor.py``) -- its rows in `tandem doctor`, the
-rig's tiptop.yml for a command run in its runtime (`tandem runtime run calibrate-wrist-cam`), a leg
-replayed in tiptop's own viewer, and the presets it ships (``presets/``).
+rig's tiptop.yml for a command run in its runtime (`tandem runtime run calibrate-wrist-cam`), and a leg
+replayed in tiptop's own viewer.
 
 This module is imported to list planners and to read TiPToP's capabilities, both of which happen on a
 laptop. So it imports the declarations -- capabilities, runtime recipe -- and the protocol types and
@@ -206,10 +206,6 @@ class TiptopFactory:
                 f"tiptop's viewer exited with status {code} replaying {rollout_dir.name}.",
                 hint="Its own output, above, says why.",
             )
-
-    #: TiPToP's presets (`tandem profile create NAME --preset paper`): its own options for an experiment,
-    #: laid over tandem's preset of the same name where there is one (``tandem.core.presets``).
-    presets_dir = Path(__file__).parent / "presets"
 
     def create(self, ctx: BackendContext):
         """A TiptopBackend for this session, with its config rendered and its assets checked.

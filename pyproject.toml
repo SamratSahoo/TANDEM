@@ -89,15 +89,14 @@ include = ["tandem*"]
 
 # No planner sources ship in the wheel: a planner's runtime recipe fetches them, pinned, at install
 # (tandem/planners/runtime.py). What a planner package does ship is small and its own -- the patches its
-# recipe applies to the fetched trees, files no public repository has (TiPToP's two checkpoints), and
-# the presets it offers a new profile (tandem.core.presets).
+# recipe applies to the fetched trees, and files no public repository has (TiPToP's two checkpoints).
+# tandem's own resources include the paper's five tasks as profiles (resources/profiles/).
 [tool.setuptools.package-data]
 tandem = [
     "resources/**/*",
     "server/static/**/*",
     "planners/*/patches/*",
     "planners/*/assets/**/*",
-    "planners/*/presets/*",
 ]
 
 [tool.ruff]

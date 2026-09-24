@@ -4,7 +4,7 @@
   loaded it first, and a profile naming a planner or executor this machine no longer has does not load.
 - A planner whose ``validate_options`` requires a setting crashed `planners use` and `profile create
   --planner` with a pydantic traceback, and the web with a 500; and nothing could supply the setting.
-- A switch threw the old planner's options away for good -- a task's TAMP settings, a preset's -- and
+- A switch threw the old planner's options away for good -- a task's TAMP settings, the paper's -- and
   the web asked nothing and said nothing.
 - `planners use NAME --default` was the hint for "set the default", and also switched and emptied the
   active profile.
@@ -30,7 +30,7 @@ from typer.testing import CliRunner
 from tandem.cli import executors as executors_cli
 from tandem.cli import planners as planners_cli
 from tandem.cli.app import app
-from tandem.core import paths, presets, profiles
+from tandem.core import paths, profiles
 from tandem.core import settings as settings_mod
 from tandem.core.errors import ProfileError, TandemError
 from tandem.executors import base as executors
@@ -268,13 +268,17 @@ def test_switching_away_and_back_restores_the_tasks_settings(active):
     assert not stash.exists(), "restored, so no longer set aside"
 
 
-def test_the_paper_presets_settings_survive_a_round_trip_through_the_web(active):
+def test_a_paper_tasks_settings_survive_a_round_trip_through_the_web(active):
     registry.register_backend("pure", FakeFactory("pure"))
-    profiles.save(presets.apply(active, "paper"))
+    profiles.seed_builtins()
+    name = "store-bread-in-closed-box"
+    before = profiles.load(name).planner.options
     client = TestClient(create_app())
-    assert client.post("/api/planners/pure/use", json={"profile": active.name}).status_code == 200
-    assert client.post("/api/planners/tiptop/use", json={"profile": active.name}).status_code == 200
-    assert profiles.load(active.name).planner.options["tamp"]["vae_manifold_weight"] == 25000
+    assert client.post("/api/planners/pure/use", json={"profile": name}).status_code == 200
+    assert client.post("/api/planners/tiptop/use", json={"profile": name}).status_code == 200
+    after = profiles.load(name).planner.options
+    assert after == before and after["tamp"]["vae_manifold_weight"] == 25000
+    assert after["tamp"]["placement_support"] is True, "its own placement settings too"
 
 
 def test_a_stash_the_planner_no_longer_accepts_is_kept_and_said_not_raised(active):

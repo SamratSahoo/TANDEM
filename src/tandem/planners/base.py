@@ -783,8 +783,6 @@ class BackendFactory(Protocol):
       Default: nothing.
     - ``replay(rollout_dir, *, settings=None) -> None``: open a recorded leg in the planner's own
       viewer (`tandem traj open`). Default: refused, saying the planner has none.
-    - ``presets_dir``: a directory of ``<name>.yml`` presets for this planner's ``planner.options``
-      (`tandem profile create --preset NAME`; the layout is in ``tandem.core.presets``). Default: None.
     """
 
     info: PlannerInfo

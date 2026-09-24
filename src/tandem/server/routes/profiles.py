@@ -149,31 +149,13 @@ async def set_active(body: ActivateBody) -> dict:
 
 
 #: What POST /profiles reads. Anything else is refused rather than dropped: a field the page sends and
-#: the server ignores (a preset, once) is a setting the person chose and never got.
-CREATE_KEYS = ("name", "from", "prompt", "preset")
-
-
-@router.get("/presets")
-async def list_presets(planner: str | None = None) -> dict:
-    """The presets a new profile can be created with, for the planner it will plan with.
-
-    What `tandem profile presets --json` prints. The planner is the machine's default unless named.
-    """
-    from tandem.cli import planners as planners_cli
-    from tandem.core import presets
-
-    chosen = planners_cli.planner_for_new_profile(planner)
-    rows = []
-    for preset_name, preset in sorted(presets.available(chosen).items()):
-        stack = presets.layers(preset_name, chosen)
-        rows.append({**preset.to_dict(), "layers": [layer.origin for layer in stack]})
-    return {"planner": chosen, "presets": rows}
+#: the server ignores is a setting the person chose and never got.
+CREATE_KEYS = ("name", "from", "prompt")
 
 
 @router.post("/profiles")
 async def create_profile(body: dict[str, Any] = Body(...)) -> dict:
     from tandem import resources
-    from tandem.core import presets
 
     unknown = sorted(set(body) - set(CREATE_KEYS))
     if unknown:
@@ -202,22 +184,7 @@ async def create_profile(body: dict[str, Any] = Body(...)) -> dict:
         # options when the template already names that planner.
         chosen = planners_cli.planner_for_new_profile()
         if profile.planner.backend != chosen:
-            if body.get("preset"):
-                # Its own preset may supply what the planner requires; apply() validates the result.
-                profile.planner = profiles_mod.PlannerSpec.model_construct(backend=chosen, options={})
-            else:
-                profile.planner = profiles_mod.planner_spec(chosen, profile=name)
-
-    # As `tandem profile create --preset` lays one: after the base and its planner are settled, before the
-    # prompt, which is this profile's own. An unknown name is a TandemError (400) naming the nearest.
-    changes: dict = {}
-    caution: list[str] = []
-    preset = body.get("preset")
-    if preset:
-        before = profile
-        profile = presets.apply(profile, str(preset))
-        changes = presets.differences(before.model_dump(mode="python"), profile.model_dump(mode="python"))
-        caution = [line for layer in presets.layers(str(preset), profile.planner.backend) for line in layer.caution]
+            profile.planner = profiles_mod.planner_spec(chosen, profile=name)
 
     if body.get("prompt"):
         profile.task.prompt = str(body["prompt"])
@@ -233,14 +200,7 @@ async def create_profile(body: dict[str, Any] = Body(...)) -> dict:
     profiles_mod.save(profile)
 
     cfg = settings_mod.load()
-    card = _card(name, cfg.active_profile)
-    if preset:
-        card["preset"] = {
-            "name": str(preset),
-            "changed": {key: [old, new] for key, (old, new) in changes.items()},
-            "caution": caution,
-        }
-    return card
+    return _card(name, cfg.active_profile)
 
 
 @router.delete("/profiles/{name}")

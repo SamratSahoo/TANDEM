@@ -108,6 +108,38 @@ def test_a_built_in_profile_holds_nothing_of_the_machine(name):
     assert raw["version"] == profiles.LAYOUT_VERSION and "name" not in raw
 
 
+@pytest.mark.parametrize("name", [*PAPER, "template"])
+def test_the_vae_checkpoint_is_the_one_tandem_ships_where_the_runtime_puts_it(name, tmp_path):
+    # vae_path is relative: render finds it in the runtime, where the recipe puts the checkpoint the wheel
+    # ships. A path that drifted from the recipe's would be "vae_path does not exist" on every machine.
+    from tandem.core.rig import Rig
+    from tandem.planners.tiptop import render
+    from tandem.planners.tiptop.options import resolve
+    from tandem.planners.tiptop.recipe import RECIPE
+
+    profile = _template() if name == "template" else _builtin(name)
+    vae = next(asset for asset in RECIPE.assets if asset.source.name == "vae_full_v2.pt")
+    assert profile.planner.options["tamp"]["vae_path"] == vae.dest
+    runtime = tmp_path / "runtime"
+    (runtime / vae.dest).parent.mkdir(parents=True)
+    (runtime / vae.dest).write_bytes(b"")
+    options = resolve(Rig(), {}, profile.planner.options)
+    rendered = render.render_tamp_overrides(profile, options, runtime_dir=runtime)
+    assert rendered["vae_path"] == str((runtime / vae.dest).resolve())
+
+
+@pytest.mark.parametrize("name", [*PAPER, "template"])
+def test_a_built_in_profile_raises_none_of_tiptops_warnings(name, machine_rig):
+    # None of check_assets' "this knob does nothing without that one" warnings: each is internally
+    # consistent. (The checkpoint is only there once a runtime is built.)
+    from tandem.planners.tiptop import render
+    from tandem.planners.tiptop.options import resolve_profile
+
+    profile = _template() if name == "template" else _builtin(name)
+    problems = render.check_assets(profile, machine_rig, resolve_profile(profile, machine_rig))
+    assert [p for p in problems if "vae_path does not exist" not in p] == []
+
+
 @pytest.mark.parametrize("name", list(PAPER))
 def test_a_built_in_profile_says_which_task_it_is_and_where_its_values_came_from(name):
     title, number, source = PAPER[name]

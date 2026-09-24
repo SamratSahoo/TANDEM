@@ -188,14 +188,6 @@ function createDialog(state, refresh) {
   const fromSelect = h("select",
     h("option", { value: "" }, "built-in template"),
     ...state.profiles.filter((p) => p.valid).map((p) => h("option", { value: p.name }, `copy of ${p.name}`)));
-  // The presets `tandem profile create --preset` offers, for the planner a new profile gets. Filled once
-  // the server answers; "none" until then, which is also what a failure to list them leaves.
-  const presetSelect = h("select", h("option", { value: "" }, "none"));
-  api.presets().then((payload) => {
-    for (const preset of payload.presets || []) {
-      presetSelect.appendChild(h("option", { value: preset.name }, `${preset.name} — ${preset.title}`));
-    }
-  }).catch(() => {});
 
   const scrim = h("div.drawer-scrim", { onclick: close });
   const panel = h("div.card", {
@@ -209,8 +201,6 @@ function createDialog(state, refresh) {
     h("div.field", h("label", "Name"), nameInput,
       h("div.desc", "Lowercase letters, digits, - and _. This is also the directory name.")),
     h("div.field", h("label", "Start from"), fromSelect),
-    h("div.field", h("label", "Preset"), presetSelect,
-      h("div.desc", "Settings laid over it, such as the paper's (`tandem profile presets` lists them).")),
     h("div.field", h("label", "Task"), promptInput),
     h("div.row",
       h("button.primary", { onclick: create }, "Create"),
@@ -226,14 +216,9 @@ function createDialog(state, refresh) {
       const created = await api.createProfile({
         name: nameInput.value.trim(),
         from: fromSelect.value || null,
-        preset: presetSelect.value || null,
         prompt: promptInput.value.trim() || null,
       });
-      const laid = created && created.preset;
-      toast.ok(`Created ${nameInput.value.trim()}`,
-        laid ? `Preset ${laid.name}: ${Object.keys(laid.changed || {}).length} setting(s) changed.` : undefined);
-      // What the preset's authors said a person must know before the arm moves.
-      for (const line of (laid && laid.caution) || []) toast.info(`Preset ${laid.name}`, line);
+      toast.ok(`Created ${created.name}`);
       close();
       refresh();
     } catch (error) {

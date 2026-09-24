@@ -349,10 +349,9 @@ def not_plain_data(value: Any, path: str = "options") -> list[str]:
 # --------------------------------------------------------------------------- the optional hooks
 #
 # What tandem asks a planner beyond building its backend: how to show its options, what `tandem doctor`
-# should check for it, what a command in its runtime needs of the rig, how to replay a leg it recorded,
-# which presets it ships. Each is asked through
-# here, by name, so no command has to know which planner it is talking to -- and each has a default for
-# a factory that does not answer it (see BackendFactory).
+# should check for it, what a command in its runtime needs of the rig, how to replay a leg it recorded.
+# Each is asked through here, by name, so no command has to know which planner it is talking to -- and
+# each has a default for a factory that does not answer it (see BackendFactory).
 
 
 def describe_options(name: str, profile: Any, *, settings: Any = None) -> OptionsView:
@@ -443,12 +442,6 @@ def replay(name: str, rollout_dir: Any, *, settings: Any = None) -> None:
             hint="`tandem ui` shows every trajectory's cameras and robot state, whichever planner recorded it.",
         )
     hook(rollout_dir, settings=settings)
-
-
-def presets_dir(name: str) -> Path | None:
-    """The directory of presets the planner ``name`` ships (``tandem.core.presets``), or None when it ships none."""
-    found = getattr(factory(name), "presets_dir", None)
-    return Path(found) if found is not None else None
 
 
 def tools_dir(name: str, settings: Any = None) -> Path | None:
