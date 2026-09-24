@@ -304,19 +304,20 @@ def test_an_executor_that_raises_ends_the_trial_at_human_policy_on_the_record(ri
 def test_an_execute_that_raises_is_a_tamp_execution_failure_and_its_leg_is_still_counted(rig):
     """The arm moved and recorded before the planner died: its leg, stamped, is on disk."""
     r = rig(backend_kwargs={"execute_raises": {1: BackendError("the sidecar died mid-leg")}})
-    with pytest.raises(BackendError):
-        r.run()
-    outcome = r.loop.outcome
+    # Ended in the loop rather than raised on (`PhaseLoop._planner_raised`), so the session knows to
+    # warm the planner again before the next task.
+    outcome = r.run()
     assert (outcome.outcome, outcome.failure_stage) == ("failure", "tamp_execution")
     assert "the sidecar died mid-leg" in outcome.reason
+    assert outcome.planner_raised
     assert outcome.legs_recorded == 3, "the robot's first leg, the person's, and the one that crashed"
 
 
 def test_a_perceive_that_raises_is_a_tamp_planning_failure(rig):
     r = rig(backend_kwargs={"perceive_raises": {1: BackendError("the camera went away")}})
-    with pytest.raises(BackendError):
-        r.run()
-    assert (r.loop.outcome.outcome, r.loop.outcome.failure_stage) == ("failure", "tamp_planning")
+    outcome = r.run()
+    assert (outcome.outcome, outcome.failure_stage) == ("failure", "tamp_planning")
+    assert outcome.planner_raised
 
 
 def test_a_preempt_still_unwinds_with_the_outcome_left_to_whoever_catches_it(rig):

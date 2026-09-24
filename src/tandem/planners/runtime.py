@@ -1429,8 +1429,18 @@ def _git(args: list[str], *, what: str = "", check: bool = True) -> subprocess.C
 
 
 def _stream(cmd: list[str], *, cwd: Path, env: dict, log: Log | None, what: str) -> None:
+    # Decoded leniently: a compiler or a conda post-link script that prints one byte of Latin-1 raised
+    # UnicodeDecodeError here, half-way through `tandem planners install`, with the build still running.
     proc = subprocess.Popen(
-        cmd, cwd=str(cwd), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
+        cmd,
+        cwd=str(cwd),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="backslashreplace",
+        bufsize=1,
     )
     assert proc.stdout is not None
     for line in proc.stdout:

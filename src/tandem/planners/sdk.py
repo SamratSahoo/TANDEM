@@ -25,6 +25,10 @@ means twelve members, a factory beside them, and a dozen conventions that exist 
             predicate_descriptions={"InBin": "{0} is inside {1}"},
             checkable_predicates=frozenset({"InBin"}),
             moved_arguments={"InBin": 0},
+            # What the solver assumes (see Capabilities): each robot phase its own leg, and an item
+            # may be dropped more than once in one plan.
+            initial_state_is_clean=False,
+            one_pick_per_object=False,
         )
 
         def perceive(self, *, task_hint, save_dir, reset_arm=True, open_gripper=False) -> SceneView: ...
@@ -173,6 +177,16 @@ def capability_problems(caps: Any) -> list[str]:
         for parameter in predicate.parameters:
             if not parameter.type:
                 problems.append(f"{key}'s parameter {parameter.name!r} has no type")
+            elif parameter.type not in (caps.movable_type, caps.surface_type):
+                # tandem types every perceived object as exactly one of the two (SceneTypes), and a
+                # proposal's atom is grounded by comparing that type with the parameter's. A third type
+                # names no object in any scene, so every atom over this predicate would be refused and
+                # every trial would end at invention -- with the prompt still advertising it.
+                problems.append(
+                    f"{key}'s parameter ?{parameter.name} is a {parameter.type!r}, but tandem types every "
+                    f"perceived object as either {caps.movable_type!r} (movable_type) or "
+                    f"{caps.surface_type!r} (surface_type), so no atom over {key} could ever be grounded"
+                )
         predicates[key] = predicate
     names = set(predicates)
 
@@ -287,9 +301,9 @@ def capability_problems(caps: Any) -> list[str]:
     if isinstance(operators, str) or not isinstance(operators, Sequence):
         problems.append("robot_operators must be a tuple of signatures such as 'Pick(?obj: movable)'")
         operators = ()
-    known_types = {caps.movable_type, caps.surface_type} | {
-        parameter.type for predicate in predicates.values() for parameter in predicate.parameters
-    }
+    # The two object types there are, for the reason given above: an operator over a third would be a
+    # record of something no scene could ever hand the planner.
+    known_types = {caps.movable_type, caps.surface_type}
     for signature in operators:
         problem = _operator_problem(signature, known_types)
         if problem:
@@ -370,8 +384,8 @@ def _operator_problem(signature: Any, known_types: set[str]) -> str | None:
     for _, type_name in parameters:
         if type_name not in known_types:
             return (
-                f"robot_operators entry {signature!r} uses the type {type_name!r}, which is none of "
-                f"the declared types ({', '.join(sorted(known_types))})"
+                f"robot_operators entry {signature!r} uses the type {type_name!r}, which is neither "
+                f"of the two object types ({', '.join(sorted(known_types))}: movable_type and surface_type)"
             )
     return None
 
@@ -604,7 +618,12 @@ class Planner(abc.ABC):
             )
 
     def warm(self) -> None:
-        """Open whatever the planner holds and build its solvers. Nothing, by default."""
+        """Open whatever the planner holds and build its solvers. Nothing, by default.
+
+        Called when the session starts, and again after one of the planner's verbs raised, before the
+        next task: that is where a planner reopens what it lost (``SidecarPlanner`` relaunches a
+        sidecar that died). So on a planner that is already warm it must do nothing.
+        """
         return None
 
     def close(self) -> None:
@@ -715,11 +734,13 @@ class Planner(abc.ABC):
         reads). When ``leg.record`` is set, ``save_dir`` must end up holding:
 
         - ``_meta.json`` with ``trajectory_id`` and ``segment_source`` copied from ``leg`` (this is how
-          merging finds a task's legs), ``phase_index``, ``n_phases`` and ``phase_description`` when
+          merging finds a task's legs), ``instruction`` copied from ``leg`` (the dataset's language
+          label: nothing else stamps it), ``phase_index``, ``n_phases`` and ``phase_description`` when
           ``leg.phase_index`` is not None, ``record_start``/``record_stop`` (seconds; legs are ordered
           by them), ``fps``, and ``cameras``: a dataset key -> clip file name map;
         - ``robot_state.npz`` with every array in ``tandem.core.merge.STATE_KEYS``, one row per frame,
-          plus optionally ``OPTIONAL_STATE_KEYS``, and nothing else;
+          plus optionally ``OPTIONAL_STATE_KEYS``, and nothing else: joint arrays ``[F,7]``, gripper
+          arrays ``[F]``, ``frame_time`` float64 (docs/ADDING_A_PLANNER.md has the table);
         - the camera clips ``cameras`` names (or at least one of ``trajectories.CAMERA_FILES``). Every
           clip is named from ``trajectories.CAMERA_FILES``: those are the names the merge joins (with
           a person's legs, which always use them), the viewer lists and the export decodes.

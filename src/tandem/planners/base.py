@@ -55,7 +55,11 @@ class Capabilities:
     # object up and place it on a surface", not the planner's real operator signatures. Those carry
     # motion-level parameters (conf, traj, grasp) and bookkeeping predicates that a proposer has no
     # business reasoning about, and shown them it writes goals over the alternation lock.
-    robot_description: str = "pick an object up and place it on a surface"
+    #
+    # No default. It used to default to TiPToP's sentence, so a planner that left it out had the
+    # proposer told its robot picks and places whatever it really does. Empty is refused when a
+    # Planner class is defined (``sdk.capability_problems``) and by the conformance kit.
+    robot_description: str = ""
 
     # How each goal predicate is spelled on the wire. tiptop's create_tamp_environment reads
     # lowercase {"predicate": "on", "args": [...]}, so this is {"On": "on", "Holding": "holding"}.
@@ -75,7 +79,10 @@ class Capabilities:
     reserved_predicate_names: frozenset[str] = frozenset()
 
     # Object types, and which is which. A `surface` is something other things are put ON; a
-    # `movable` is something the robot can pick up.
+    # `movable` is something the robot can pick up. They are the ONLY two: tandem types every
+    # perceived object as one or the other for a whole task (``planning.structs.SceneTypes``), so every
+    # parameter of a goal predicate, and of a robot operator, must be typed with one of them. A third
+    # type would name no object in any scene, and no atom over it could ever be grounded.
     movable_type: str = "movable"
     surface_type: str = "surface"
 
@@ -91,13 +98,18 @@ class Capabilities:
 
     # True when one plan may pick each object at most once (cuTAMP's Pick requires and DELETES
     # HasNotPickedUp). It makes `On(toy, table) and On(toy, shelf)` unsatisfiable rather than merely
-    # slow, so two phases that move the same object must stay separate legs.
+    # slow, so two phases that move the same object must stay separate legs. True is the safe
+    # default: it only ever splits a run of robot phases further (``feasibility.conjoinable_run``).
     one_pick_per_object: bool = True
 
     # True when every goal is planned from the same clean state — no `On` atom in the initial state,
     # so nothing symbolic enforces an ordering BETWEEN two robot phases and consecutive ones may be
-    # conjoined into a single goal.
-    initial_state_is_clean: bool = True
+    # conjoined into a single goal (one perception pass, the atoms sorted, the proposer's order
+    # between them gone). A PROMISE a planner makes about its solver, as cuTAMP does through TiPToP's
+    # declaration -- not a default. It used to default to True, which silently conjoined the robot
+    # phases of every planner that left it out, a planner that executes goal atoms in order or keeps
+    # state between legs included. False is the safe reading: every robot phase is its own leg.
+    initial_state_is_clean: bool = False
 
     # Whether execute() honours should_stop at step boundaries. False means preempt is abort.
     supports_cooperative_stop: bool = False

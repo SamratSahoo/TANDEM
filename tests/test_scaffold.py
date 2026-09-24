@@ -82,8 +82,11 @@ def test_a_new_planner_package_passes_the_conformance_kit_as_written(tmp_path, k
     assert result.returncode == 0, output
     assert _count(output, "failed") == 0 and _count(output, "error") == 0, output
     # The kit's lifecycle, scene, plan, leg, stop and custody checks all ran and passed; what it skips
-    # is only what the stub does not declare (a restriction, ending away from home, a camera frame).
-    assert _count(output, "passed") >= 8, output
+    # is only what the stub does not declare (a restriction, ending away from home). Never the camera
+    # frame or the perception image: phase planning needs both, and the kit requires both by default.
+    assert _count(output, "passed") >= 9, output
+    assert "cannot capture a frame" not in output, output
+    assert "phase_planning" not in output and "verifies_human_phases" not in output, output
     if script:
         assert "no sidecar script" not in output, "the sidecar script itself was checked"
 

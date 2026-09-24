@@ -492,7 +492,7 @@ def create(name: str, ctx: ExecutorContext) -> HumanExecutor:
         executor = factory.create(ctx)
     except TandemError:
         raise
-    except Exception as exc:
+    except (Exception, SystemExit) as exc:
         raise TandemError(
             f"Could not build the human executor {name!r} ({origin}): {type(exc).__name__}: {exc}"
         ) from exc
@@ -628,7 +628,9 @@ def _load(name: str, target: Any, origin: str) -> Any:
         obj: Any = import_module(module_name)
         for part in attribute.split("."):
             obj = getattr(obj, part)
-    except Exception as exc:
+    # SystemExit by name: a module that parses argv at import exits, and caught as nothing it took the
+    # whole `tandem executors list` down with it. Not BaseException, so Ctrl-C still stops the command.
+    except (Exception, SystemExit) as exc:
         raise TandemError(
             f"The human executor {name!r} ({origin}) could not be loaded from {target}: "
             f"{type(exc).__name__}: {exc}",

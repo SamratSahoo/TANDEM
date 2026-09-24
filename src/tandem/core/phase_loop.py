@@ -181,6 +181,10 @@ class TrialOutcome:
     # first plan, one more for each replan). A replanned proposal numbers its phases from 0 again, so
     # a leg's phase index alone no longer says which phase it was; (generation, index) does.
     leg_generations: dict[str, int] = field(default_factory=dict)
+    # The planner RAISED during the attempt -- perceive, plan or execute -- rather than answering. A
+    # sidecar that crashed or was stopped for not answering is not running any more, so the session
+    # warms the planner again before the next task (``Planner.warm`` relaunches a dead sidecar).
+    planner_raised: bool = False
 
 
 @dataclass
@@ -395,6 +399,8 @@ class PhaseLoop:
                 leg_dir = self.legs.new()
                 try:
                     scene = self._perceive(leg_dir, first_leg=leg == 0)
+                    if scene is None:
+                        break  # the planner raised; `_perceive` has ended the attempt
                     if self._plan is None:
                         # Also re-run with phase planning OFF, where it refreshes the planner's own
                         # goal from THIS pass's object labels -- the previous pass's labels may not
@@ -553,8 +559,11 @@ class PhaseLoop:
         else:
             self._run_robot_phase(scene, leg_dir)
 
-    def _perceive(self, leg_dir: Path, *, first_leg: bool) -> SceneView:
+    def _perceive(self, leg_dir: Path, *, first_leg: bool) -> SceneView | None:
         """Look at the workspace. The arm is only parked first when nothing is mid-task.
+
+        None when the planner raised instead of answering; the attempt has then been ended
+        (``_planner_raised``).
 
         Resetting between phases would undo the step before it — and after a hand-off it could
         drive an arm a person just handed us, holding something, back to home.
@@ -581,12 +590,32 @@ class PhaseLoop:
                 **options,
             )
         except Exception as exc:
-            # Recorded at its stage before it goes on up (`_failed`): legs already on disk are filed
-            # by what this says, and without it a trial whose planner died reads as one that ran.
-            self._failed("tamp_planning", f"the {self.caps.name} planner could not perceive the scene", exc)
-            raise
+            what = f"the {self.caps.name} planner could not perceive the scene"
+            self._planner_raised("tamp_planning", what, exc)
+            return None
         self.events.log(f"perceived: {', '.join(scene.object_labels) or 'nothing'}")
         return scene
+
+    def _planner_raised(self, stage: str, what: str, exc: Exception) -> None:
+        """End the trial over a planner verb that raised instead of answering.
+
+        A sidecar that crashed (its exit code in the message), or that did not answer in time and was
+        stopped, raises here -- the likeliest way a real planner fails mid-trial. It used to unwind
+        straight out of the loop: no stage, no reason, no record, and the session then sent whatever
+        legs had reached disk to the label prompt as though the trial had simply ended, so a
+        demonstration that stopped half-way could be labelled a success and exported.
+
+        Not routed through ``on_robot_phase_failure``: a planner that raised is not a goal it could
+        not plan, and neither teleop (which hands the planner's hardware over) nor a re-plan (which
+        perceives through it) can be served by a backend that may not be running. Only the backend's
+        own calls are guarded; a preempt or a custody failure comes from elsewhere and still unwinds.
+        """
+        reason = f"{what}: {type(exc).__name__}: {exc}"
+        self.events.log(f"{reason}; ending this attempt")
+        self.outcome.planner_raised = True
+        self._plan = None
+        self._task_done = True
+        self._end("failure", stage, reason)
 
     def _prepare_plan(self, scene) -> bool:
         """Decompose the task into phases, or fall through to the planner's own goal.
@@ -765,8 +794,10 @@ class PhaseLoop:
         try:
             result = self.backend.plan(scene.scene_id, goal, surfaces=surfaces, save_dir=save_dir, **options)
         except Exception as exc:
-            self._failed("tamp_planning", f"the {self.caps.name} planner failed planning {description!r}", exc)
-            raise
+            self._planner_raised(
+                "tamp_planning", f"the {self.caps.name} planner failed while planning {description!r}", exc
+            )
+            return
 
         if not result.ok:
             self._on_plan_failure(result.failure_reason or "no plan found", run)
@@ -798,13 +829,15 @@ class PhaseLoop:
                 **cooperative,
             )
         except Exception as exc:
-            # The arm may have moved and recorded before the planner died. A leg its recorder already
-            # stamped is a leg on disk (the rule `LegDirs.retire` applies), and it must be filed with
-            # the rest rather than left unmerged because the count said nothing reached disk.
+            # A robot execution failure, like any other: the plan never advances (`_execution_failed`).
+            # The planner may have stamped the leg before it went -- the contract asks it to stamp
+            # first -- and a stamped leg is kept on disk (`LegDirs.retire`), so it is counted: filing is
+            # what joins it to the trial's other legs, instead of leaving it an episode of its own.
             if (Path(save_dir) / "_meta.json").is_file():
                 self._leg_recorded(1, save_dir)
-            self._failed("tamp_execution", f"the robot could not carry out {description!r}", exc)
-            raise
+            self.outcome.planner_raised = True
+            self._execution_failed(f"the planner raised {type(exc).__name__}: {exc}", description)
+            return
         self.operator.rollout_saved(execution.n_frames)
         self._leg_recorded(execution.n_frames, save_dir)
         self.events.event("rollout_saved", dir=str(save_dir), n_frames=execution.n_frames)
@@ -915,11 +948,13 @@ class PhaseLoop:
         self._end("failure", "tamp_execution", reason)
 
     def _failed(self, stage: str, what: str, exc: BaseException) -> None:
-        """Record an attempt a planner verb or a human executor ended by raising, at its stage.
+        """Record an attempt a human executor ended by raising, at its stage.
 
         The caller raises the error on afterwards, so the session's own error path still runs. What
         this adds is the record: the stage the paper's Fig. 4 counts it under, on the outcome and the
-        plan, and a reason in the log before anyone is asked anything about the trial.
+        plan, and a reason in the log before anyone is asked anything about the trial. A planner verb
+        that raised is ended in the loop instead (`_planner_raised`), because the session has to know
+        to warm that planner again.
         """
         reason = f"{what}: {type(exc).__name__}: {exc}"
         self.events.log(f"{reason}; ending this attempt")

@@ -72,6 +72,35 @@ _NAME = names.NAME
 #: What an unknown name's hint points at: the listing that shows every planner, broken ones included.
 LIST_COMMAND = "tandem planners list"
 
+# What loading a plugin may raise and still be only that plugin's problem. SystemExit by name, because
+# it is not an Exception: a module that parses argv at import (absl, hydra, a stray argparse) exits,
+# and caught as nothing it took the whole listing -- every other planner and the reason for this one
+# -- down with it. Not BaseException: Ctrl-C must still stop the command.
+_LOAD_ERRORS = (Exception, SystemExit)
+
+
+def _site_dirs() -> list[str]:
+    """Every site-packages directory this interpreter reads .pth files from."""
+    import site
+
+    dirs = list(site.getsitepackages()) if hasattr(site, "getsitepackages") else []
+    if site.ENABLE_USER_SITE:
+        dirs.append(site.getusersitepackages())
+    return dirs
+
+
+def _pth_files(directory: str) -> set[str]:
+    try:
+        return {p.name for p in Path(directory).glob("*.pth")}
+    except OSError:
+        return set()
+
+
+# The .pth files each site directory held when tandem started, so that only ones installed since are
+# ever processed here (``_pick_up_new_site_paths``). Re-reading one site.py already ran would re-run
+# its `import` lines -- coverage hooks, virtualenv shims -- for nothing.
+_STARTUP_PTH: dict[str, set[str]] = {d: _pth_files(d) for d in _site_dirs()}
+
 # What the session calls on a backend. A factory that returns something missing one of these fails at
 # create() with the list, rather than at the first human phase with an AttributeError.
 _BACKEND_MEMBERS = (
@@ -248,7 +277,7 @@ def doctor_checks(name: str, profile: Any, *, settings: Any = None, probe_hardwa
         return []
     try:
         checks = list(hook(profile, settings=settings, probe_hardware=probe_hardware))
-    except Exception as exc:
+    except _LOAD_ERRORS as exc:
         message = exc.message if isinstance(exc, TandemError) else f"{type(exc).__name__}: {exc}"
         return [
             probe.Check(
@@ -410,7 +439,7 @@ def catalog() -> list[CatalogEntry]:
             entries.append(CatalogEntry(name, origin, info=_materialise(name, origin, source).info))
         except TandemError as exc:
             entries.append(CatalogEntry(name, _origin_of(name), error=_one_line(exc)))
-        except Exception as exc:  # a factory whose `info` raises is still only its own problem
+        except _LOAD_ERRORS as exc:  # a factory whose `info` raises (or exits) is still only its own problem
             entries.append(CatalogEntry(name, _origin_of(name), error=f"{type(exc).__name__}: {exc}"))
         # A plugin that loses to a registered or built-in planner of the same name. Listed rather than
         # dropped, so "why is my plugin not used" has an answer; tandem's own entry point for a
@@ -481,11 +510,20 @@ def _materialise(name: str, origin: str, source: Any) -> BackendFactory:
         return cached[1]
 
     try:
-        loaded = loader()
-    except Exception as exc:
+        try:
+            loaded = loader()
+        except ModuleNotFoundError:
+            # An editable install (`pip install -e .`, as the scaffold says) puts its package on the path
+            # through a .pth file, which only site.py reads, at interpreter startup. Installed while this
+            # process runs (`tandem ui`), the entry point is listed but its module is not importable, and
+            # the planner reads as broken. Read the .pth files installed since, and try once more.
+            if not (isinstance(source, importlib.metadata.EntryPoint) and _pick_up_new_site_paths()):
+                raise
+            loaded = loader()
+    except _LOAD_ERRORS as exc:
         raise TandemError(
             f"The planner backend {name!r} could not be loaded: {type(exc).__name__}: {exc}",
-            hint=_load_hint(origin, target),
+            hint=_load_hint(origin, target, exc),
         ) from exc
 
     if isinstance(loaded, type) and _is_planner_class(loaded):
@@ -503,7 +541,7 @@ def _materialise(name: str, origin: str, source: Any) -> BackendFactory:
     elif isinstance(loaded, type):
         try:
             loaded = loaded()
-        except Exception as exc:
+        except _LOAD_ERRORS as exc:
             raise TandemError(
                 f"The planner backend {name!r} could not be loaded: {target} is a class, and building "
                 f"it with no arguments failed: {type(exc).__name__}: {exc}",
@@ -604,11 +642,44 @@ def _origin_of(name: str) -> str:
     return "unknown"
 
 
-def _load_hint(origin: str, target: str) -> str:
+def _pick_up_new_site_paths() -> bool:
+    """Read the .pth files installed into a site directory since tandem started. True if there were any.
+
+    What site.py would have done for them at startup: their directories go on ``sys.path`` (and their
+    `import` lines run), once each -- a file read here joins the snapshot, and is not read again.
+    """
+    import os
+    import site
+    import sys
+
+    found = False
+    # Spelled as site.py spells what it has already added, so a directory on the path is not added twice.
+    known = {os.path.normcase(os.path.abspath(p)) for p in sys.path if p}
+    for directory in _site_dirs():
+        seen = _STARTUP_PTH.setdefault(directory, set())
+        for name in sorted(_pth_files(directory) - seen):
+            seen.add(name)
+            found = True
+            try:
+                site.addpackage(directory, name, known)
+            except Exception:  # addpackage reports a bad line itself; one bad file must not stop the rest
+                continue
+    if found:
+        importlib.invalidate_caches()
+    return found
+
+
+def _load_hint(origin: str, target: str, exc: BaseException | None = None) -> str:
     if origin.startswith("entry point"):
+        restart = (
+            "If it was installed after this tandem process started, restart it (`tandem ui`): a package "
+            "put on the path at startup, as some installs are, is not seen until then. Otherwise reinstall "
+            if isinstance(exc, ModuleNotFoundError)
+            else "Reinstall "
+        )
         return (
             f"It is registered by an installed package's {GROUP!r} entry point ({origin}, {target}). "
-            "Reinstall that package, or uninstall it if you no longer use this planner."
+            f"{restart}that package, or uninstall it if you no longer use this planner."
         )
     if origin == "built-in":
         return "This planner ships with tandem, so the install looks broken. Reinstall tandem-tamp."

@@ -34,15 +34,17 @@ What this class does, so a planner does not have to:
 - **streams** the sidecar's log lines and stderr into the session log, and its events into the
   session's events file;
 - **times out** every verb (``TIMEOUTS``), reporting a wedged sidecar as one that may still hold
-  the robot; reports a crash with its exit code; and starts a fresh sidecar at the next ``warm()``
-  after one has died;
+  the robot and then stopping it, with every process it started, so it holds nothing; reports a
+  crash with its exit code; and starts a fresh sidecar at the next ``warm()`` after one has died or
+  been stopped (``warm()`` on a sidecar running and warm does nothing, so it is safe to call again);
 - **stops cooperatively** when the capabilities declare ``supports_cooperative_stop``: while an
   execution runs, ``should_stop`` is polled here and a stop is passed to the sidecar as a file whose
   existence ``tandem_sidecar.should_stop()`` reports -- no second request in flight, which the
   protocol does not have;
 - **holds custody** the way the protocol needs: ``release_hardware``/``reacquire_hardware`` are
   requests with their own generous timeout, and ``close`` asks the sidecar to quit, then makes sure
-  the whole process group has gone, so nothing is left holding a camera.
+  the whole process group has gone, so nothing is left holding a camera -- also when the sidecar
+  exited by itself, or crashed, and left helpers of its own behind.
 
 TiPToP's backend is this class plus TiPToP's own launch details (``tandem/planners/tiptop/backend.py``).
 """
@@ -105,7 +107,8 @@ class SidecarPlanner(Planner, abstract=True):
     settings when it warms.
     """
 
-    #: The sidecar script: absolute, or relative to the directory of the module defining the class.
+    #: The sidecar script: absolute, or relative to the directory of the module defining the class --
+    #: or to the working directory, for a class defined with no module file (a notebook, `python -c`).
     SIDECAR: ClassVar[str] = ""
     #: Per-verb timeouts in seconds, over DEFAULT_TIMEOUTS.
     TIMEOUTS: ClassVar[Mapping[str, float]] = {}
@@ -124,8 +127,11 @@ class SidecarPlanner(Planner, abstract=True):
         script = cls.sidecar_script()
         if not script.is_file():
             raise TandemError(
-                f"{cls.__module__}.{cls.__qualname__}'s sidecar script {script} does not exist.",
-                hint="SIDECAR is resolved against the directory of the module that defines the class.",
+                f"{cls.__module__}.{cls.__qualname__}'s sidecar script {script} does not exist "
+                f"(SIDECAR {cls.SIDECAR!r}, resolved against {cls._sidecar_base()}).",
+                hint="SIDECAR is resolved against the directory of the module that defines the class, or "
+                "against the working directory for a class defined where there is no module file (a "
+                "notebook, `python -c`). An absolute path is used as it is.",
             )
 
     def __init__(
@@ -147,6 +153,8 @@ class SidecarPlanner(Planner, abstract=True):
         self._runtime = type(self).runtime(self.settings) if runtime is _UNSET else runtime
         self._env = env
         self._channel: rpc.HostedBackendChannel | None = None
+        # The channel whose sidecar has been warmed, so warm() on it again is a no-op (see warm).
+        self._warmed: rpc.HostedBackendChannel | None = None
         self._stop_dir: Path | None = None
 
     # ---- launching: override what the defaults get wrong for a planner ---------------------------
@@ -156,13 +164,23 @@ class SidecarPlanner(Planner, abstract=True):
         """The script the runtime's interpreter runs."""
         script = Path(cls.SIDECAR)
         if not script.is_absolute():
-            # Relative to the class that SAID it, so a subclass defined elsewhere inherits the script
-            # rather than looking for one next to itself.
-            owner = next((k for k in cls.__mro__ if "SIDECAR" in vars(k)), cls)
-            module = sys.modules.get(owner.__module__)
-            here = Path(getattr(module, "__file__", "") or ".").resolve().parent
-            script = here / script
+            script = cls._sidecar_base() / script
         return script
+
+    @classmethod
+    def _sidecar_base(cls) -> Path:
+        """What a relative SIDECAR is resolved against: the directory of the module that SAID it.
+
+        The class that said it, so a subclass defined elsewhere inherits the script rather than looking
+        for one next to itself. A module with no file -- a notebook cell, `python -c`, an embedded
+        interpreter -- resolves against the working directory, which is where such a session was
+        started and where its author put the script. It used to be `Path(".").resolve().parent`: the
+        directory ABOVE that, where the script never is.
+        """
+        owner = next((k for k in cls.__mro__ if "SIDECAR" in vars(k)), cls)
+        module = sys.modules.get(owner.__module__)
+        file = getattr(module, "__file__", None)
+        return Path(file).resolve().parent if file else Path.cwd()
 
     def launch_command(self) -> list[str]:
         """argv for the sidecar: the runtime's ``python`` when there is a runtime, else this interpreter."""
@@ -216,12 +234,25 @@ class SidecarPlanner(Planner, abstract=True):
         self.check_runtime(self._runtime)
 
     def warm(self) -> None:
+        """Start the sidecar and warm it -- or, when it is running and warm already, do nothing.
+
+        Safe to call again at any time, which is what makes it the way back from a crash: tandem calls
+        it after a verb raised (``Session``), and a sidecar that died, or was stopped for not answering,
+        is relaunched and warmed here. One that is running is not warmed twice: warming opens the
+        cameras and connects the robot, and doing that over a sidecar holding them already is the
+        failure, not the recovery.
+        """
+        channel = self._channel
+        if channel is not None and channel.alive and self._warmed is channel:
+            return
         self._start()
         if self._answers("warm"):
             self._request("warm", self.warm_args())
+        self._warmed = self._channel
 
     def close(self) -> None:
         channel, self._channel = self._channel, None
+        self._warmed = None
         if channel is not None:
             channel.stop()
         if self._stop_dir is not None:
@@ -351,9 +382,7 @@ class SidecarPlanner(Planner, abstract=True):
 
     def call(self, verb: str, *, timeout: float | None = None, **args: Any) -> Any:
         """Send the sidecar any verb it answers -- a debugging or planner-specific one included."""
-        return self._channel_or_raise().request(
-            verb, args, timeout=self.timeout(verb) if timeout is None else timeout
-        )
+        return self._ask(verb, args, timeout=self.timeout(verb) if timeout is None else timeout)
 
     @property
     def sidecar_verbs(self) -> frozenset[str] | None:
@@ -409,7 +438,31 @@ class SidecarPlanner(Planner, abstract=True):
         return verbs is None or verb in verbs
 
     def _request(self, verb: str, args: dict[str, Any], *, poll: Callable[[], None] | None = None) -> Any:
-        return self._channel_or_raise().request(verb, args, timeout=self.timeout(verb), poll=poll)
+        return self._ask(verb, args, timeout=self.timeout(verb), poll=poll)
+
+    def _ask(
+        self, verb: str, args: dict[str, Any], *, timeout: float, poll: Callable[[], None] | None = None
+    ) -> Any:
+        """One request. A sidecar that does not answer it in time is stopped, with all it started.
+
+        Left running, a wedged sidecar goes on holding the robot and the cameras -- possibly still
+        moving the arm -- while the session carries on around it: a person is handed an arm it has not
+        let go of, and every later request queues behind the one it never answered. Nothing else can
+        be known about what it holds, so it is ended (SIGTERM, then SIGKILL, to its process group), and
+        the next ``warm()`` starts a fresh one, as it does after a crash.
+        """
+        channel = self._channel_or_raise()
+        try:
+            return channel.request(verb, args, timeout=timeout, poll=poll)
+        except rpc.BackendTimeout as exc:
+            self.log(
+                f"the {self.name} sidecar did not answer {verb} within {timeout:.0f}s; stopping it and "
+                "every process it started, so nothing is left holding the robot or the cameras"
+            )
+            channel.kill()
+            raise rpc.BackendTimeout(
+                f"{exc}. It was stopped, with every process it started; the next warm-up starts a fresh one"
+            ) from exc
 
     def _channel_or_raise(self) -> rpc.HostedBackendChannel:
         if self._channel is None:

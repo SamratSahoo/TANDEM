@@ -18,6 +18,8 @@ environment of its own, run it as a sidecar (`tandem planners new NAME --sidecar
 from __future__ import annotations
 
 import json
+import shutil
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -63,6 +65,13 @@ CAPABILITIES = Capabilities(
     moved_arguments={"At": 0},
     # The planner's own operators, for the record of each rollout. Never shown to the model.
     robot_operators=("Move(?obj: movable, ?place: surface)",),
+    # TODO: what the solver assumes. initial_state_is_clean=True makes tandem plan consecutive robot
+    # phases as ONE goal -- one perception pass, the atoms sorted, the proposer's order between them
+    # dropped -- which is sound only if every goal is planned from the same state and nothing symbolic
+    # orders two phases. This stand-in keeps where things are between legs, so it is False: every robot
+    # phase is its own leg. one_pick_per_object=True keeps two phases that move the same object apart.
+    initial_state_is_clean=False,
+    one_pick_per_object=True,
     # TODO: switch each on once plan()/execute() honour it; the conformance kit then checks it.
     # movable restriction: plan(movables=...) picks only those objects. Return home: plan(return_home=
     # False) ends where the last operation leaves the arm. Cooperative stop: execute polls should_stop.
@@ -102,6 +111,13 @@ class {{class_name}}(Planner):
         self._where = {"block": "table"}
         self._scenes: dict[str, dict[str, str]] = {}
         self._plans: dict[str, list[tuple[str, str]]] = {}
+        self._frames: Path | None = None
+
+    def close(self) -> None:
+        # TODO: release everything warm() opened. Must be safe twice, and on a planner never warmed.
+        if self._frames is not None:
+            shutil.rmtree(self._frames, ignore_errors=True)
+            self._frames = None
 
     def perceive(
         self,
@@ -114,7 +130,8 @@ class {{class_name}}(Planner):
         # TODO: look at the workspace. task_hint is the whole instruction, to steer detection. Park the
         # arm first when reset_arm; open the gripper first when open_gripper (after a human phase).
         # Return every object's label, the support surface's (not among the objects), which objects are
-        # surfaces, a scene_id plan() is handed back, and rgb_path, an image of what was seen.
+        # surfaces, a scene_id plan() is handed back, and rgb_path, an image of what was seen: tandem
+        # splits the task into phases from that image, so without one no task can be planned.
         scene_id = uuid.uuid4().hex[:8]
         self._scenes[scene_id] = dict(self._where)
         return SceneView(
@@ -122,7 +139,15 @@ class {{class_name}}(Planner):
             table_label="table",
             surface_labels=frozenset({"tray"}),
             scene_id=scene_id,
+            rgb_path=_stand_in_image(Path(save_dir) / "perception_rgb.png"),
         )
+
+    def capture_frame(self, *, camera: str = "external") -> str:
+        # TODO: one frame from that camera, written to a file; its path. tandem checks a person's work
+        # on a human phase from it, so it must be a real, current frame -- never a stale or made-up one.
+        if self._frames is None:
+            self._frames = Path(tempfile.mkdtemp(prefix="{{name}}-frames-"))
+        return _stand_in_image(self._frames / f"{camera}-{uuid.uuid4().hex[:8]}.png")
 
     def plan(
         self,
@@ -189,8 +214,14 @@ class {{class_name}}(Planner):
         (save_dir / "_meta.json").write_text(json.dumps(meta, indent=2))
         return ExecuteResult(ok=True, n_frames=0, rollout_dir=str(save_dir))
 
-    # TODO: capture_frame(camera=...) returns the path of an image from that camera. tandem checks a
-    # person's work on a human phase from it, so until it exists, a session with those checks on
-    # refuses to start (and the conformance kit skips its test). warm(), close(), home(),
-    # release_hardware() and reacquire_hardware() default to doing nothing: override them once the
-    # planner holds hardware.
+    # TODO: warm(), home(), release_hardware() and reacquire_hardware() default to doing nothing:
+    # override them once the planner holds hardware.
+
+
+def _stand_in_image(path: Path) -> str:
+    """TODO: delete once perceive and capture_frame return real camera images. A plain grey frame."""
+    from PIL import Image  # tandem's own dependency, imported only when a frame is written
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (64, 48), (120, 140, 160)).save(path)
+    return str(path)
