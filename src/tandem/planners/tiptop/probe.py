@@ -43,8 +43,9 @@ def check_robot_state_port(host: str, port: int, *, timeout: float = 1.5) -> pro
         port,
         timeout=timeout,
         hint=(
-            "Start the shim with --state-port so encoders can be read while the arm moves. "
-            "Without it, capture aborts rather than falling back to plan positions."
+            "Start the bamboo-polymetis shim on the NUC: it serves the encoders on this port, so they can "
+            "be read while the arm moves. Without it, capture aborts rather than falling back to plan "
+            "positions."
         ),
     )
 

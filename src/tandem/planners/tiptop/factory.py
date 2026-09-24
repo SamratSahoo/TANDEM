@@ -79,6 +79,8 @@ INFO = PlannerInfo(
         arms.requirement(),
         "2-3 ZED cameras and the ZED SDK",
         "an M2T2 grasp server",
+        # tiptop estimates the ZEDs' depth with it; render.py always points tiptop at this address.
+        "a FoundationStereo depth server at http://localhost:1234",
         "a Gemini API key",
     ),
     sources=SOURCES,

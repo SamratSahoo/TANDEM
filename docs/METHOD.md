@@ -4,7 +4,7 @@ This is the TANDEM paper's method (*TANDEM: Task and Motion Planning with As-Nee
 for Efficient Vision-Language-Action Model Fine-tuning*, Sec. IV) mapped onto this package's code.
 It covers where each part of the method lives, the trial loop as the code runs it, what every
 `hitl:` setting changes, and what a trial leaves on disk. It also lists every place the code departs
-from the paper on purpose, and why.
+from the paper on purpose, and why, and how the package is laid out (§8).
 
 The short version: **a model decides what each phase must achieve and in what order. The planner
 decides how the robot's phases are carried out. tandem decides who does what, hands the arm over,
@@ -314,12 +314,26 @@ After the merge, one episode directory, under `success/` or `failure/`:
 ├── external_cam.mp4  external_cam_2.mp4  hand_cam.mp4   every leg's clips, joined
 ├── robot_state.npz        every leg's per-frame arrays, joined
 ├── _meta.json             lineage, timing, and segments[]: which frames were which leg and phase
-├── hitl.json              the phase plan and everything that happened to it
-├── vlm/                   every image sent to a model, what it said, and index.jsonl
+├── hitl.json              the phase plan and everything that happened to it   (phase planning on)
+├── vlm/                   every image sent to a model, what it said, and index.jsonl   (phase planning on)
+├── tiptop_plan.json       TiPToP's plan: the primary leg's own files are surfaced at the top
 └── segments/NN_<source>_<timestamp>/    each raw leg, as it was recorded
 ```
 
-A trial with a single leg is not merged. Its leg directory is the episode.
+A trial with a single leg is not merged. Its leg directory is the episode. The format is the one
+hitl-tamp-vla wrote, so data moves between the two in either direction.
+
+### `robot_state.npz`
+
+One row per frame, joined across legs: the arrays of the recording contract
+([ADDING_A_PLANNER.md](ADDING_A_PLANNER.md#the-recording-contract) has the table), plus
+`action_joint_velocity` (`[F,7]`, the DROID joint-velocity action) when a TiPToP leg recorded it.
+Proprioception and action are kept apart on purpose. `joint_position` and `gripper_position` are measured
+(the encoders, and the gripper's closedness, continuous in `[0,1]`), never a copy of the command. The
+`cmd_*` arrays are what was commanded, and `cmd_gripper` is binary. A policy trained on a lagged copy of its
+own action learns to echo it, and one that echoes the gripper never closes it; `tandem export lerobot`
+skips an episode whose `cmd_gripper` is not binary. `frame_time` is float64, since float32 would give
+neighbouring frames one timestamp.
 
 ### `_meta.json` of a merged episode
 
@@ -620,3 +634,48 @@ registry ([ADDING_A_HUMAN_EXECUTOR.md](ADDING_A_HUMAN_EXECUTOR.md)).
   or `leg_plan_generations` for legs never merged) against `superseded_plans`.
 - `segments[]` stamps a conjoined robot leg with its first phase only. Read `hitl.json`
   `covers_phases` for the rest.
+
+---
+
+## 8. How the package is put together
+
+```
+src/tandem/
+├── __init__.py, api.py   the library surface: tandem.plan_task, and the SDK's names
+├── planning/        the method: proposal, invented predicates, magic operators, the contract check,
+│                    verification. Pure Python, no planner, no robot.
+├── planners/        the planner protocol, and the kit to write one
+│   ├── base.py      what tandem needs from a planner, and nothing more
+│   ├── sdk.py       Planner: the base class a new planner is written against
+│   ├── sidecar.py   SidecarPlanner: a planner that runs in its own environment, over JSON lines
+│   ├── sidecar_kit/ tandem_sidecar, the stdlib-only helper every such sidecar is written with
+│   ├── runtime.py   a planner's runtime from a recipe: pinned sources, an environment, build steps
+│   ├── testing.py   the conformance kit a planner's own test suite subclasses
+│   ├── registry.py  planners by name: built in, registered, or a `tandem.planners` entry point
+│   └── tiptop/      TiPToP: its declaration, recipe, options, presets, importer and sidecar
+├── executors/       who carries out a human phase: the protocol, the registry, teleop
+├── core/            the session and its trial loop (phase_loop.py), episodes, merge, profiles
+├── cli/             the command tree (Typer and Rich)
+├── server/          FastAPI and a no-build single-page app
+├── export/          the LeRobot v3.0 writer
+├── teleop/          the hand-off driver, run under a DROID environment
+└── resources/       the annotated profile template, tandem's presets, the planner scaffold
+```
+
+The **session** (`core/session.py`) owns the state machine, the prompts and the label; the walk itself is
+`core/phase_loop.py` (§3). A session survives being preempted, re-warmed and handed over mid-task, appends a
+line per event to its events file (§6), and backs both `tandem collect` and the web UI.
+
+A planner that needs torch, CUDA kernels, a camera SDK or a robot client runs as a **sidecar**: a child
+process in its own runtime, answering verbs over newline-delimited JSON
+([ADDING_A_PLANNER.md](ADDING_A_PLANNER.md#in-tandems-process-or-in-a-sidecar)). TiPToP's,
+`planners/tiptop/sidecar.py`, is tandem's own file, run by the runtime's interpreter. It imports nothing from
+`tandem` and calls public functions of the pinned tiptop; goals reach cuTAMP through `run_perception`'s
+`goal_builder` hook, so the planner needs no change of its own for tandem.
+
+A planner's runtime is **declared, not shipped**. TiPToP's recipe (`planners/tiptop/recipe.py`) pins tiptop,
+cuTAMP and cuRobo to exact commits, lists what to trim from each and the one patch to apply, names tiptop's
+own pixi manifest, and names the build step that compiles cuRobo's kernels. `planners/runtime.py` does the
+rest for any planner that declares a recipe. The runtime keeps the source monorepo's layout
+(`vae/checkpoints/`, `rnd/checkpoints/` beside the sources), so the cuRobo costs find the DATAFARM
+checkpoints where they look by default.

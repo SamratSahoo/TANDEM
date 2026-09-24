@@ -42,7 +42,7 @@ PLACEMENT = ("placement_support", *tamp_keys.PLACEMENT_GATED)
 SWITCHES = ("table_plane_support_vote", "disjoint_object_masks", "blend_stretch_to_caps")
 
 # What resolve_placement_support uses for each gated key the profile leaves out, once placement_support
-# is on -- as the README documents them. Checked against the pinned source below.
+# is on -- as docs/CONFIGURATION.md documents them. Checked against the pinned source below.
 DEFAULTS = {
     "placement_support_margin": 0.01,
     "placement_flatness_tol": 0.008,
