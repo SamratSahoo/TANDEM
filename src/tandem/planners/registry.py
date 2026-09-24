@@ -207,8 +207,9 @@ def options_for(planner: Any, options: Mapping[str, Any] | None) -> dict[str, An
 #
 # What tandem asks a planner beyond building its backend: how to show its options, what `tandem doctor`
 # should check for it, how to replay a leg it recorded, how to import a profile from its older
-# configuration. Each is asked through here, by name, so no command has to know which planner it is
-# talking to -- and each has a default for a factory that does not answer it (see BackendFactory).
+# configuration, which presets it ships. Each is asked through here, by name, so no command has to know
+# which planner it is talking to -- and each has a default for a factory that does not answer it (see
+# BackendFactory).
 
 
 def describe_options(name: str, profile: Any, *, settings: Any = None) -> OptionsView:
@@ -286,6 +287,12 @@ def replay(name: str, rollout_dir: Any, *, settings: Any = None) -> None:
 def importer(name: str) -> Any:
     """The planner ``name``'s ``ProfileImporter``, or None when it has no older configuration to import."""
     return getattr(factory(name), "importer", None)
+
+
+def presets_dir(name: str) -> Path | None:
+    """The directory of presets the planner ``name`` ships (``tandem.core.presets``), or None when it ships none."""
+    found = getattr(factory(name), "presets_dir", None)
+    return Path(found) if found is not None else None
 
 
 def tools_dir(name: str, settings: Any = None) -> Path | None:

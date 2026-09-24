@@ -248,8 +248,24 @@ def info_payload(name: str, *, profile_name: str | None = None) -> dict:
             "mismatched": state["mismatched"],
         },
         "options": dict(options) if isinstance(options, Mapping) else None,
+        **_presets_of(name),
         "capabilities": capabilities_summary(caps),
     }
+
+
+def _presets_of(name: str) -> dict:
+    """The presets the planner ``name`` ships, for `tandem profile create --preset`. A broken one is said, not raised:
+    a description of the planner is what somebody reads to find out what is wrong with it."""
+    from tandem.core import presets
+
+    try:
+        found = presets.planner_presets(name)
+    except TandemError as exc:
+        return {"presets": [], "presets_problem": exc.message}
+    listed = [
+        {"name": p.name, "title": p.title, "summary": p.summary, "extends": p.extends} for p in found.values()
+    ]
+    return {"presets": sorted(listed, key=lambda p: p["name"]), "presets_problem": None}
 
 
 # --------------------------------------------------------------------------- choosing one
@@ -473,6 +489,14 @@ def info(
             theme.kv([(escape(str(key)), text) for key, text in payload["options"].items()])
         else:
             theme.info("none: it reads no planner.options")
+
+    if payload["presets"] or payload["presets_problem"]:
+        theme.blank()
+        theme.heading("presets", "`tandem profile create NAME --preset NAME`")
+        if payload["presets"]:
+            theme.kv([(escape(p["name"]), p["title"]) for p in payload["presets"]])
+        if payload["presets_problem"]:
+            theme.warn(payload["presets_problem"])
 
     runtime = payload["runtime"]
     theme.blank()

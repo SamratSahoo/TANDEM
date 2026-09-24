@@ -205,7 +205,11 @@ tandem init --import-from ~/hitl-tamp-vla
 ```
 
 Robot config, camera serials, extrinsics (including the per-workspace layers) and any
-`cfg/tamp/*.yml` come across as a profile.
+`cfg/tamp/*.yml` come across as a profile, its `hitl:` block included. What tandem cannot do
+is refused rather than swapped for something it can: a config whose human phases a learned
+policy carries out (`policy_type: diffusion` or `act`, the HITL-TAMP baseline) is not
+imported, and the refusal names the same task's config for a person. Settings only
+LJ1356's tiptop fork reads (`placement_*`) are left out with a warning.
 
 ---
 
@@ -287,6 +291,18 @@ tandem profile edit fold-cloth        # $EDITOR, validated on save
 
 Switching profiles re-points collection, inspection and export in one move. Two robots, two
 tasks, or two TAMP regimes you want to compare — each is a profile.
+
+To collect the way the paper did, start from its preset:
+
+```bash
+tandem profile create bread-box --from default --preset paper --prompt "put the bread in the box"
+```
+
+It turns phase planning on with the paper's models, checks and retries, and for TiPToP sets
+the TAMP and DATAFARM overrides of the paper's v3 task configs (the VAE manifold cost,
+`blend_mode: vae`). It keeps the rig's robot, cameras and perception. `tandem profile presets`
+lists every preset. A planner can ship its own presets: see `presets_dir` in
+`tandem/core/presets.py`.
 
 ### Planner settings
 

@@ -9,10 +9,17 @@ TiPToP's, because everything it reads is TiPToP's configuration: the robot, the 
 TAMP overrides land in the profile's ``planner.options`` (``options.py``), the cameras and the task
 in the profile itself. It is offered to tandem through the factory's ``importer`` (``IMPORTER``
 below), so `tandem profile create --import-from` and `tandem init` reach it without naming TiPToP.
+
+A task config's ``hitl:`` block is imported too, as the profile's own ``hitl:``: phase planning is
+tandem's, whichever planner runs (``HITL_KEYS`` below says what each key becomes). What the block
+chose that tandem cannot do -- a learned policy for the human phases, a robot planner other than
+cuTAMP -- is refused rather than swapped for something it can, because the profile would then collect
+something other than what the config it names collected.
 """
 
 from __future__ import annotations
 
+import difflib
 import json
 from pathlib import Path
 from typing import Any
@@ -20,7 +27,9 @@ from typing import Any
 from ruamel.yaml import YAML
 
 from tandem.core.errors import TandemError
-from tandem.core.profiles import Profile, resolve_interpolation
+from tandem.core.profiles import Profile, format_errors, resolve_interpolation
+from tandem.planners.base import WARNING_NOTE
+from tandem.planners.tiptop import tamp_keys
 from tandem.planners.tiptop.options import validate_tamp
 
 # The same dereferencing a profile does when it is read, so an imported value and a stored
@@ -128,9 +137,13 @@ def build_profile(
     if tamp_config is not None:
         if not tamp_config.is_file():
             raise TandemError(f"No such TAMP config: {tamp_config}")
-        _merge_tamp_config(data, options, _load_yaml(tamp_config))
+        raw = _load_yaml(tamp_config)
+        about: list[str] = []
+        _merge_tamp_config(data, options, raw, about)
+        _merge_hitl(data, raw, tamp_config, about)
         data["description"] = f"imported from {tamp_config.name}"
         notes.append(f"task and TAMP settings from {tamp_config}")
+        notes.extend(about)
 
     calibration: dict = {}
     calib_path = sources.get("calibration")
@@ -150,7 +163,7 @@ def build_profile(
         profile = Profile.model_validate(data)
     except Exception as exc:
         raise TandemError(
-            f"The imported settings do not form a valid profile:\n{exc}",
+            f"The imported settings do not form a valid profile:\n{format_errors(exc)}",
             hint="Import what works, then fix the rest with `tandem profile edit`.",
         ) from exc
     return profile, calibration, notes
@@ -217,7 +230,7 @@ def _merge_tiptop_config(data: dict, options: dict, raw: dict) -> None:
                 target[key] = perc[key]
 
 
-def _merge_tamp_config(data: dict, options: dict, raw: dict) -> None:
+def _merge_tamp_config(data: dict, options: dict, raw: dict, notes: list[str]) -> None:
     task: dict[str, Any] = {}
     if raw.get("prompt"):
         task["prompt"] = str(raw["prompt"])
@@ -228,14 +241,35 @@ def _merge_tamp_config(data: dict, options: dict, raw: dict) -> None:
     if task:
         data["task"] = task
 
-    overrides = raw.get("tamp_overrides") or {}
-    if overrides:
+    overrides = dict(raw.get("tamp_overrides") or {})
+    # Keys tiptop has but tandem refuses, because on the path tandem runs they would do nothing
+    # (tamp_keys.REFUSED): LJ1356's placement_* in five of hitl-tamp-vla's configs (1_toy_puzzle_v3
+    # and every 4_bread_box*), tiptop's own loop's auto_mode. A profile stating one is refused when it
+    # loads, so that leaving one out is a decision and never a surprise. Here the import is the
+    # decision: each is left out with a warning naming it and why, at the one moment a person is
+    # looking at this config. Refusing instead would make those five configs unimportable, though
+    # everything else in them -- the task, the rest of the TAMP settings, the hitl block -- carries
+    # over, and the file is not tandem's to fix.
+    refused: dict[str, list[str]] = {}
+    for key in [k for k in overrides if k in tamp_keys.REFUSED]:
+        overrides.pop(key)
+        refused.setdefault(tamp_keys.REFUSED[key], []).append(key)
+    for reason, keys in refused.items():
+        one = len(keys) == 1
+        what = f"TAMP setting {keys[0]}" if one else f"TAMP settings {', '.join(keys)}"
+        # The reason's first sentence says why; the rest is advice for a profile, not an import.
+        why = reason.split(". ")[0]
+        notes.append(
+            f"{WARNING_NOTE}{what} not imported: {'it' if one else 'each'} {why}. The runs this config made had "
+            f"{'it' if one else 'them'}; check the task still works without {'it' if one else 'them'}."
+        )
+    if raw.get("tamp_overrides"):
         # Substituted, not merged: an upstream cfg/tamp file is a complete TAMP specification,
         # and folding the template's defaults into it would change the trajectories it
         # produces. Unknown keys fail loudly rather than import a knob that does nothing --
         # upstream configs really do contain such typos, and they cost whole datasets.
         try:
-            options["tamp"] = validate_tamp(dict(overrides))
+            options["tamp"] = validate_tamp(overrides)
         except ValueError as exc:
             raise TandemError(
                 f"The TAMP settings in this config are not valid:\n  {exc}",
@@ -250,6 +284,232 @@ def _merge_tamp_config(data: dict, options: dict, raw: dict) -> None:
     slug = raw.get("hugginface_slug") or raw.get("huggingface_slug")
     if slug:
         data["export"] = {"hf_repo": str(slug), "private": False}
+
+
+# --------------------------------------------------------------------------- the hitl block
+#
+# A cfg/tamp file's `hitl:` block is read, upstream, by tiptop/hitl/config.py (HITLConfig) at
+# LJ1356/tiptop cf75a68, the tiptop hitl-tamp-vla pins. In tandem the same settings are the profile's
+# own `hitl:` (core/profiles.py HitlSpec): phase planning is the part of that system tandem
+# re-implemented rather than wrapped, so most keys carry over as they are. HITL_KEYS is every key
+# cf75a68 accepts and what each becomes here, and anything else is refused. cf75a68 refuses unknown
+# hitl keys too (resolve_hitl_config), so a config carrying one never ran there either.
+
+#: What a learned policy's own settings become: nothing. See ``policy_type``.
+_POLICY_ONLY = (
+    "a setting of the learned-policy executor that policy_type selects. tandem has no such executor "
+    "yet, so there is nothing for it to configure"
+)
+
+#: monorepo ``hitl`` key -> (the tandem ``hitl`` key it becomes, or None for none; why).
+HITL_KEYS: dict[str, tuple[str | None, str]] = {
+    # Same name, same meaning: tandem's phase planning ports what each of these switched.
+    "enabled": ("enabled", "phase planning on or off"),
+    "proposal_model": ("proposal_model", "the model that splits the task into phases and invents operators"),
+    "vlm_model": ("vlm_model", "the model that answers each per-atom check"),
+    "max_attempts": ("max_attempts", "proposals tried in all, each rejection fed back to the next"),
+    "classify_initial": ("classify_initial", "classify the invented predicates on the first image"),
+    "verify_retries": ("verify_retries", "extra goes at a human phase whose check failed"),
+    "verify_enforced": ("verify_enforced", "a check that still fails ends the trial as a failure"),
+    "check_plan_effects": ("check_plan_effects", "the symbolic contract check, before the arm moves"),
+    "check_human_preconditions": ("check_human_preconditions", "a human phase's preconditions, on camera"),
+    "check_human_effects": ("check_human_effects", "a human phase's add and delete effects, on camera"),
+    "check_tamp_preconditions": ("check_tamp_preconditions", "what a robot leg starts from, on camera"),
+    "check_tamp_effects": ("check_tamp_effects", "what a robot leg achieved, on camera"),
+    "precondition_enforced": ("precondition_enforced", "an unmet precondition stops the trial"),
+    "save_vlm_io": ("save_vlm_io", "every image sent to a model, and its reply, kept beside the rollout"),
+    # A relative path meant the tiptop process's working directory there; here it means beside the
+    # profile (profiles.resolve_cache_path). Harmless: it is a cache, and a miss only asks again.
+    "cache_path": ("cache_path", "the SQLite cache of proposals"),
+    # Renamed, and the value translated. Only "human" has a translation: see HUMAN_EXECUTORS.
+    "policy_type": ("human_executor", "who carries out a human phase: 'human' is the teleop hand-off"),
+    # Checked, not carried. Which planner does a profile's robot phases is its planner.backend, and
+    # this importer builds TiPToP profiles, whose robot phases are cuTAMP's.
+    "robot_planner": (None, "which planner carries out the robot phases: cutamp, which is what TiPToP runs"),
+    # The learned-policy executor's own settings (hitl-baseline): see policy_type.
+    "policy_checkpoint": (None, _POLICY_ONLY),
+    "open_loop_horizon": (None, _POLICY_ONLY),
+    "policy_num_inference_steps": (None, _POLICY_ONLY),
+    "policy_max_steps": (None, _POLICY_ONLY),
+    "policy_velocity_scale": (None, _POLICY_ONLY),
+    "policy_start_joint_angle": (None, _POLICY_ONLY),
+    "policy_python": (None, _POLICY_ONLY),
+}
+
+#: The keys that configure a learned policy and nothing else.
+POLICY_KEYS = tuple(key for key, (_, why) in HITL_KEYS.items() if why is _POLICY_ONLY)
+
+#: The names cf75a68 registers (tiptop/hitl/planners.py): its one robot planner, and who can carry out
+#: a human phase. "human" is the teleoperator. "diffusion" and "act" are LeRobot policies trained on
+#: the teleop legs of earlier runs of the same task: the paper's HITL-TAMP baseline.
+ROBOT_PLANNERS = ("cutamp",)
+POLICY_TYPES = ("human", "diffusion", "act")
+
+#: What a policy_type becomes in tandem (``hitl.human_executor``), where tandem has a counterpart.
+HUMAN_EXECUTORS = {"human": "teleop"}
+
+
+def _merge_hitl(data: dict, raw: dict, source: Path, notes: list[str]) -> None:
+    """The config's ``hitl:`` block, as the profile's ``hitl:``. Refuses what it cannot carry over faithfully.
+
+    Laid over the template's ``hitl:``, so a key the block leaves out keeps tandem's default. For the
+    keys hitl-tamp-vla has, the two defaults are the same (tests/test_import_hitl.py).
+    """
+    block = raw.get("hitl")
+    if block is None:
+        return
+    if not isinstance(block, dict):
+        raise TandemError(f"The hitl block in {source.name} is a {type(block).__name__}, not a mapping.")
+
+    unknown = sorted(str(key) for key in block if key not in HITL_KEYS)
+    if unknown:
+        lines = []
+        for key in unknown:
+            close = difflib.get_close_matches(key, list(HITL_KEYS), n=1, cutoff=0.6)
+            lines.append(f"  hitl.{key}" + (f" (did you mean {close[0]!r}?)" if close else ""))
+        raise TandemError(
+            f"{source.name} has hitl setting(s) hitl-tamp-vla does not have:\n" + "\n".join(lines),
+            hint="hitl-tamp-vla refuses these too, so this config never ran as written. Fix it in the source "
+            "file. The settings it can have are HITL_KEYS in tandem/planners/tiptop/importers.py.",
+        )
+
+    # Truthiness, as cf75a68 reads it (`if not cfg.enabled`). What matters below is whether that system
+    # ever ran a phase under these settings.
+    enabled = bool(block.get("enabled", False))
+    # Who planned the robot phases and who did the human ones. With phase planning off there were no
+    # phases, so neither choice ever took effect, and nothing is lost by leaving it behind. With it on,
+    # a choice tandem cannot honour is refused: the profile would collect something else under this
+    # config's name.
+    robot_planner = block.get("robot_planner", "cutamp")
+    if robot_planner not in ROBOT_PLANNERS:
+        if enabled:
+            raise TandemError(
+                f"{source.name} has its robot phases planned by {robot_planner!r} (hitl.robot_planner). A "
+                "profile imported from it plans with TiPToP, whose robot phases are cuTAMP's -- the only "
+                "robot planner hitl-tamp-vla ships.",
+                hint="In tandem a profile's robot phases are its planner.backend's. If cuTAMP is what the "
+                "config meant, set hitl.robot_planner: cutamp in the source file (or leave it out).",
+            )
+        notes.append(
+            f"{WARNING_NOTE}hitl.robot_planner {robot_planner!r} not imported: phase planning is off in this "
+            "config, so it never planned a phase. With phase planning on, this profile's robot phases are "
+            "cuTAMP's."
+        )
+
+    policy_type = block.get("policy_type", "human")
+    policy_set = [key for key in POLICY_KEYS if key in block]
+    if policy_type not in POLICY_TYPES:
+        close = difflib.get_close_matches(str(policy_type), POLICY_TYPES, n=1, cutoff=0.6)
+        raise TandemError(
+            f"{source.name} has hitl.policy_type {policy_type!r}, which hitl-tamp-vla does not have"
+            + (f" (did you mean {close[0]!r}?)" if close else "")
+            + ".",
+            hint=f"It has {', '.join(POLICY_TYPES)}. Fix it in the source file.",
+        )
+    if policy_type not in HUMAN_EXECUTORS:
+        if enabled:
+            raise TandemError(*_refuse_policy(source, raw, str(policy_type)))
+        settings = f" and its settings ({', '.join(policy_set)})" if policy_set else ""
+        notes.append(
+            f"{WARNING_NOTE}hitl.policy_type {policy_type!r}{settings} not imported: phase planning is off "
+            "in this config, so no phase ever ran with it. With phase planning on, a person does this "
+            "profile's human phases (hitl.human_executor: teleop)."
+        )
+        policy_type = "human"
+    elif policy_set:
+        # Not a warning: with policy_type human, cf75a68 never read them either.
+        notes.append(
+            f"hitl {', '.join(policy_set)} not imported: {'it is' if len(policy_set) == 1 else 'each is'} "
+            "read only when policy_type names a learned policy, and this config's is 'human'"
+        )
+
+    hitl: dict[str, Any] = dict(data.get("hitl") or {})
+    for key, value in block.items():
+        target, _why = HITL_KEYS[key]
+        if target is None:
+            continue
+        hitl[target] = HUMAN_EXECUTORS[policy_type] if key == "policy_type" else value
+    data["hitl"] = hitl
+
+    cache = block.get("cache_path")
+    if cache and not Path(str(cache)).expanduser().is_absolute():
+        notes.append(
+            f"hitl.cache_path {cache!r} is relative: it now means beside the profile, not the directory "
+            "tiptop ran in"
+        )
+    if enabled:
+        # What the block could not say, because hitl-tamp-vla had no setting for it, keeps tandem's
+        # default. Two of those defaults do what the paper says rather than what that code did. A person
+        # reproducing its runs has to know which, and which setting restores the old behaviour.
+        notes.append(
+            "phase planning settings from its hitl block. Two of tandem's own differ from what hitl-tamp-vla "
+            "did: a trial whose human phase still fails its check is excluded without asking for a label "
+            "(hitl.on_verification_failure: exclude; `label` asks, as it did), and the last phase is checked "
+            "too (hitl.verify_final_phase: true; `false` leaves it to the label, as it did)"
+        )
+
+
+def _refuse_policy(source: Path, raw: dict, policy_type: str) -> tuple[str, str]:
+    """The refusal of a config whose human phases a learned policy carries out, and what to import instead.
+
+    Refused, not mapped to teleop with a warning. Such a config exists to collect the HITL-TAMP
+    baseline, where the policy's legs are the data: each has its own dataset slug
+    (``3_pen_open_book_diffusion``). Imported as teleop, it would collect a person's legs under that
+    name, and the dataset would say it is something it is not -- a mistake a warning scrolled past
+    at import cannot undo once episodes are pushed. The learned-policy executor is not part of tandem
+    yet. And every such config in hitl-tamp-vla has a twin a person runs, with the same task and TAMP
+    settings, so the right import is one file away. The refusal names it.
+    """
+    slug = raw.get("hugginface_slug") or raw.get("huggingface_slug")
+    dataset = f" (dataset {slug})" if slug else ""
+    message = (
+        f"{source.name} hands its human phases to a learned {policy_type} policy (hitl.policy_type: "
+        f"{policy_type}), and tandem has no executor for that yet: only a person, through teleop. Imported "
+        f"as teleop, it would collect a person's demonstrations under a config{dataset} meant for the "
+        "policy's."
+    )
+    twins = _human_twins(source, raw, policy_type)
+    if twins:
+        hint = (
+            "The same task, with a person doing its human phases: "
+            + ", ".join(t.name for t in twins)
+            + ". Import that one instead (--tamp-config)."
+        )
+    else:
+        hint = (
+            "Import a config of the same task whose human phases a person does (policy_type: human, or "
+            "left out), or copy this one and remove policy_type and the policy_* settings."
+        )
+    return message, hint
+
+
+def _human_twins(source: Path, raw: dict, policy_type: str) -> list[Path]:
+    """Configs beside ``source`` for the same task, with phase planning on and a person doing the human phases.
+
+    hitl-tamp-vla names a task's policy variant ``<task>_<policy>.yml``, beside ``<task>.yml`` and
+    ``<task>_v3.yml``. A twin must also state the same prompt: a file that only shares the prefix is
+    another task.
+    """
+    suffix = f"_{policy_type}"
+    if not source.stem.endswith(suffix):
+        return []
+    base = source.stem[: -len(suffix)]
+    twins = []
+    for path in sorted(source.parent.glob(f"{base}*.yml")):
+        if path == source:
+            continue
+        try:
+            other = _load_yaml(path)
+        except TandemError:
+            continue
+        hitl = other.get("hitl") if isinstance(other.get("hitl"), dict) else {}
+        if (
+            other.get("prompt") == raw.get("prompt")
+            and hitl.get("enabled")
+            and hitl.get("policy_type", "human") in HUMAN_EXECUTORS
+        ):
+            twins.append(path)
+    return twins
 
 
 def resolve_hf_repo(slug: str, org: str | None) -> str:

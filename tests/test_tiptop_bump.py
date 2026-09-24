@@ -12,7 +12,7 @@ A bump of the planner changes three things on tandem's side, and each can go wro
 
 The checks that need the planner's own source read it where tests/planner_sources.py finds it: CI's
 planner-sources job fetches the pinned trees, and a workstation with a built runtime uses that.
-The rest run anywhere, including against four of the monorepo's cfg/tamp files kept as fixtures
+The rest run anywhere, including against the monorepo's cfg/tamp files kept as fixtures
 (tests/fixtures/cfg_tamp, copied verbatim from hitl-tamp-vla 90671e1).
 """
 

@@ -100,6 +100,9 @@ jobs:
               "tandem/planners/tiptop/patches/0001-tiptop-config-from-env.patch",
               "tandem/planners/tiptop/assets/vae_full_v2.pt",
               "tandem/planners/tiptop/assets/rnd_droid.pt",
+              # `tandem profile create --preset paper`: tandem's half and TiPToP's.
+              "tandem/resources/presets/paper.yml",
+              "tandem/planners/tiptop/presets/paper.yml",
               # `tandem planners new` writes a plugin package from these; a wheel without them scaffolds nothing.
               "tandem/resources/scaffold/pyproject.toml.tmpl",
               "tandem/resources/scaffold/package/planner.py.tmpl",

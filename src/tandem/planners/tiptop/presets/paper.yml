@@ -1,0 +1,95 @@
+# ─────────────────────────────────────────────────────────────────────────────────────────
+#  paper  —  the TANDEM paper's demonstration-collection settings, for TiPToP
+#
+#  `tandem profile create NAME --preset paper`. It extends tandem's `paper` preset
+#  (tandem/resources/presets/paper.yml, the phase-planning settings) with TiPToP's own half:
+#  the TAMP overrides, DATAFARM alignment included. The paper, Sec. III-E: "To align
+#  TAMP-generated motions with human teleoperation, we use example pretraining trajectories
+#  to guide autonomous motion generation with DATAFARM."
+#
+#  It sets no robot, perception or cameras. Those belong to the rig, not to the experiment:
+#  combine it with --from or --import-from to keep a rig's.
+#
+#  [v3] marks a value from the `tamp_overrides:` of hitl-tamp-vla's five
+#  data-collection/cfg/tamp/*_v3.yml (commit 41cf4ac). Every key here is set, and set the
+#  same, in all five -- and in all eighteen of its task configs. Left out on purpose:
+#    - grasp_center_weight: 30 and grasp_threshold: 0.02 (8c_pp_3bread_cloth only), and
+#      voxel_downsample_size: 0.005 (4_bread_box and 8c_pp_3bread_cloth only). Each is that
+#      task's own. To get them, import the task's v3 config with --tamp-config and no --preset:
+#      it already carries every setting here, and this preset would replace its TAMP block.
+#    - the placement_* keys of 1_toy_puzzle_v3 and 4_bread_box_v3. Only LJ1356's fork of
+#      tiptop reads them, so tandem refuses them (planners/tiptop/tamp_keys.py REFUSED).
+#
+#  hitl-tamp-vla pins LJ1356/tiptop cf75a68 and its cuTAMP. TiPToP here pins SamratSahoo/tiptop
+#  1c6daf3 and cuTAMP 3a2e4d0 (planners/tiptop/recipe.py), which read every key below
+#  (tests/test_tiptop_bump.py). 1c6daf3 re-parameterised the VAE timing that blend_mode: vae
+#  optimises, though, so the same settings do not give bit-identical trajectories.
+# ─────────────────────────────────────────────────────────────────────────────────────────
+title: The TANDEM paper's collection settings, on TiPToP
+summary: the paper's phase planning plus its TAMP and DATAFARM overrides (VAE manifold cost, vae blending)
+caution:
+  - >-
+    Planned motions run at the pace blending gives them, not slowed by robot.time_dilation_factor
+    (tamp.time_dilation_factor_literal: 1.0, as in the paper's runs). Watch the first rollouts
+    with a hand on the stop.
+extends: paper
+
+# The paper's TAMP settings are a complete specification: an override left out means
+# tiptop's own default. So this block replaces the profile's `tamp:` rather than merging
+# into it; a cloned profile's other overrides would otherwise survive under the paper's name.
+replace: [planner.options.tamp]
+
+profile:
+  planner:
+    options:
+      tamp:
+        # ── DATAFARM: plan motions that look like the DROID teleoperation data ────────────
+        # The VAE motion-manifold cost: how far a trajectory's latent lies from the DROID
+        # cluster, as a cuRobo trajopt cost (tiptop motion_planning.apply_cost_overrides).
+        vae_manifold_weight: 25000.0          # [v3]
+        # The DATAFARM VAE checkpoint. tandem ships it, and `tandem planners install tiptop`
+        # places it at this path inside TiPToP's runtime (recipe.py ASSETS). A relative path is
+        # looked for beside the profile first, then in the runtime (render._resolve_asset).
+        vae_path: vae/checkpoints/vae_full_v2.pt   # [v3]
+        # The manifold cost does NOT own each cuRobo leg's clock: blend_mode: vae below gives
+        # it each gripper-delimited stroke's clock instead. vae_retiming on would switch
+        # blending off (motion_planning.resolve_vae_retiming), so the two exclude each other.
+        vae_retiming: false                   # [v3]
+        joint_density_weight: 0.0             # [v3] off
+        uniform_velocity_weight: 0.0          # [v3] off
+        # Teleop-posture IK branch selection: each endpoint's IK returns 12 branches and keeps
+        # the one closest to cuTAMP's DROID posture prior (resolve_posture_selection).
+        posture_selection_seeds: 12           # [v3]
+        posture_grasp_roll: true              # [v3]
+        # Lift-traverse-descend transits instead of cuRobo's low lateral sweep: an apex 7.5 cm
+        # above the higher end, for transits whose ends are 10 cm or more apart horizontally
+        # (resolve_transit_apex; 0.10 is also cuTAMP's own default for the distance).
+        transit_apex_height: 0.075            # [v3]
+        transit_apex_min_dist: 0.1            # [v3]
+
+        # ── trajectory blending, timed by the VAE ───────────────────────────────────────
+        blend_trajectory: true                # [v3]
+        blend_mode: vae                       # [v3] the manifold cost picks each stroke's timing
+        blend_ops: [Pick, MoveFree, MoveHolding, Place, GoToInitial]   # [v3]
+        blend_smoothing: 0.0003               # [v3] (tiptop's default is 1e-4)
+        blend_boundary_speed: 0.07            # [v3] (tiptop's default is 0.15)
+        blend_vae_sample_target: false        # [v3] aim at the cluster's mean latent, not a sampled one
+        blend_max_duration_mult: 2.0          # [v3]
+        blend_vel_slack: 1.0                  # [v3]
+        blend_acc_slack: 1.0                  # [v3]
+        # CAUTION: applied verbatim (resolve_time_dilation_factor), so the rig's
+        # robot.time_dilation_factor (0.2, 20% speed, in the template) does NOT slow the planned
+        # trajectories: the arm runs them at the pace blending gives it, as the paper's runs did.
+        # Homing and capture moves still use robot.time_dilation_factor.
+        time_dilation_factor_literal: 1.0     # [v3]
+
+        # ── cuTAMP search and grasps ────────────────────────────────────────────────────
+        num_particles: 512                    # [v3]
+        opt_steps_per_skeleton: 600           # [v3]
+        # Each move is charged its largest joint displacement, not the Euclidean distance.
+        traj_length_norm: inf                 # [v3]
+        grasp_pose_change_weight: 0.0         # [v3] off (the template sets 0.1)
+        # M2T2 inference passes per perception (tiptop's default is 5): more grasp candidates,
+        # slower perception.
+        m2t2_num_runs: 60                     # [v3]
+        require_m2t2_grasps: false            # [v3]

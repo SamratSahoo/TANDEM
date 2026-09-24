@@ -7,7 +7,8 @@ twenty-second warm-up does. The session only hands over a ``BackendContext`` and
 
 So is everything else tandem asks of TiPToP by name: its ``planner.options`` checked and shown
 (``options.py``, ``doctor.py``), its rows in `tandem doctor`, a leg replayed in tiptop's own viewer,
-and a profile imported from the monorepo TiPToP came from (``importers.py``).
+a profile imported from the monorepo TiPToP came from (``importers.py``), and the presets it ships
+(``presets/``).
 
 This module is imported to list planners and to read TiPToP's capabilities, both of which happen on a
 laptop. So it imports the declarations -- capabilities, runtime recipe -- and the protocol types and
@@ -120,6 +121,10 @@ class TiptopFactory:
         from tandem.planners.tiptop.importers import IMPORTER
 
         return IMPORTER
+
+    #: TiPToP's presets (`tandem profile create NAME --preset paper`): its own options for an experiment,
+    #: laid over tandem's preset of the same name where there is one (``tandem.core.presets``).
+    presets_dir = Path(__file__).parent / "presets"
 
     def create(self, ctx: BackendContext):
         """A TiptopBackend for this session, with its config rendered and its assets checked.

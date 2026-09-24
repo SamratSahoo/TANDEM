@@ -49,7 +49,8 @@ What the base class supplies, and why each default is the one it is:
 - **What else tandem asks it has a default too.** ``describe_options`` lists its options as they are
   (`tandem profile show`, the web editor); ``doctor_checks`` adds nothing to `tandem doctor` beyond
   its runtime, which doctor checks for every planner; ``replay`` says it has no viewer; ``importer``
-  is None. Override one when the planner has something to say: a server it calls, a GPU it needs.
+  and ``presets_dir`` are None. Override one when the planner has something to say: a server it
+  calls, a GPU it needs, the settings an experiment was run with.
 - **The declarations are checked when the class is defined**, not when a session first reads them.
   A moved argument that points at a surface, a wire name for a predicate that does not exist, a
   prompt slot misspelt -- each is a planner that would load, list and start, and then plan the wrong
@@ -445,6 +446,9 @@ class Planner(abc.ABC):
     #: Builds a profile from this planner's own older configuration (``base.ProfileImporter``), for
     #: `tandem profile create --import-from`. None: there is nothing to import from.
     importer: ClassVar[Any] = None
+    #: A directory of presets for this planner's ``planner.options`` (``<name>.yml``, laid out as
+    #: ``tandem.core.presets`` says), for `tandem profile create --preset NAME`. None: it ships none.
+    presets_dir: ClassVar[Path | None] = None
 
     # Set per class by __init_subclass__: whether this class is a base rather than a planner.
     _planner_base: ClassVar[bool] = True

@@ -734,6 +734,8 @@ class BackendFactory(Protocol):
       viewer (`tandem traj open`). Default: refused, saying the planner has none.
     - ``importer``: a ``ProfileImporter`` building a profile from the planner's own older
       configuration (`tandem profile create --import-from`). Default: None.
+    - ``presets_dir``: a directory of ``<name>.yml`` presets for this planner's ``planner.options``
+      (`tandem profile create --preset NAME`; the layout is in ``tandem.core.presets``). Default: None.
     """
 
     info: PlannerInfo
@@ -771,7 +773,16 @@ class ProfileImporter(Protocol):
 
     def build(self, name: str, *, source: Path | None = None, config: Path | None = None) -> tuple[Any, dict, list[str]]:
         """``(profile, calibration, notes)``: a ``Profile`` named ``name``, extrinsics keyed by camera
-        serial, and one line for each thing a person should know about what was and was not imported."""
+        serial, and one line for each thing a person should know about what was and was not imported.
+
+        A note starting with ``WARNING_NOTE`` is shown as a warning. Use it for something the source set
+        that the profile does not carry, and that the person has to decide about before collecting.
+        """
+
+
+#: The prefix of a ``ProfileImporter`` note that is a warning rather than information. A prefix, so the
+#: notes stay plain strings every importer and every caller already handles.
+WARNING_NOTE = "warning: "
 
 
 # Verbs a hosted backend answers, and the only strings that cross the wire. Kept here so the one

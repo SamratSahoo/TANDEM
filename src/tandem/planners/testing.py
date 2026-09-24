@@ -18,8 +18,9 @@ The easy way in is to subclass the test class in your own suite::
 pytest collects every ``test_*`` it inherits. Tune it with class attributes (``records_legs``,
 ``options``, ``task_hint``) and hooks (``goal`` to choose what is planned, ``make_backend`` to build
 the backend some other way). Each check is also a plain function (``check_declarations``,
-``check_protocol``, ``check_scene``, ``check_plan_result``, ``check_leg``, ``check_sidecar_script``)
-raising ``ConformanceError`` -- an ``AssertionError`` listing every problem found, not just the first.
+``check_protocol``, ``check_scene``, ``check_plan_result``, ``check_leg``, ``check_sidecar_script``,
+``check_presets``) raising ``ConformanceError`` -- an ``AssertionError`` listing every problem found,
+not just the first.
 
 What the dynamic tests need from the planner is only that it runs where the tests run: an in-process
 planner as it stands, a ``SidecarPlanner`` with its sidecar launchable (a fake world, or a real runtime
@@ -412,6 +413,47 @@ def check_sidecar_script(planner: Any) -> None:
     _raise(f"the sidecar script {script.name} cannot be run by tandem", problems)
 
 
+def check_presets(planner: Any, options: Mapping[str, Any] | None = None) -> int:
+    """Every preset the planner ships (``presets_dir``) is a usable file and gives options it accepts.
+
+    `tandem profile create --preset NAME` lays a planner's preset over a profile of that planner, and
+    the profile then asks the planner's ``validate_options``. A preset the planner itself refuses is
+    one every person who picks it hits, with nothing they can do about it. ``options`` is what the
+    preset is laid over (a profile's options before it); each is checked on its own. Returns how
+    many presets were checked, 0 when the planner ships none.
+    """
+    from tandem.core import presets
+    from tandem.planners.registry import options_for
+
+    factory = as_factory(planner)
+    directory = getattr(factory, "presets_dir", None)
+    if directory is None:
+        return 0
+    origin = getattr(getattr(factory, "info", None), "name", None) or "planner"
+    what = f"{planner_title(factory)}'s presets"
+    try:
+        found = presets.read_dir(Path(directory), origin=origin)
+    except Exception as exc:
+        _raise(what, [getattr(exc, "message", None) or f"{type(exc).__name__}: {exc}"])
+    if not found:
+        _raise(what, [f"its presets_dir {directory} holds no <name>.yml preset; leave presets_dir None"])
+    ours = presets.tandem_presets()
+    base = options_for(factory, options)
+    problems: list[str] = []
+    for name, preset in sorted(found.items()):
+        if preset.extends is not None and preset.extends not in ours:
+            problems.append(f"{name}: it extends {preset.extends!r}, which is not one of tandem's presets")
+        if name in ours and preset.extends != name:
+            problems.append(f"{name}: it has the name of one of tandem's presets, and must extend it")
+        laid = presets.overlay({"planner": {"options": base}}, preset.settings, replace=preset.replace)
+        try:
+            options_for(factory, laid["planner"]["options"])
+        except Exception as exc:
+            problems.append(f"{name}: its validate_options refuses the options it gives: {exc}")
+    _raise(what, problems)
+    return len(found)
+
+
 # --------------------------------------------------------------------------- building a goal
 
 
@@ -580,6 +622,10 @@ class PlannerConformance:
                 [f"given its own output {checked!r} it returned {again!r}; it must accept it unchanged"],
             )
         json.dumps(checked, default=str)
+
+    def test_its_presets_are_options_it_accepts(self) -> None:
+        if check_presets(self.factory(), self.options) == 0:
+            _skip(f"{planner_title(self.factory())} ships no presets")
 
     def test_its_doctor_checks_are_doctor_rows(self) -> None:
         # With no profile, as `tandem init` asks before one exists, and touching no hardware.

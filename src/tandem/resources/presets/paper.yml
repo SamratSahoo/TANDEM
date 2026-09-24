@@ -1,0 +1,70 @@
+# ─────────────────────────────────────────────────────────────────────────────────────────
+#  paper  —  the phase-planning settings of the TANDEM paper's demonstration collection
+#
+#  `tandem profile create NAME --preset paper`. This is the half of the paper's settings
+#  that is tandem's own and means the same whichever planner runs. A planner may ship a
+#  `paper` preset of its own, which extends this one with its settings: TiPToP's adds the
+#  TAMP and DATAFARM overrides (tandem/planners/tiptop/presets/paper.yml).
+#
+#  Every hitl setting is stated, so a profile cloned with --from keeps none of its own.
+#  Where each value comes from:
+#    [v3]    the `hitl:` block of hitl-tamp-vla's data-collection/cfg/tamp/*_v3.yml, the
+#            newest task configs of the paper's collection code (commit 41cf4ac, 2026-09-15,
+#            "... the v3 configs to use it"). The block is identical in all five v3 tasks.
+#            8c_pp_3bread_cloth_08272026_v4 is v3 with only `enabled: false`: the no-HITL
+#            control, the paper's Raw TAMP baseline.
+#    [lj]    not set in those files, so the default of the code that read them applied:
+#            tiptop/hitl/config.py (HITLConfig) at LJ1356/tiptop cf75a68, the tiptop commit
+#            hitl-tamp-vla pins.
+#    [paper] a setting hitl-tamp-vla had no key for, set to what the paper describes. Where
+#            the paper and that code differ, the value is the paper's; the comment says what
+#            the code did and which value reproduces it.
+#  With phase planning on, these are also tandem's defaults (tests/test_presets.py pins it).
+# ─────────────────────────────────────────────────────────────────────────────────────────
+title: The TANDEM paper's phase-planning settings
+summary: phase planning on, with the models, checks and retries of the paper's collection runs
+
+profile:
+  hitl:
+    enabled: true                     # [v3]
+    proposal_model: gemini-2.5-pro    # [v3] segments the task, invents predicates and operators
+    vlm_model: gemini-2.5-flash       # [v3] answers every per-atom check
+    max_attempts: 3                   # [lj] Paper: a rejected proposal is repaired, at most
+                                      # 3 attempts in all.
+    classify_initial: false           # [v3]
+    verify_retries: 1                 # [v3] one more go at a human phase whose check failed
+    verify_enforced: true             # [v3]
+
+    # The human-operator contract: which halves of it are put to a camera.
+    check_plan_effects: true          # [v3] the symbolic check across phases, before the arm moves
+    check_human_preconditions: false  # [v3]
+    check_human_effects: true         # [v3] add effects must hold, delete effects must not
+    check_tamp_preconditions: false   # [v3]
+    check_tamp_effects: false         # [v3]
+    precondition_enforced: false      # [v3]
+    save_vlm_io: true                 # [v3]
+    cache_path: null                  # [lj] no proposal cache: every trial asks the model afresh
+
+    # [lj] policy_type was not set, so its default "human" applied: the teleop hand-off,
+    # tandem's `teleop` executor. (The *_diffusion configs are the HITL-TAMP baseline.)
+    human_executor: teleop
+    # [paper] Sec. III-E: a demonstration is the recorded trajectory of every phase. A human
+    # phase answered "done" without teleoperating would leave a hole in it.
+    allow_unrecorded_human_phase: false
+    # [lj] cf75a68's robot planner merges consecutive robot phases into one cuTAMP goal
+    # (hitl/planners.py CuTAMPPhasePlanner). tandem's setting for the same thing:
+    conjoin_robot_phases: true
+    # [paper] Fig. 4 counts a phase TAMP could not plan as a failed trial ("Planning
+    # Failure"). hitl-tamp-vla had no setting for this: such a rollout went on to the
+    # operator's label prompt, and was filed under the tamp_planning failure stage.
+    on_robot_phase_failure: abort
+    # [paper] Sec. III-D: when verification fails, "TANDEM terminates the trial and excludes
+    # its trajectory from the dataset". cf75a68 asked the operator for a label instead, and
+    # their answer decided. `label` reproduces that.
+    on_verification_failure: exclude
+    # [paper] "After a human phase, the VLM evaluates the intended effects". cf75a68 did not
+    # check the task's last phase and left it to the operator's label. `false` reproduces that.
+    verify_final_phase: true
+    # [lj] cf75a68 took the verification frame from the external camera when the rig has one
+    # (tiptop_run._hitl_verification_image).
+    verification_camera: external

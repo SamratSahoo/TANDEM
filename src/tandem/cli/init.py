@@ -308,6 +308,7 @@ def _create_profile(
     planner: str | None = None,
 ) -> None:
     from tandem.cli import planners as planners_cli
+    from tandem.cli import profile as profile_cli
 
     # Resolved before anything is written: a default naming a planner this machine no longer has
     # stops here, not in a profile that every later command refuses.
@@ -371,8 +372,7 @@ def _create_profile(
 
     theme.ok(f"Created profile {name!r}", origin)
     theme.info(str(path))
-    for note in notes:
-        theme.info(note)
+    profile_cli.show_notes(notes)
 
     missing = profiles.missing_calibration(profile)
     if missing:
