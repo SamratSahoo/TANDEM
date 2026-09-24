@@ -80,9 +80,8 @@ def resolve_interpolation(value: Any) -> Any:
 def _resolve_all(obj):
     """Every string in a nested structure, dereferenced.
 
-    Applied when a profile is READ, not only when one is imported: profiles written before
-    the importer learned about embedded interpolations still have them on disk, and a stored
-    `${...}` should not stop the tool from opening the file that contains it.
+    Applied whenever a profile is READ: profiles written from the source monorepo's configs still have
+    them on disk, and a stored `${...}` should not stop the tool from opening the file that contains it.
     """
     if isinstance(obj, dict):
         return {k: _resolve_all(v) for k, v in obj.items()}

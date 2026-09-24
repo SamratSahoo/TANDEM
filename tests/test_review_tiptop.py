@@ -144,21 +144,6 @@ def test_a_remote_sam_needs_an_address_and_gets_it_rendered(profile):
     assert render.render_tiptop_config(profile)["perception"]["sam"] == {"mode": "local"}
 
 
-def test_an_imported_sam_server_keeps_its_address(tmp_path, monkeypatch):
-    from ruamel.yaml import YAML
-
-    from tandem.planners.tiptop.importers import build_profile
-    from tandem.planners.tiptop.options import options_of
-
-    monkeypatch.delenv("SAM_PORT", raising=False)
-    config = tmp_path / "tiptop.yml"
-    with config.open("w") as fh:
-        YAML().dump({"perception": {"sam": {"mode": "remote", "url": "http://sam-box:${oc.env:SAM_PORT,8124}"}}}, fh)
-    profile, _, _ = build_profile("rig", tiptop_config=config)
-    perception = options_of(profile).perception
-    assert perception.sam_mode == "remote" and perception.sam_url == "http://sam-box:8124"
-
-
 def test_the_pinned_tiptop_reads_the_sam_keys_tandem_renders():
     root = planner_sources("tiptop/tiptop/perception/sam2.py")
     text = (root / "tiptop" / "tiptop" / "perception" / "sam2.py").read_text()

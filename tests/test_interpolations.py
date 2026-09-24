@@ -1,8 +1,9 @@
-"""Importing an existing rig's setup into a profile.
+"""OmegaConf interpolations in what tandem reads, and URLs that cannot be used.
 
-The source configs are OmegaConf, so values arrive carrying ``${oc.env:VAR,default}``
-interpolations that only mean something inside that framework. A profile has to be concrete:
-anything left unresolved is a string that looks like configuration and behaves like a crash.
+The source monorepo's configs are OmegaConf, so values written from them carry ``${oc.env:VAR,default}``
+interpolations that only mean something inside that framework. A profile has to be concrete: anything
+left unresolved is a string that looks like configuration and behaves like a crash. (These were the
+importer's tests; the importer is gone, and reading a profile still resolves them.)
 """
 
 from __future__ import annotations
@@ -11,50 +12,47 @@ import pytest
 from pydantic import ValidationError
 
 from tandem.core import probe
-from tandem.core.profiles import Profile
+from tandem.core.profiles import Profile, resolve_interpolation
 from tandem.planners.tiptop import probe as tiptop_probe
-from tandem.planners.tiptop.importers import _deref
 from tandem.planners.tiptop.options import options_of
 
 
-class TestDeref:
+class TestResolveInterpolation:
     """OmegaConf interpolations must not survive into a profile."""
 
     def test_whole_string_interpolation(self, monkeypatch):
         monkeypatch.delenv("TIPTOP_HAND_CAMERA_ID", raising=False)
-        assert _deref("${oc.env:TIPTOP_HAND_CAMERA_ID,14846828}") == "14846828"
+        assert resolve_interpolation("${oc.env:TIPTOP_HAND_CAMERA_ID,14846828}") == "14846828"
 
     def test_embedded_interpolation(self, monkeypatch):
         """The one that bit: the port sits INSIDE a URL, so an anchored match missed it and
         the raw `${...}` was written to the profile, where urlparse later exploded on it."""
         monkeypatch.delenv("TIPTOP_M2T2_PORT", raising=False)
-        assert _deref("http://localhost:${oc.env:TIPTOP_M2T2_PORT,8123}") == "http://localhost:8123"
+        assert resolve_interpolation("http://localhost:${oc.env:TIPTOP_M2T2_PORT,8123}") == "http://localhost:8123"
 
     def test_environment_wins_over_the_default(self, monkeypatch):
-        """Import captures what the rig actually resolves to, not what its file would say on
-        a different machine."""
         monkeypatch.setenv("TIPTOP_M2T2_PORT", "9001")
-        assert _deref("http://localhost:${oc.env:TIPTOP_M2T2_PORT,8123}") == "http://localhost:9001"
+        assert resolve_interpolation("http://localhost:${oc.env:TIPTOP_M2T2_PORT,8123}") == "http://localhost:9001"
 
     def test_interpolation_without_a_default(self, monkeypatch):
         monkeypatch.setenv("SOME_VAR", "resolved")
-        assert _deref("${oc.env:SOME_VAR}") == "resolved"
+        assert resolve_interpolation("${oc.env:SOME_VAR}") == "resolved"
 
     def test_unresolvable_interpolation_is_left_alone(self, monkeypatch):
         """Nothing to resolve it to. Left intact so validation can name it, rather than
         silently becoming an empty string that fails somewhere else."""
         monkeypatch.delenv("NEVER_SET_VAR", raising=False)
-        assert _deref("${oc.env:NEVER_SET_VAR}") == "${oc.env:NEVER_SET_VAR}"
+        assert resolve_interpolation("${oc.env:NEVER_SET_VAR}") == "${oc.env:NEVER_SET_VAR}"
 
     def test_several_in_one_string(self, monkeypatch):
         monkeypatch.delenv("A_HOST", raising=False)
         monkeypatch.delenv("A_PORT", raising=False)
-        assert _deref("http://${oc.env:A_HOST,box}:${oc.env:A_PORT,80}/x") == "http://box:80/x"
+        assert resolve_interpolation("http://${oc.env:A_HOST,box}:${oc.env:A_PORT,80}/x") == "http://box:80/x"
 
     def test_plain_values_pass_through(self):
-        assert _deref("http://localhost:8123") == "http://localhost:8123"
-        assert _deref(15) == 15
-        assert _deref(None) is None
+        assert resolve_interpolation("http://localhost:8123") == "http://localhost:8123"
+        assert resolve_interpolation(15) == 15
+        assert resolve_interpolation(None) is None
 
 
 class TestUrlValidation:
@@ -106,7 +104,7 @@ class TestProbeRobustness:
 
 
 class TestStoredProfilesSelfHeal:
-    """A profile written before the importer knew about embedded interpolations."""
+    """A profile file that still holds an interpolation, written from one of the monorepo's configs."""
 
     def test_a_stored_interpolation_still_loads(self, profile):
         """Turning a probe crash into a profile that cannot be opened at all would be a

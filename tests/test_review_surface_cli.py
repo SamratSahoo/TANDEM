@@ -366,9 +366,7 @@ def test_tandem_plan_takes_planner_and_still_backend(model, photo):
 def test_what_a_planner_author_is_told_to_import_is_there():
     import tandem
     from tandem.planners import (  # noqa: F401
-        WARNING_NOTE,
         OptionsView,
-        ProfileImporter,
         RuntimeNotReady,
         TandemError,
         register_planner,

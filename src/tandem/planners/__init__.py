@@ -4,8 +4,8 @@ Everything a planner author needs is importable from here::
 
     from tandem.planners import Capabilities, Parameter, Planner, PlannerInfo, Predicate, register_backend
 
-and what its hooks deal in: ``OptionsView`` (describe_options), ``ProfileImporter`` and ``WARNING_NOTE``
-(importer), ``RuntimeNotReady`` (require_ready) and ``TandemError`` (any refusal a person reads).
+and what its hooks deal in: ``OptionsView`` (describe_options), ``RuntimeNotReady`` (require_ready) and
+``TandemError`` (any refusal a person reads).
 
 - ``Planner``: the base class. Declare ``info`` and ``CAPABILITIES``, implement ``perceive``,
   ``plan`` and ``execute``; every other verb has a default, and the class is its own factory.
@@ -58,8 +58,6 @@ _EXPORTS = {
     "register_backend": "tandem.planners.registry",
     "register_planner": "tandem.planners.registry",
     "OptionsView": "tandem.planners.base",
-    "ProfileImporter": "tandem.planners.base",
-    "WARNING_NOTE": "tandem.planners.base",
     "RuntimeNotReady": "tandem.core.errors",
     "TandemError": "tandem.core.errors",
 }
@@ -80,7 +78,6 @@ __all__ = [
     "Planner",
     "PlannerInfo",
     "Predicate",
-    "ProfileImporter",
     "RuntimeNotReady",
     "RuntimeRecipe",
     "SceneView",
@@ -90,7 +87,6 @@ __all__ = [
     "TampBackend",
     "TandemError",
     "UnsupportedVerb",
-    "WARNING_NOTE",
     "register_backend",
     "register_planner",
 ]
@@ -98,7 +94,6 @@ __all__ = [
 if TYPE_CHECKING:  # pragma: no cover - for editors and type checkers only
     from tandem.core.errors import RuntimeNotReady, TandemError
     from tandem.planners.base import (
-        WARNING_NOTE,
         BackendContext,
         BackendError,
         Capabilities,
@@ -108,7 +103,6 @@ if TYPE_CHECKING:  # pragma: no cover - for editors and type checkers only
         OptionsView,
         PlannerInfo,
         PlanResult,
-        ProfileImporter,
         SceneView,
         SourcePin,
         TampBackend,

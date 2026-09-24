@@ -332,7 +332,7 @@ def test_planners_default_works_while_the_active_profile_does_not_load(active):
 # --- --from with flags it cannot honour -------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("flag", [["--planner", "no_such_planner"], ["--import-from", "."]])
+@pytest.mark.parametrize("flag", [["--planner", "no_such_planner"]])
 def test_create_from_refuses_the_flags_a_clone_would_ignore(active, flag):
     result = _run("profile", "create", "eps", "--from", active.name, *flag)
     assert result.exit_code != 0

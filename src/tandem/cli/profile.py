@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import shutil
-from pathlib import Path
 
 import typer
 from rich.syntax import Syntax
@@ -231,25 +230,10 @@ def show(
 def create(
     name: str = typer.Argument(..., help="Profile name (lowercase, digits, - and _)."),
     from_profile: str = typer.Option(None, "--from", help="Clone an existing profile."),
-    import_from: Path = typer.Option(
-        None,
-        "--import-from",
-        help="Import from the planner's own older setup (for TiPToP: a hitl-tamp-vla checkout).",
-        exists=True,
-        file_okay=False,
-    ),
-    tamp_config: Path = typer.Option(
-        None,
-        "--tamp-config",
-        help="One task config inside that setup to import the task and its settings from (a cfg/tamp/*.yml).",
-        exists=True,
-        dir_okay=False,
-    ),
     planner: str = typer.Option(
         None,
         "--planner",
-        help="The planner whose setup --import-from reads, and the new profile plans with. "
-        "Default: the machine's default planner.",
+        help="The planner the new profile plans with. Default: the machine's default planner.",
     ),
     preset: str = typer.Option(
         None,
@@ -263,21 +247,15 @@ def create(
 ) -> None:
     if profiles.exists(name) and not force:
         raise ProfileError(f"Profile {name!r} already exists.", hint="Pass --force to overwrite it.")
-    if from_profile and (planner or import_from or tamp_config):
-        # A clone is the source as it is; these would be silently ignored, a planner name nothing checks
-        # included. Loud instead, with the way to get what was meant.
-        ignored = [
-            flag
-            for flag, value in (("--planner", planner), ("--import-from", import_from), ("--tamp-config", tamp_config))
-            if value
-        ]
+    if from_profile and planner:
+        # A clone is the source as it is; a planner name nothing checks would be silently ignored. Loud
+        # instead, with the way to get what was meant.
         raise ProfileError(
-            f"--from clones {from_profile!r} as it is, so {', '.join(ignored)} would be ignored.",
+            f"--from clones {from_profile!r} as it is, so --planner would be ignored.",
             hint=f"Clone first, then `tandem planners use NAME --profile {name}` to switch its planner.",
         )
 
     calibration: dict = {}
-    notes: list[str] = []
     if from_profile:
         source = profiles.load(from_profile)
         profile = source.model_copy(deep=True)
@@ -285,13 +263,6 @@ def create(
         profile.description = f"copied from {from_profile}"
         calibration = profiles.calibration(source)
         origin = f"cloned from {from_profile}"
-    elif import_from or tamp_config:
-        from tandem.cli import planners as planners_cli
-
-        profile, calibration, notes = import_profile(
-            name, planners_cli.planner_for_new_profile(planner), source=import_from, config=tamp_config
-        )
-        origin = f"imported from {import_from or tamp_config}"
     else:
         from tandem.cli import planners as planners_cli
 
@@ -309,7 +280,7 @@ def create(
                 profile.planner = profiles.planner_spec(chosen, profile=name)
         origin = "from the built-in template"
 
-    # After the base -- template, clone or import -- and its planner are settled, since a preset is looked
+    # After the base -- template or clone -- and its planner are settled, since a preset is looked
     # up for the profile's planner and says what to change in it. Before --prompt, which is this profile's
     # own and wins over anything a preset says about the task.
     laid: tuple[list[presets.Preset], dict] | None = None
@@ -328,7 +299,6 @@ def create(
 
     theme.ok(f"Created profile {name!r}", origin)
     theme.info(str(path))
-    show_notes(notes)
     if laid is not None:
         show_preset(profile, *laid)
     warn_planner_profile_checks(profile)
@@ -351,17 +321,6 @@ def warn_planner_profile_checks(profile: profiles.Profile) -> None:
     for check in checks:
         if check.group == "profile" and check.state == probe.FAIL:
             theme.warn(f"{check.name}: {check.detail}", check.hint or None)
-
-
-def show_notes(notes: list[str]) -> None:
-    """A ``ProfileImporter``'s notes: the ones it marks as warnings as warnings, the rest as information."""
-    from tandem.planners.base import WARNING_NOTE
-
-    for note in notes:
-        if note.startswith(WARNING_NOTE):
-            theme.warn(note[len(WARNING_NOTE) :])
-        else:
-            theme.info(note)
 
 
 def show_preset(profile: profiles.Profile, stack: list[presets.Preset], changes: dict[str, tuple]) -> None:
@@ -423,20 +382,6 @@ def list_presets(
         f"for a profile that plans with {chosen}",
         "`tandem profile create NAME --preset NAME` lays one over a new profile and says what it changed",
     )
-
-
-def import_profile(
-    name: str, planner: str, *, source: Path | None, config: Path | None
-) -> tuple[profiles.Profile, dict, list[str]]:
-    """``(profile, calibration, notes)`` from ``planner``'s own older setup, through its importer."""
-    importer = registry.importer(planner)
-    if importer is None:
-        raise TandemError(
-            f"The {registry.info(planner).title} planner has nothing to import a profile from.",
-            hint="Name the planner whose setup it is with --planner, or create the profile from the template "
-            "(leave out --import-from) and edit its planner.options.",
-        )
-    return importer.build(name, source=source, config=config)
 
 
 @app.command("migrate", help="Rewrite profiles in the current layout (planner settings under planner.options).")

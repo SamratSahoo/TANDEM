@@ -27,7 +27,6 @@ from tandem.core.profiles import HitlSpec, Profile
 from tandem.planners import registry
 from tandem.planners.testing import ConformanceError, check_presets
 from tandem.planners.tiptop import tamp_keys
-from tandem.planners.tiptop.importers import HITL_KEYS, IMPORTER, LJ_BEHAVIOURS
 from tandem.planners.tiptop.options import options_of, validate_tamp
 from tandem.planners.tiptop.recipe import RECIPE
 
@@ -48,6 +47,10 @@ def _template(name: str = "t") -> Profile:
 
 def _paper() -> Profile:
     return presets.apply(_template(), "paper")
+
+
+def _tamp(profile: Profile) -> dict:
+    return dict(profile.planner.options.get("tamp") or {})
 
 
 def _raw(path: Path) -> dict:
@@ -126,8 +129,8 @@ def test_tandems_half_states_every_phase_planning_setting():
 
 
 # What the paper's runs had that no v3 config names: LJ1356's tiptop did each unconditionally, and the
-# pinned TANDEM branch does each only when asked (importers.LJ_BEHAVIOURS). The preset asks.
-LJ_ON = {key: True for key in LJ_BEHAVIOURS}
+# pinned TANDEM branch does each only when asked. The preset asks.
+LJ_ON = {"table_plane_support_vote": True, "disjoint_object_masks": True, "blend_stretch_to_caps": True}
 
 
 def test_the_tamp_half_is_what_all_five_v3_configs_share_plus_what_their_tiptop_always_did():
@@ -155,22 +158,19 @@ def test_the_hitl_half_is_the_v3_hitl_block():
     assert all(block == blocks[0] for block in blocks), "the five v3 tasks share one hitl block"
     hitl = _paper().hitl
     for key, value in blocks[0].items():
-        assert getattr(hitl, HITL_KEYS[key][0]) == value, key
+        assert getattr(hitl, key) == value, key
 
 
 @pytest.mark.parametrize("path", V3, ids=lambda p: p.stem)
-def test_importing_a_v3_config_gives_the_paper_preset_plus_that_tasks_own_settings(path):
-    imported, _, _ = IMPORTER.build("t", config=path)
-    paper = _paper()
-    assert imported.hitl == paper.hitl
-    extra = set(options_of(imported).tamp) - set(options_of(paper).tamp)
+def test_each_v3_config_is_the_paper_preset_plus_that_tasks_own_settings(path):
+    tamp = validate_tamp({**_raw(path)["tamp_overrides"], **LJ_ON})
+    paper = _tamp(_paper())
+    extra = set(tamp) - set(paper)
     # The task's own: its grasp and perception tuning, and -- for the puzzle and the bread/box task --
     # the surface-fitted placement its runs were tuned with (tamp_keys.PLACEMENT_GATED and the gate).
     own = {"grasp_center_weight", "grasp_threshold", "voxel_downsample_size", "placement_support"}
     assert extra <= own | set(tamp_keys.PLACEMENT_GATED)
-    shared = {k: v for k, v in options_of(imported).tamp.items() if k not in extra}
-    # The import switches on LJ's three as the preset does (test_import_hitl), so the two agree exactly.
-    assert shared == options_of(paper).tamp
+    assert {k: v for k, v in tamp.items() if k not in extra} == paper
 
 
 def test_the_vae_checkpoint_is_the_one_tandem_ships_where_the_runtime_puts_it(tmp_path):

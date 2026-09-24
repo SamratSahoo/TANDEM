@@ -60,13 +60,12 @@ LIGHT_MODULES = [
     "tandem.planners.tiptop",
     "tandem.planners.tiptop.backend",
     "tandem.planners.tiptop.factory",
-    # TiPToP's own config, schema, probes and importer: read to validate a profile and to run doctor,
-    # both of which a laptop does.
+    # TiPToP's own config, schema and probes: read to validate a profile and to run doctor, both of which
+    # a laptop does.
     "tandem.planners.tiptop.render",
     "tandem.planners.tiptop.tamp_keys",
     "tandem.planners.tiptop.runtime",
     "tandem.planners.tiptop.probe",
-    "tandem.planners.tiptop.importers",
     # Deprecated, and only a re-export; kept light like what it re-exports.
     "tandem.core.runtime",
     # A planner's runtime recipe is read to list planners, so fetching and building stay behind calls.

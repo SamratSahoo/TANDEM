@@ -7,7 +7,6 @@ build fingerprint means even the expensive kernel compile is skipped when nothin
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
@@ -36,14 +35,6 @@ def init(
         "and the teleop settings. An existing profile is never touched by it.",
     ),
     profile_name: str = typer.Option("default", "--profile", help="Name for the profile to create."),
-    import_from: Path = typer.Option(
-        None,
-        "--import-from",
-        help="Import the setup from the planner's own older configuration (for TiPToP: a hitl-tamp-vla "
-        "checkout).",
-        exists=True,
-        file_okay=False,
-    ),
     planner: str = typer.Option(
         None,
         "--planner",
@@ -152,7 +143,6 @@ def init(
     else:
         _create_profile(
             profile_name,
-            import_from=import_from,
             interactive=interactive,
             viz_only=viz_only,
             planner=planner,
@@ -353,7 +343,6 @@ def _render_checks(checks: list[probe.Check]) -> None:
 def _create_profile(
     name: str,
     *,
-    import_from: Path | None,
     interactive: bool,
     viz_only: bool = False,
     planner: str | None = None,
@@ -366,44 +355,10 @@ def _create_profile(
     # Resolved before anything is written: a default naming a planner this machine no longer has
     # stops here, not in a profile that every later command refuses.
     planner = planners_cli.planner_for_new_profile(planner)
-    calibration: dict = {}
-    notes: list[str] = []
 
-    # The planner's own importer, if it has older configuration to import from (TiPToP: a checkout of
-    # the hitl-tamp-vla monorepo it came from).
-    importer = registry.importer(planner)
-    if import_from is None and interactive and importer is not None:
-        theme.info("A profile holds the task, the cameras, the planner and the planner's settings.")
-        guess = importer.find(Path.cwd())
-        if guess is not None:
-            prompt = f"  Import settings from {guess}?"
-            if typer.confirm(prompt, default=True):
-                import_from = guess
-
-    if import_from is not None:
-        if importer is None:
-            raise TandemError(
-                f"The {registry.info(planner).title} planner has nothing to import a profile from.",
-                hint="Run `tandem init` without --import-from, or with --planner naming the planner whose setup it is.",
-            )
-        config = None
-        options = importer.configs(import_from)
-        if options and interactive:
-            theme.info(f"{len(options)} task config(s) found in {importer.source}.")
-            for i, path in enumerate(options[:12], 1):
-                theme.console().print(f"    [accent]{i:>2}[/accent]  [faint]{path.stem}[/faint]")
-            if len(options) > 12:
-                theme.console().print(f"    [faint]… and {len(options) - 12} more[/faint]")
-            answer = typer.prompt("  Import one? (number, or blank for none)", default="").strip()
-            if answer.isdigit() and 1 <= int(answer) <= len(options):
-                config = options[int(answer) - 1]
-        profile, calibration, notes = importer.build(name, source=import_from, config=config)
-        origin = f"imported from {import_from}"
-    else:
-        profile = profiles.load_file(resources.path("profile_template.yml"), name=name)
-        origin = "from the built-in template"
-
-    if viz_only and import_from is None:
+    profile = profiles.load_file(resources.path("profile_template.yml"), name=name)
+    origin = "from the built-in template"
+    if viz_only:
         # On a laptop a profile is just a folder of trajectories collected elsewhere. Keeping
         # the template's cameras would mean warning about extrinsics for hardware that is not
         # here and never will be.
@@ -415,10 +370,8 @@ def _create_profile(
         typed = typer.prompt("  Task prompt", default=profile.task.prompt).strip()
         profile.task.prompt = typed
 
-    # The planner init set this machine up for, whether the rest came from the template or an import:
-    # a profile naming a different planner from the runtime just built would not collect. An import
-    # is already that planner's, options and all; the template's options are TiPToP's, and go when
-    # the planner is another.
+    # The planner init set this machine up for: a profile naming a different planner from the runtime just
+    # built would not collect. The template's options are TiPToP's, and go when the planner is another.
     if profile.planner.backend != planner:
         profile.planner = profiles.planner_spec(planner, profile=name)
     # After the planner is settled, as `tandem profile create --preset` does: a preset is looked up for
@@ -432,12 +385,9 @@ def _create_profile(
         if typed:
             profile.task.prompt = typed
     path = profiles.save(profile)
-    if calibration:
-        profile.calibration_file().write_text(json.dumps(calibration, indent=2) + "\n")
 
     theme.ok(f"Created profile {name!r}", origin)
     theme.info(str(path))
-    profile_cli.show_notes(notes)
     if laid is not None:
         profile_cli.show_preset(profile, *laid)
     profile_cli.warn_planner_profile_checks(profile)

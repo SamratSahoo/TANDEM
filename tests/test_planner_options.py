@@ -608,37 +608,24 @@ def test_replaying_a_trajectory_asks_the_profiles_planner(tmp_path):
         registry.replay("tiptop", tmp_path)
 
 
-def test_importing_a_profile_goes_through_the_planners_importer(isolated_env, tmp_path):
-    registry.register_backend("toy", _toy())
-    assert registry.importer("toy") is None
-    importer = registry.importer("tiptop")
-    assert importer.source == "a hitl-tamp-vla checkout"
-
-    rig = tmp_path / "hitl-tamp-vla"
-    config = rig / "tiptop" / "tiptop" / "config"
-    config.mkdir(parents=True)
-    (config / "tiptop.yml").write_text(
-        "robot: {type: ur5, host: 10.1.2.3, dof: 6, q_home: [0, 0, 0, 0, 0, 0], q_capture: [0, 0, 0, 0, 0, 0]}\n"
-        "cameras: {perception: external, external: {serial: '111'}}\n"
-        "perception: {m2t2: {url: 'http://grasps:9000'}}\n"
-    )
-    assert importer.find(tmp_path) == rig
-    profile, calibration, notes = importer.build("rig", source=rig)
-    assert profile.planner.backend == "tiptop"
-    assert options_of(profile).robot.host == "10.1.2.3" and options_of(profile).robot.dof == 6
-    assert options_of(profile).perception.m2t2.url == "http://grasps:9000"
-    assert profile.cameras.external.serial == "111" and profile.cameras.hand is None
-
-
-def test_profile_create_import_from_refuses_a_planner_with_nothing_to_import(isolated_env, tmp_path):
+def test_there_is_no_importer_any_more(isolated_env, tmp_path):
+    """A profile no longer holds a rig to import: the hitl-tamp-vla importer, its hook and its flags are gone."""
+    import tandem.planners as sdk
     from tandem.cli.app import app
 
-    registry.register_backend("toy", _toy())
-    result = CliRunner().invoke(
-        app, ["profile", "create", "x", "--import-from", str(tmp_path), "--planner", "toy"]
-    )
-    assert result.exit_code != 0
-    assert "has nothing to import a profile from" in result.exception.message
+    assert not hasattr(registry, "importer")
+    assert not hasattr(TIPTOP, "importer")
+    for name in ("ProfileImporter", "WARNING_NOTE"):
+        with pytest.raises(AttributeError):
+            getattr(sdk, name)
+    with pytest.raises(ImportError):
+        __import__("tandem.planners.tiptop.importers")
+    for flags in (["--import-from", str(tmp_path)], ["--tamp-config", str(tmp_path / "x.yml")]):
+        result = CliRunner().invoke(app, ["profile", "create", "x", *flags])
+        assert result.exit_code == 2, result.output
+        assert "No such option" in result.output
+    result = CliRunner().invoke(app, ["init", "-y", "--import-from", str(tmp_path)])
+    assert result.exit_code == 2 and "No such option" in result.output
 
 
 def test_a_merge_prefers_the_planner_runtimes_own_ffmpeg(tmp_path, monkeypatch):

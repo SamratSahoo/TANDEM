@@ -764,8 +764,6 @@ class BackendFactory(Protocol):
       doctor checks for every planner.
     - ``replay(rollout_dir, *, settings=None) -> None``: open a recorded leg in the planner's own
       viewer (`tandem traj open`). Default: refused, saying the planner has none.
-    - ``importer``: a ``ProfileImporter`` building a profile from the planner's own older
-      configuration (`tandem profile create --import-from`). Default: None.
     - ``presets_dir``: a directory of ``<name>.yml`` presets for this planner's ``planner.options``
       (`tandem profile create --preset NAME`; the layout is in ``tandem.core.presets``). Default: None.
     """
@@ -785,36 +783,6 @@ class BackendFactory(Protocol):
 
     def runtime(self, settings: Any = None) -> BackendRuntime | None:
         """This planner's runtime on this machine, or None when it is pure Python and has none."""
-
-
-class ProfileImporter(Protocol):
-    """Builds a profile from a planner's own configuration elsewhere -- a checkout of the system it came from.
-
-    What `tandem profile create --import-from` and `tandem init` run, through the named planner's
-    factory, so neither has to know what that other system's files look like.
-    """
-
-    #: What it imports from, for a help line: "a hitl-tamp-vla checkout".
-    source: str
-
-    def find(self, near: Path) -> Path | None:
-        """A source at or above ``near`` worth suggesting, or None. Only a suggestion: nothing is read."""
-
-    def configs(self, source: Path) -> list[Path]:
-        """Task configurations inside ``source`` a person may pick one of, for the task and its settings."""
-
-    def build(self, name: str, *, source: Path | None = None, config: Path | None = None) -> tuple[Any, dict, list[str]]:
-        """``(profile, calibration, notes)``: a ``Profile`` named ``name``, extrinsics keyed by camera
-        serial, and one line for each thing a person should know about what was and was not imported.
-
-        A note starting with ``WARNING_NOTE`` is shown as a warning. Use it for something the source set
-        that the profile does not carry, and that the person has to decide about before collecting.
-        """
-
-
-#: The prefix of a ``ProfileImporter`` note that is a warning rather than information. A prefix, so the
-#: notes stay plain strings every importer and every caller already handles.
-WARNING_NOTE = "warning: "
 
 
 # Verbs a hosted backend answers, and the only strings that cross the wire. Kept here so the one

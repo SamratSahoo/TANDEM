@@ -8,20 +8,18 @@
 #  to guide autonomous motion generation with DATAFARM."
 #
 #  It sets no robot, perception or cameras. Those belong to the rig, not to the experiment:
-#  combine it with --from or --import-from to keep a rig's.
+#  combine it with --from to keep a rig's.
 #
 #  [v3] marks a value from the `tamp_overrides:` of hitl-tamp-vla's five
 #  data-collection/cfg/tamp/*_v3.yml (commit 41cf4ac). Every key here is set, and set the
 #  same, in all five -- and in all eighteen of its task configs. Left out on purpose:
 #    - grasp_center_weight: 30 and grasp_threshold: 0.02 (8c_pp_3bread_cloth only), and
 #      voxel_downsample_size: 0.005 (4_bread_box and 8c_pp_3bread_cloth only). Each is that
-#      task's own. To get them, import the task's v3 config with --tamp-config and no --preset:
-#      it already carries every setting here, and this preset would replace its TAMP block.
+#      task's own.
 #    - the placement_* keys of 1_toy_puzzle_v3 and 4_bread_box_v3 (surface-fitted placement:
-#      "Solve Constrained Puzzle" and "Store Bread in Closed Box" only). Import the task's
-#      config with --tamp-config to get them; the import also turns on the three switches
-#      LJ1356's tiptop always had on (table_plane_support_vote, disjoint_object_masks,
-#      blend_stretch_to_caps), as this preset does ([LJ] below), since every v3 run had them.
+#      "Solve Constrained Puzzle" and "Store Bread in Closed Box" only), each that task's own.
+#  It does turn on the three switches LJ1356's tiptop always had on (table_plane_support_vote,
+#  disjoint_object_masks, blend_stretch_to_caps; [LJ] below), since every v3 run had them.
 #
 #  hitl-tamp-vla pins LJ1356/tiptop cf75a68 and its cuTAMP. TiPToP here pins the TANDEM branches
 #  of SamratSahoo/tiptop and cuTAMP (planners/tiptop/recipe.py: main plus LJ1356's placement
