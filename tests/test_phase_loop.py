@@ -247,7 +247,7 @@ def test_a_phase_that_cannot_be_planned_ends_the_attempt_at_tamp_planning(build)
 
     assert outcome.failure_stage == "tamp_planning"
     assert outcome.legs_recorded == 0
-    assert ("phase_plan_failed", {"reason": "no grasp", "policy": "abort"}) in sink.events
+    assert ("phase_plan_failed", {"reason": "no grasp", "policy": "abort", "phase_index": 0}) in sink.events
 
 
 class CannotTakeItBack(FakeBackend):

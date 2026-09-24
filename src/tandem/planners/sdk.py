@@ -99,16 +99,10 @@ from tandem.planners.base import (
 from tandem.planners.registry import _NAME as _PLANNER_NAME
 from tandem.planners.runtime import RuntimeRecipe
 from tandem.planning.prompts import PROMPT_SLOTS
-from tandem.planning.symbols import Predicate
+from tandem.planning.symbols import Predicate, ProposalError, parse_operator_signature, validate_template
 
 _log = logging.getLogger(__name__)
 
-# `Pick(?obj: movable)` or `Pick(obj: movable)`: the operator signatures Capabilities.robot_operators
-# holds. Both spellings are accepted because the human operators the proposer invents render without
-# the `?` (Parameter strips it) and the BRIEF's robot ones with it; what matters is that each names
-# typed parameters, since that is what a reader of the provenance record needs.
-_SIGNATURE = re.compile(r"^([A-Za-z_]\w*)\((.*)\)$")
-_TYPED_PARAMETER = re.compile(r"^\??([A-Za-z_]\w*)\s*:\s*([A-Za-z_][\w-]*)$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 
 # The boolean switches of a Capabilities. A truthy string ("false") in one of these reads as True,
@@ -242,12 +236,14 @@ def capability_problems(caps: Any) -> list[str]:
         if not isinstance(template, str):
             problems.append(f"predicate_descriptions[{key!r}] is not a string")
             continue
+        # The rule an invented predicate's template is held to, since describe() renders both: a
+        # trial format against stand-in names let `{0.x}` crash this check and `{0[1]}` pass it.
         try:
-            template.format(*(f"x{i}" for i in range(predicates[key].arity)))
-        except (IndexError, KeyError, ValueError) as exc:
+            validate_template(template, predicates[key].arity, f"predicate_descriptions[{key!r}]")
+        except ProposalError as exc:
             problems.append(
                 f"predicate_descriptions[{key!r}] does not format with {predicates[key].arity} argument(s) "
-                f"({{0}}, {{1}}, ...): {type(exc).__name__}: {exc}"
+                f"({{0}}, {{1}}, ...): {exc}"
             )
 
     for field in ("exclusive_arguments", "moved_arguments"):
@@ -365,17 +361,16 @@ def factory_problems(factory: Any) -> list[str]:
 def _operator_problem(signature: Any, known_types: set[str]) -> str | None:
     if not isinstance(signature, str):
         return f"robot_operators holds a {type(signature).__name__}, not a signature string"
-    match = _SIGNATURE.match(signature.strip())
-    if match is None:
-        return f"robot_operators entry {signature!r} is not a signature such as 'Pick(?obj: movable)'"
-    body = match.group(2).strip()
-    for part in (p.strip() for p in body.split(",")) if body else ():
-        parameter = _TYPED_PARAMETER.match(part)
-        if parameter is None:
-            return f"robot_operators entry {signature!r}: {part!r} is not a typed parameter such as '?obj: movable'"
-        if parameter.group(2) not in known_types:
+    # The same reading the record re-renders these with (plan.operator_signature), so a declaration
+    # this accepts is one the record can write in its single spelling.
+    try:
+        _, parameters = parse_operator_signature(signature)
+    except ValueError as exc:
+        return f"robot_operators entry {exc}"
+    for _, type_name in parameters:
+        if type_name not in known_types:
             return (
-                f"robot_operators entry {signature!r} uses the type {parameter.group(2)!r}, which is none of "
+                f"robot_operators entry {signature!r} uses the type {type_name!r}, which is none of "
                 f"the declared types ({', '.join(sorted(known_types))})"
             )
     return None

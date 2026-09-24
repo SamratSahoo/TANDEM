@@ -523,7 +523,7 @@ class PhaseLoop:
             self.events.log(f"decomposing the task with {self.cfg.proposal_model}")
         try:
             with recording_to(self._vlm_dir):
-                plan, failure = asyncio.run(
+                plan = asyncio.run(
                     build_plan(
                         image,
                         self._task,
@@ -538,13 +538,9 @@ class PhaseLoop:
         except Exception as exc:
             # A proposal the repair loop never got to validate (ProposalError after max_attempts)
             # lands here, and so does a model that could not be reached at all. Both are the paper's
-            # "invention" failure: there is no task plan to run.
+            # "invention" failure: there is no task plan to run. This is the only way build_plan
+            # reports one; it never returns without a plan.
             reason = f"could not decompose the task: {type(exc).__name__}: {exc}"
-            self.events.log(reason)
-            self._end("failure", "invention", reason)
-            return False
-        if plan is None:
-            reason = failure or "the task could not be decomposed"
             self.events.log(reason)
             self._end("failure", "invention", reason)
             return False
@@ -722,7 +718,9 @@ class PhaseLoop:
         if self._plan is not None:
             # Every atom of the leg is one the planner supplies for itself (HandEmpty, for TipTop),
             # so no goal survives rendering into its language. The plan asked for the leg; the
-            # planner was never going to be able to take it.
+            # planner was never going to be able to take it. proposal.check_plan refuses such a leg
+            # inside the repair loop, so this is the backstop for one cut differently from the legs
+            # it checked: the rest of a conjoined run whose first phase was handed to a person.
             atoms = ", ".join(sorted(str(a) for p in run for a in p.atoms)) or "no atoms"
             stage = "invention"
             reason = (
@@ -761,7 +759,12 @@ class PhaseLoop:
         """
         policy = self.cfg.on_robot_phase_failure
         self.events.log(f"the planner could not plan this phase: {reason}")
-        self.events.event("phase_plan_failed", reason=reason, policy=policy)
+        self.events.event(
+            "phase_plan_failed",
+            reason=reason,
+            policy=policy,
+            phase_index=self._plan.index if self._plan is not None else None,
+        )
 
         if self._plan is None or policy == "abort":
             self._plan = None
@@ -772,7 +775,9 @@ class PhaseLoop:
             self._replan(reason, run)
             return
         self.events.log("offering this phase to you as teleop instead")
-        phase = self._plan.hand_current_to_human()
+        # With the planner's reason, so hitl.json says this step was the robot's and why a person did
+        # it, rather than reading as a human phase the model proposed.
+        phase = self._plan.hand_current_to_human(reason=reason)
         self._run_human_phase(phase)
 
     def _replan(self, reason: str, run: Sequence[Phase]) -> None:
@@ -891,6 +896,8 @@ class PhaseLoop:
                 request = HumanPhaseRequest.from_view(view, operator=phase.operator)
                 carried_out = self._lend_arm(cfg.human_executor, request)
                 if carried_out.status == "aborted":
+                    # On the record too: whatever it did write is among the trial's raw legs.
+                    self._record_human_leg(index, attempt, carried_out)
                     self._human_executor_failed(phase)
                     return
                 if not carried_out.recorded and not by_hand:
@@ -899,6 +906,13 @@ class PhaseLoop:
             elif not by_hand:
                 self._refuse_unrecorded(index, "the step was answered as done without being carried out")
                 continue
+            # The answer stands, so how the step was carried out goes on the record -- by the
+            # executor or by hand, with a leg or without -- before anything checks it. A step staged
+            # by hand verifies exactly like a teleoperated one, and only this says the merged
+            # demonstration has no segment for it.
+            self._record_human_leg(index, attempt, carried_out)
+            if carried_out is None:
+                self.events.event("human_phase_by_hand", phase_index=index, attempt=attempt)
             # Busy again: checking the step, then on to whatever is next. Said here because nothing
             # else says it any more -- the perception pass that used to follow every person's step
             # did, and without it a step answered "done" and followed by another person's step would
@@ -926,6 +940,26 @@ class PhaseLoop:
             if skipped is not None:
                 # Recorded as NOT checked rather than as passed, so the trail cannot be read as a
                 # verification that happened.
+                self.events.log(f"not verifying this step: {skipped}")
+                self.events.event(
+                    "human_phase_verified",
+                    phase_index=index,
+                    attempt=attempt,
+                    ok=None,
+                    skipped=skipped,
+                    verdicts=[],
+                )
+                break
+
+            if self._nothing_a_camera_settles(
+                index, "effect check", phase.add_effects | phase.delete_effects
+            ):
+                # Nothing to put to the camera -- "take the toy out of the gripper" adds HandEmpty()
+                # and deletes Holding(toy), neither of which a third-person frame can settle. That
+                # used to go to the classifier as zero questions, come back ok with no verdicts, and
+                # read in hitl.json as a phase checked and passed. It is a phase never checked, so it
+                # is on the record as unchecked, with no frame taken for it.
+                skipped = "none of its effects is something a camera can settle"
                 self.events.log(f"not verifying this step: {skipped}")
                 self.events.event(
                     "human_phase_verified",
@@ -1040,12 +1074,13 @@ class PhaseLoop:
 
     def _human_preconditions_hold(self, phase, index: int | None) -> bool:
         """Put a human phase's preconditions to the camera. False means the trial was ended."""
-        from tandem.planning.grounding import checkable, verify_preconditions
+        from tandem.planning.grounding import verify_preconditions
 
         invented = self._invented()
         # Nothing a camera can settle -- HandEmpty() alone, say -- is not a check that passed, and it
-        # is no reason to take a frame either.
-        if not checkable(phase.preconditions, invented, self.caps):
+        # is no reason to take a frame either. It is on the record as unchecked instead.
+        pre = phase.preconditions
+        if not pre or self._nothing_a_camera_settles(index, "human phase precondition check", pre):
             return True
         check = self._camera_check(
             self._verification_frame,
@@ -1062,11 +1097,12 @@ class PhaseLoop:
         pass's perception image rather than a fresh grab, so the check and the plan look at the same
         workspace. False means the trial was ended (``precondition_enforced``).
         """
-        from tandem.planning.grounding import checkable, verify_atoms
+        from tandem.planning.grounding import verify_atoms
 
         expected = self._plan.expected_now()
         invented = self._invented()
-        if not checkable(expected, invented, self.caps):
+        what = "robot leg precondition check"
+        if not expected or self._nothing_a_camera_settles(self._plan.index, what, expected):
             return True
         check = self._camera_check(
             lambda: _open_image(scene.rgb_path),
@@ -1139,12 +1175,12 @@ class PhaseLoop:
         on the record: a placement the robot believes it made and the image does not show is worth
         knowing about when a later phase fails.
         """
-        from tandem.planning.grounding import checkable, verify_atoms
+        from tandem.planning.grounding import verify_atoms
 
         index = self._plan.index
         atoms: frozenset[Atom] = frozenset().union(*(p.add_effects for p in run))
         invented = self._invented()
-        if not checkable(atoms, invented, self.caps):
+        if not atoms or self._nothing_a_camera_settles(index, "robot leg effect check", atoms):
             return
         check = self._camera_check(
             self._verification_frame,
@@ -1363,6 +1399,41 @@ class PhaseLoop:
         reason = f"{what}: {error}"
         earlier = self._plan.unchecked.get(index)
         self._plan.record_unchecked(index, f"{earlier}; {reason}" if earlier else reason)
+
+    def _nothing_a_camera_settles(self, index: int | None, what: str, atoms: Iterable[Atom]) -> bool:
+        """True when a check has atoms to ask about and a camera can settle none of them.
+
+        Such a check is not run -- there is nothing to take a frame for -- and it is not a pass
+        either, so it goes on the record as unchecked, the way a check that could not run does.
+        Without that, a phase whose check found nothing to ask reads in hitl.json exactly like one
+        that was asked and passed. An empty set is different: nothing was expected, so nothing went
+        unchecked, and nothing is recorded for it.
+        """
+        from tandem.planning.grounding import checkable
+
+        atoms = frozenset(atoms)
+        if not atoms or checkable(atoms, self._invented(), self.caps):
+            return False
+        self._record_unchecked(index, what, "not run: none of it is something a camera can settle")
+        return True
+
+    def _record_human_leg(self, index: int | None, attempt: int, result: HumanPhaseResult | None) -> None:
+        """Put how one attempt at a human phase was carried out on the plan's record.
+
+        ``result`` is the executor's, or None for a step answered "done" by hand, with no executor.
+        """
+        if self._plan is None or index is None:
+            return
+        if result is None:
+            self._plan.record_human_leg(index, attempt=attempt, by="by_hand", status=None, n_frames=0)
+        else:
+            self._plan.record_human_leg(
+                index,
+                attempt=attempt,
+                by=self.cfg.human_executor,
+                status=result.status,
+                n_frames=result.n_frames,
+            )
 
 
 def _open_image(path):

@@ -485,9 +485,13 @@ def test_both_operator_lists_are_written_in_one_spelling():
     assert [p.name for p in read.parameters] == ["obj", "surface"]
 
 
-def test_operator_signature_only_drops_the_parameter_marks():
+def test_operator_signature_writes_one_spelling():
+    # Read and written out again, so every spacing the planner SDK's check accepts comes out the
+    # same -- not just the `?` removed (tests/test_review_method.py has the record-level check).
     assert operator_signature("Pick(?obj: movable)") == "Pick(obj: movable)"
-    assert operator_signature("Place(?a: movable,?b: surface)") == "Place(a: movable,b: surface)"
+    assert operator_signature("Place(?a: movable,?b: surface)") == "Place(a: movable, b: surface)"
+    assert operator_signature("Pick(?obj:movable)") == "Pick(obj: movable)"
+    assert operator_signature("Pick( ?obj : movable )") == "Pick(obj: movable)"
     assert operator_signature("Open(x0: surface)") == "Open(x0: surface)"
     assert operator_signature("Wave()") == "Wave()"
 
@@ -649,10 +653,11 @@ def test_feedback_reaches_the_model_and_never_touches_the_cache(tmp_path, monkey
     image = _image()
 
     def build(**kwargs):
-        plan, failure = asyncio.run(
+        plan = asyncio.run(
             build_plan(image, "put the toy in the box", OBJECTS, TABLE, cfg, CAPS, "t", **kwargs)
         )
-        assert plan is not None and failure is None
+        # The plan itself, never a (plan, failure) pair: a failure is only ever raised.
+        assert isinstance(plan, PhasePlan)
         return plan
 
     build()
@@ -738,9 +743,7 @@ def _built(monkeypatch, spec, *, measured, **cfg):
     monkeypatch.setattr(proposal, "propose_plan", fake_propose)
     monkeypatch.setattr(grounding, "classify_initial_state", fake_classify)
     config = PlanningConfig(enabled=True, **cfg)
-    plan, failure = asyncio.run(build_plan(None, "open the box", OBJECTS, TABLE, config, CAPS, "t"))
-    assert failure is None
-    return plan
+    return asyncio.run(build_plan(None, "open the box", OBJECTS, TABLE, config, CAPS, "t"))
 
 
 def test_a_plan_the_measured_scene_contradicts_runs_with_the_gap_on_the_record(monkeypatch, caplog):

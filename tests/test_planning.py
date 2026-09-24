@@ -528,7 +528,10 @@ def test_a_run_stops_at_a_phase_moving_an_object_the_run_already_moved():
 
 def test_a_backend_that_allows_repeated_picks_conjoins_them_anyway():
     # The stopping rule is the backend's declaration, not a fact about every planner. One that can
-    # pick the same object twice in a plan says so, and the same two phases become one goal.
+    # pick the same object twice in a plan says so, and the same two phases become one goal -- as
+    # long as it also declares no exclusivity. With TipTop's `On: 0` the conjoined goal holds the toy
+    # in two places at once, which stops the run whatever one_pick_per_object says
+    # (tests/test_review_method.py); this backend's goal language says no such thing.
     import dataclasses
 
     spec = parse(
@@ -545,7 +548,7 @@ def test_a_backend_that_allows_repeated_picks_conjoins_them_anyway():
             },
         )
     )
-    caps = dataclasses.replace(CAPS, one_pick_per_object=False)
+    caps = dataclasses.replace(CAPS, one_pick_per_object=False, exclusive_arguments={})
     walk = PhasePlan(cfg=CFG, caps=caps, instruction=spec.instruction, trajectory_id="t", spec=spec)
     assert len(walk.robot_run()) == 2
 

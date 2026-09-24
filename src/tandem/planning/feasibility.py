@@ -16,8 +16,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from tandem.planners.base import Capabilities
-from tandem.planning.contracts import phase_moves
+from tandem.planners.base import Capabilities, to_goal_atoms
+from tandem.planning.contracts import exclusive_conflicts, phase_moves
 from tandem.planning.structs import Phase, TaskSpecification
 from tandem.planning.symbols import Atom
 
@@ -68,6 +68,14 @@ def conjoinable_run(phases: Sequence[Phase], caps: Capabilities) -> int:
     a phase names is taken to be one it may pick. That splits more runs than it needs to, which costs
     a perception pass and never a plan; reading the missing declaration as "moves nothing" would
     conjoin exactly the goals ``one_pick_per_object`` makes unsatisfiable.
+
+    The run also STOPS at a phase whose atoms claim a slot the run's goal already fills, by the
+    backend's ``exclusive_arguments`` (``contracts.exclusive_conflicts``), whatever
+    ``one_pick_per_object`` says. A goal is one final state, so ``On(toy, table)`` then
+    ``On(toy, shelf)`` conjoined is ``{On(toy, table), On(toy, shelf)}``: unsatisfiable on ANY
+    planner, not only one that picks each object once, even though each phase plans fine on its own.
+    For TipTop the two rules split at the same place (its exclusive slot is the moved object); for a
+    clean-state planner that can pick an object twice, this is the only thing that splits there.
     """
     if not caps.initial_state_is_clean:
         # Ordering between phases may be symbolically meaningful, so conjoining could silently drop
@@ -76,12 +84,55 @@ def conjoinable_run(phases: Sequence[Phase], caps: Capabilities) -> int:
 
     count = 0
     claimed: set[str] = set()
+    goal: set[Atom] = set()
     for phase in phases:
         if phase.is_human:
             break
         moved = phase_moves(phase, caps=caps) if caps.moved_arguments else frozenset(phase.objects)
         if count and caps.one_pick_per_object and moved & claimed:
             break
+        if count and exclusive_conflicts(goal | phase.atoms, caps=caps):
+            break
         count += 1
         claimed |= moved
+        goal |= phase.atoms
     return count
+
+
+def robot_leg_without_a_goal(spec: TaskSpecification, caps: Capabilities, *, conjoin: bool) -> str | None:
+    """Why a robot leg of this plan would hand the planner an empty goal, or None if none would.
+
+    A robot phase may state atoms the planner supplies for itself -- TipTop's ``HandEmpty``, which
+    is achievable and in its goal language, and has no wire name (``to_goal_atoms`` drops it). A
+    phase that is made of nothing else is accepted by ``check_robot_phases`` and then renders into
+    an empty goal. The loop can only end the trial over that (``PhaseLoop._nothing_to_plan``, at
+    ``invention``), after the robot's earlier legs have run and been recorded, and the proposer is
+    never told. Refused here instead, inside the repair loop.
+
+    Walks the legs exactly as ``PhasePlan.robot_run`` will cut them: with ``conjoin`` a HandEmpty
+    phase next to a placement is part of a leg with a goal, and is fine; without it, it is a leg of
+    its own, and is not.
+    """
+    phases = spec.phases
+    i = 0
+    while i < len(phases):
+        if phases[i].is_human:
+            i += 1
+            continue
+        n = max(1, conjoinable_run(phases[i:], caps)) if conjoin else 1
+        run = phases[i : i + n]
+        atoms = sorted(frozenset().union(*(p.atoms for p in run)), key=str)
+        if not to_goal_atoms(atoms, caps):
+            descriptions = "; ".join(repr(p.description) for p in run)
+            which = (
+                f"phase {i} ({descriptions}) asks"
+                if n == 1
+                else f"phases {i} to {i + n - 1} ({descriptions}), planned together, ask"
+            )
+            return (
+                f"{which} the robot only for {', '.join(str(a) for a in atoms)}, which the "
+                f"{caps.name} planner establishes for itself and cannot be given as a goal, so it "
+                "would be handed nothing to plan"
+            )
+        i += n
+    return None

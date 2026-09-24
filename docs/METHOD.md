@@ -39,7 +39,8 @@ without changing any of it ([ADDING_A_PLANNER.md](ADDING_A_PLANNER.md)).
 
 ## 2. A proposal, from instruction to plan
 
-`planning/plan.py` `build_plan(image, instruction, object_names, table_name, cfg, caps)`:
+`planning/plan.py` `build_plan(image, instruction, object_names, table_name, cfg, caps)` returns the
+`PhasePlan`, or raises `ProposalError` when no proposal validates within `max_attempts`:
 
 1. **Prompt.** `prompts.plan_prompt` renders the Appendix-B prompt. The planner's goal language is
    rendered from `Capabilities.goal_predicates`, and the robot is described by its one-sentence
@@ -51,13 +52,19 @@ without changing any of it ([ADDING_A_PLANNER.md](ADDING_A_PLANNER.md)).
 3. **Parse and validate** (`proposal.parse_plan_response`). Every atom is grounded against the
    detected objects, and each object's type is fixed once for the whole task (`SceneTypes`). A robot
    phase may use only the planner's goal predicates. An invented predicate must be used, with the
-   same argument types everywhere, and may not reuse a name the planner reserves. Each human phase's
-   operator
+   same argument types everywhere, and may not reuse a name the planner reserves. Its `instructions`
+   may use only `{0}`, `{1}`, … as placeholders, within its arity; anything else in braces (`{box}`,
+   `{0.x}`, a stray `{`) is refused, since `describe` could not render it (`symbols.validate_template`).
+   Each human phase's operator
    must add something, may not add and delete the same atom, must not delete its own phase's
    `atoms`, and must add every one of them.
 4. **Check the plan as a whole** (`proposal.check_plan`). Every robot phase must be achievable
-   (`feasibility.check_robot_phases`). With `check_plan_effects` on, no phase may require an atom an
-   earlier phase made false (`contracts.check_plan_effects`).
+   (`feasibility.check_robot_phases`). Every robot leg, cut the way `robot_run` will cut it, must
+   give the planner a goal: a leg of nothing but planner-supplied atoms (TiPToP's `HandEmpty`) is
+   refused (`feasibility.robot_leg_without_a_goal`). No phase may add two atoms that claim one
+   exclusive slot, such as `On(toy, box)` and `On(toy, shelf)` (`contracts.exclusive_conflicts`). With
+   `check_plan_effects` on, no phase may require an atom an earlier phase made false
+   (`contracts.check_plan_effects`), by a delete effect or by putting the same object somewhere else.
 5. **Repair.** Any rejection in steps 3–4 is a `ProposalError` written for the model. It goes back
    with the model's own answer, and the model tries again, up to `max_attempts` answers. The last
    rejection ends the trial at stage `invention`.
@@ -113,8 +120,9 @@ take_turn:
 
 ```
 run  = plan.robot_run()           # this phase, or it and the consecutive robot phases after it (§7)
-goal = to_goal_atoms(the union of their atoms)     # in the planner's wire spelling; phases whose atoms
-                                                   # are all planner-supplied (HandEmpty) → "invention"
+goal = to_goal_atoms(the union of their atoms)     # in the planner's wire spelling; a leg whose atoms
+                                                   # are all planner-supplied (HandEmpty) is refused at
+                                                   # proposal (§2); if one gets here → "invention"
 [check_tamp_preconditions] put plan.expected_now() to the camera on this pass's image;
                            unmet and precondition_enforced → end at "verification"
 result = backend.plan(scene.scene_id, goal, surfaces=plan.surfaces(), save_dir=leg_dir,
@@ -122,7 +130,8 @@ result = backend.plan(scene.scene_id, goal, surfaces=plan.surfaces(), save_dir=l
                       return_home=plan.is_last_leg()   if caps.supports_return_home)
 if not result.ok:  on_robot_phase_failure
                      abort  → end: failure at "tamp_planning"
-                     teleop → this phase becomes a person's (atoms only, no operator); run it now
+                     teleop → this phase becomes a person's (atoms only, no operator), recorded as
+                              handed over with the planner's reason; run it now
                      replan → drop the plan, remember why; the next pass proposes again with every
                               failure so far fed back (at most max_attempts re-plans, then as abort)
 record result.task_plan against every phase in run
@@ -148,9 +157,12 @@ for attempt in 1 .. 1 + verify_retries:
                    nothing recorded, while recording        → refused unless allow_unrecorded_human_phase;
                                                               ask again (no retry spent)
         done   → the step was done by hand; while recording, refused the same way
+    record how the attempt was carried out (phases[k].carried_out): the executor or by hand, and
+    whether it left a leg
     status "ended_by_operator"                             → accept, recorded as unchecked
     check_human_effects off, or the last phase with verify_final_phase off
                                                            → accept, recorded as not checked
+    no effect a camera can settle (HandEmpty, Holding)     → accept, no frame, recorded as unchecked
     check = verify_effects(a fresh frame from verification_camera)
         the check could not run (camera or model error)    → accept, recorded as unchecked
         passed, or verify_enforced off                     → record the verdicts; advance
@@ -322,9 +334,10 @@ and there is a plan.
 | `outcome_reason` | Present when the loop ended the trial: what was wrong, in words. |
 | `specification` | What the proposal made of the instruction (below). |
 | `initially_true` | Invented atoms measured true on the first image (`classify_initial`); `[]` otherwise. |
-| `provenance` | Who produced what: `phases_and_their_order`, `phase_sub_goals`, `invented_predicates` and `human_instructions` (the VLM); `human_operators` and `robot_operators`, each `{by, signatures}` in one spelling, `Name(param: type)`; `robot_phases` (the planner); `who_does_what` (tandem); `human_steps` (the executor). |
+| `provenance` | Who produced what: `phases_and_their_order`, `phase_sub_goals`, `invented_predicates` and `human_instructions` (the VLM); `human_operators` and `robot_operators`, each `{by, signatures}` in one spelling, `Name(param: type)` (a declared signature is read and re-rendered, whatever its spacing); `robot_phases` (the planner); `who_does_what` (tandem); `human_steps` (the executor that would carry a step out; whether it did is `phases[k].carried_out`). |
 | `checks` | Which checks ran (below). |
 | `phases[]` | One record per phase (below). |
+| `handed_over_phases` | Robot phases handed to a person because the planner could not plan them (`on_robot_phase_failure: teleop`); `[]` otherwise. |
 | `phase_index` | How far through the plan the trial got. Equal to the number of phases when it finished. |
 | `verifications[]` | Every verdict recorded, failing ones included (below). |
 
@@ -348,7 +361,11 @@ and there is a plan.
 - `initial_state_classified`: whether `classify_initial` measured the start.
 - `plan_effects_rechecked`: whether the contract check then ran again against that measurement.
 - `plan_effects_warning`: what that re-check found, or `null`.
-- `unchecked_phases[]`: phases accepted without a verdict because the check could not run.
+- `unchecked_phases[]`: phases accepted without a verdict, because the check could not run or because
+  nothing it was to check is something a camera can settle (a human phase that adds only
+  `HandEmpty()`, say).
+- `unrecorded_human_phases[]`: human phases carried out with no leg on disk in any attempt (staged by
+  hand, or an executor that recorded nothing), so the merged episode has no segment for them.
 
 `phases[k]`: `index`, `executor`, `description`, `atoms` and `planned_by`, plus:
 
@@ -357,8 +374,14 @@ and there is a plan.
   (the planner's operator sequence, e.g. `["Pick(bread)", "Place(bread, plate)"]`) and
   `covers_phases` (when one plan covered several phases).
 - **a human phase:** `instructions` and `operator` (absent for a robot phase handed to a person
-  under `on_robot_phase_failure: teleop`).
-- **either:** `unchecked`, when a check of that phase could not run, and why.
+  under `on_robot_phase_failure: teleop`), and once it has run, `carried_out[]`: one
+  `{attempt, carried_out_by, status, leg_recorded, n_frames}` per attempt, where `carried_out_by` is
+  the executor's name or `by_hand` (answered "done" with no executor; `status` is then `null`).
+- **a robot phase handed to a person** (`on_robot_phase_failure: teleop`): recorded as the human
+  phase it became, plus `proposed_executor: "robot"`, `handed_over_because` (the planner's failure
+  reason) and `instructions_by: "tandem"`; its `planned_by` says tandem handed it over.
+- **either:** `unchecked`, when a check of that phase could not run, or had nothing a camera can
+  settle, and why.
 
 `verifications[k]`: `{atom, statement, holds, expected, satisfied, role, reason, phase}`.
 
@@ -420,12 +443,14 @@ filed. Each model query is three things:
 
 - `NNN_<label>_input.png`: the image exactly as it was sent;
 - `NNN_<label>_output.png`: that image above what the model answered, marked REJECTED when the
-  answer was refused;
+  answer was refused and CACHED when it was replayed from `cache_path` rather than asked for;
 - a line in `index.jsonl`: `seq`, `label`, `attempt`, `model`, `input_image`, `output_image`,
-  `rejected`, `prompt`, `response`.
+  `rejected`, `cached`, `prompt`, `response`.
 
 The labels are `task plan` for the proposal, `classify <atom>` for each check, and
-`detect objects` for `tandem plan` without `--object`.
+`detect objects` for `tandem plan` without `--object`. `NNN` counts on from whatever the directory
+already holds, so a retried check, a second proposal, or a second `--save-vlm-io` run into the same
+directory never overwrites an earlier image.
 
 ### The events file
 
@@ -441,10 +466,11 @@ From the phase loop:
 | `rollout_start` | `dir`, `phase_index`, `n_phases`, plus `movables` and `return_home` when passed to the planner |
 | `rollout_saved` | `dir`, `n_frames` |
 | `phase_complete` | `phase_index`, `n_phases`: a step finished and more remain |
-| `phase_plan_failed` | `reason`, `policy` (`on_robot_phase_failure`) |
+| `phase_plan_failed` | `reason`, `policy` (`on_robot_phase_failure`), `phase_index` (`null` with phase planning off) |
 | `instruction_not_fully_represented` | `unrepresented`: `[{clause, reason}]` |
 | `awaiting_human_phase` | `description`, `instructions`, `expected` (in words), `expected_atoms` (must hold after), `expected_deleted_atoms` (must no longer hold), `phase_index`, `n_phases`, `is_last_phase`, `operator` |
 | `human_phase_refused` | `phase_index`, `executor`, `reason`: a step with no recorded leg, while recording |
+| `human_phase_by_hand` | `phase_index`, `attempt`: a step answered "done" with no executor was accepted, so it has no leg |
 | `human_leg_ended` | `executor`, `status`, `n_frames`, `dir`, `phase_index` |
 | `human_phase_verified` | `phase_index`, `attempt`, `ok` (`true`, `false`, or `null` when not checked), `verdicts`, plus `skipped` or `unchecked` saying why when `ok` is `null` |
 | `phase_preconditions_checked` | `phase_index`, `description`, `what` (`human phase` or `robot leg`), `ok`, `enforced`, `verdicts`, plus `unchecked` |
@@ -525,7 +551,8 @@ operator of their own; the planner chooses Ω₀ operators itself.
 **A check that cannot run does not fail the step.** A camera read or a model call that errors is
 recorded as *unchecked* (`checks.unchecked_phases`, `phases[k].unchecked`), and the step goes ahead.
 One unreachable service should not cost a demonstration, and a phase with no verdicts must not read
-as one that passed.
+as one that passed. The same goes for a check with nothing a camera can settle (a step that only
+empties the gripper): no frame is taken, and it is recorded as unchecked, not passed.
 
 **Other additions the paper does not describe**, each gated on the planner declaring support:
 

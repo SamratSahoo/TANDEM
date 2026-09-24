@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import difflib
 import logging
-import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -26,7 +25,7 @@ from tandem.planning import contracts, feasibility
 from tandem.planning.config import PlanningConfig
 from tandem.planning.grounding import Verdict, describe_expectations, descriptions_for
 from tandem.planning.structs import Phase, TaskSpecification
-from tandem.planning.symbols import Atom, describe
+from tandem.planning.symbols import Atom, describe, parse_operator_signature
 
 _log = logging.getLogger(__name__)
 
@@ -48,23 +47,32 @@ What went wrong:
 Plan the task again from the workspace as it is in this image, in a way that does not run into that
 problem."""
 
-# The `?` a PDDL-style signature marks each parameter with: `Pick(?obj: movable)`.
-_PARAMETER_MARK = re.compile(r"([(,]\s*)\?")
-
 
 def operator_signature(signature: str) -> str:
-    """``Pick(?obj: movable)`` -> ``Pick(obj: movable)``: the one spelling the record uses.
+    """``Pick(?obj:movable)`` -> ``Pick(obj: movable)``: the one spelling the record uses.
 
-    The record names operators from two sources, and they disagree on one character. A human
-    operator writes its own signature (``HumanOperator.signature``) as ``Open(x0: surface)``, which
-    is the form ``HumanOperator.from_json`` reads back. A backend declares its operators
+    The record names operators from two sources, and they disagree. A human operator writes its own
+    signature (``HumanOperator.signature``) as ``Open(x0: surface)``, which is the form
+    ``HumanOperator.from_json`` reads back. A backend declares its operators
     (``Capabilities.robot_operators``) the way it declares its goal predicates, ``Pick(?obj:
-    movable)``. Printed side by side in one record, the difference reads as though it meant
-    something. The human side's spelling wins because it is the one already in every ``hitl.json``
-    and the one the record is parsed back with; a declaration is only reworded, never checked, since
-    it is provenance and nothing branches on it.
+    movable)`` -- and the planner SDK's check accepts any spacing around the colon and the commas.
+    Printed side by side in one record, the difference reads as though it meant something. The human
+    side's spelling wins because it is the one already in every ``hitl.json`` and the one the record
+    is parsed back with.
+
+    So a signature is READ (``symbols.parse_operator_signature``, the same reading the SDK's check
+    uses) and written out again, rather than patched character by character: removing the ``?``
+    alone left ``Pick(obj:movable)`` and ``Place(obj: movable,surface: surface)`` in the record. One
+    that does not read -- a factory that is not an SDK planner is never checked -- is recorded as
+    written, with a warning, and not refused: this runs as the trial's record is written, and
+    provenance is not worth losing the record over.
     """
-    return _PARAMETER_MARK.sub(r"\1", signature.strip())
+    try:
+        name, parameters = parse_operator_signature(signature)
+    except ValueError as exc:
+        _log.warning(f"recording an operator signature as written, since it does not read: {exc}")
+        return str(signature).strip()
+    return f"{name}({', '.join(f'{p}: {t}' for p, t in parameters)})"
 
 
 def _choice(value: str | None, choices: Sequence[str], what: str) -> None:
@@ -104,6 +112,16 @@ class PhasePlan:
     # to the end: the operator's label is its verdict, and the episode writer fills it in from that.
     outcome: str | None = None
     failure_stage: str | None = None
+    # Phase index -> why the planner could not plan it, for a robot phase tandem handed to a person
+    # instead (`hand_current_to_human`, on_robot_phase_failure: teleop). Without it the handed phase
+    # is recorded exactly like a human phase the model proposed, and a trial the method did not
+    # complete as designed -- one that cost a person work the paper counts as the robot's -- cannot
+    # be told apart from one that went to plan.
+    handed_over: dict[int, str] = field(default_factory=dict)
+    # Phase index -> how each attempt at that human phase was carried out (`record_human_leg`): by
+    # the executor, with or without a leg on disk, or staged by hand with none. What the merged
+    # demonstration holds for the phase is read off this, not assumed from `human_executor`.
+    human_legs: dict[int, list[dict]] = field(default_factory=dict)
     # Position in `verdicts` -> the phase that verdict was about, for verdicts recorded through
     # `record_verdicts`. Keyed by position rather than kept as a parallel list, so a caller that
     # extends `verdicts` directly leaves those entries without a phase instead of misaligning them.
@@ -299,12 +317,16 @@ class PhasePlan:
         self.spec = self.spec.rebind(mapping)
         self.initially_true = frozenset(a.rebind(mapping) for a in self.initially_true)
 
-    def hand_current_to_human(self, instructions: str = "") -> Phase:
+    def hand_current_to_human(self, instructions: str = "", reason: str | None = None) -> Phase:
         """Turn the phase now due into a human one, and return it.
 
         This is what ``on_robot_phase_failure: teleop`` does. It is only possible because tandem owns
         the executor split: it used to be frozen at proposal time inside the planner's process, so a
         phase the planner turned out not to be able to plan could only end the attempt.
+
+        ``reason`` is why the planner could not plan it. The hand-over is kept on the record with it
+        (``handed_over``), so ``hitl.json`` says the step was proposed as robot work and done by a
+        person only because the planner failed -- not that the model gave it to a person.
         """
         phase = self.current
         if phase is None:
@@ -313,6 +335,7 @@ class PhasePlan:
             return phase
         handed = phase.as_human(instructions or self._describe_as_instructions(phase))
         self.spec = self.spec.replace_phase(self.index, handed)
+        self.handed_over[self.index] = str(reason or "").strip() or "the planner gave no reason"
         return handed
 
     def _describe_as_instructions(self, phase: Phase) -> str:
@@ -394,6 +417,32 @@ class PhasePlan:
         """
         self.unchecked[index] = str(reason)
 
+    def record_human_leg(
+        self, index: int, *, attempt: int, by: str, status: str | None, n_frames: int = 0
+    ) -> None:
+        """Note how one attempt at human phase ``index`` was carried out, and whether it left a leg.
+
+        ``by`` is the human executor that ran (``teleop``, say) or ``"by_hand"`` for a step the
+        operator answered "done" without one; ``status`` is the executor's (``HumanPhaseResult``),
+        None by hand. Kept per attempt, since a retried phase may have a leg from one attempt and none
+        from the next.
+
+        The record needs it because nothing else says it. ``human_executor`` is what WOULD carry a
+        phase out, and a phase staged by hand -- allowed when nothing is recorded, or with
+        ``allow_unrecorded_human_phase`` -- verifies exactly like a teleoperated one. The merged
+        episode then has no segment for it, and without this the record would describe a
+        demonstration of a step the dataset does not contain.
+        """
+        self.human_legs.setdefault(index, []).append(
+            {
+                "attempt": int(attempt),
+                "carried_out_by": str(by),
+                "status": status,
+                "leg_recorded": int(n_frames) > 0,
+                "n_frames": int(n_frames),
+            }
+        )
+
     def set_outcome(self, outcome: str, failure_stage: str | None = None) -> None:
         """How the trial ended, when the loop ended it: one of ``OUTCOMES``, at one of ``FAILURE_STAGES``.
 
@@ -429,8 +478,14 @@ class PhasePlan:
             "plan_effects_rechecked": self.plan_effects_rechecked,
             # What that re-check found. The plan ran regardless; this is why a phase may fail anyway.
             "plan_effects_warning": self.inconsistency,
-            # Phases accepted without a verdict because the check itself could not run.
+            # Phases accepted without a verdict: the check itself could not run, or nothing it was to
+            # check is something a camera can settle.
             "unchecked_phases": sorted(self.unchecked),
+            # Human phases carried out with no leg on disk in any attempt -- staged by hand, or an
+            # executor that recorded nothing -- so the merged demonstration has no segment for them.
+            "unrecorded_human_phases": sorted(
+                i for i, attempts in self.human_legs.items() if not any(a["leg_recorded"] for a in attempts)
+            ),
         }
 
     def phase_record(self, index: int) -> dict:
@@ -441,6 +496,19 @@ class PhasePlan:
         record["planned_by"] = (
             "vlm" if phase.is_human else f"vlm (order and sub-goal); {self.caps.name} (how)"
         )
+        if index in self.handed_over:
+            # Proposed as the robot's, done by a person because the planner failed on it. Recorded
+            # as such rather than as the human phase it now is: an analysis counting human phases,
+            # or planning failures, has to be able to tell the two apart.
+            record["proposed_executor"] = "robot"
+            record["handed_over_because"] = self.handed_over[index]
+            record["planned_by"] = (
+                f"vlm (sub-goal, as robot work); handed to a person by tandem after {self.caps.name} "
+                "could not plan it"
+            )
+            record["instructions_by"] = "tandem"
+        if index in self.human_legs:
+            record["carried_out"] = [dict(attempt) for attempt in self.human_legs[index]]
         if not phase.is_human:
             # What the planner is actually given. Note it is ATOMS, not a sentence: the ordinary path
             # runs the instruction through a model to get these, and a phase substitutes them
@@ -524,10 +592,18 @@ class PhasePlan:
                     "the teleoperator, following the phase's instructions"
                     if executor == "teleop"
                     else f"the {executor!r} human executor, given the phase's instructions and operator"
-                ),
+                )
+                # Which is what WOULD carry a step out. Whether it did is per phase: a step may be
+                # staged by hand with no leg, and only `carried_out` says so.
+                + "; phases[k].carried_out says, attempt by attempt, whether it did or the step was "
+                "staged by hand with no leg recorded",
             },
             "checks": self.checks(),
             "phases": [self.phase_record(i) for i in range(len(self.phases))],
+            # Robot phases handed to a person after the planner could not plan them
+            # (on_robot_phase_failure: teleop), so a fallback trial can be filtered without reading
+            # every phase.
+            "handed_over_phases": sorted(self.handed_over),
             "phase_index": self.index,
             "verifications": verifications,
         }
@@ -543,15 +619,18 @@ async def build_plan(
     trajectory_id: str | None,
     *,
     feedback: str | None = None,
-) -> tuple[PhasePlan | None, str | None]:
-    """Propose the plan for this task. Returns ``(plan, failure_reason)``.
+) -> PhasePlan:
+    """Propose the plan for this task, validated and repaired; raise ``ProposalError`` if none validates.
 
     A plan whose phases are all robot ones needs no human, which is how a task the planner already
     handles behaves exactly as it did before.
 
-    Every check that can send a plan back for repair runs inside the proposal's repair loop now,
-    ``feasibility.check_robot_phases`` included, so a plan that never validates raises
-    ``ProposalError`` from ``propose_plan`` rather than coming back here as a failure reason. What is
+    Every check that can send a plan back for repair runs inside the proposal's repair loop,
+    ``feasibility.check_robot_phases`` included, so a plan that never validates within
+    ``max_attempts`` raises ``ProposalError`` from ``propose_plan``, and raising is the ONLY way this
+    reports a failure. It used to return ``(plan, failure_reason)`` with the reason always None, and
+    both callers kept a failure branch that could never run -- while a caller that trusted the
+    signature, handled ``failure`` and did not catch the error let it out as a traceback. What is
     checked here can no longer be repaired, so it is recorded rather than refused.
 
     ``feedback`` is why the last plan for this task could not be carried out, in words -- the
@@ -578,7 +657,7 @@ async def build_plan(
             _log.warning(f"the plan does not hang together against the measured scene: {broken}")
     if not spec.needs_human:
         _log.info("the robot can do this whole task on its own; no human phases were proposed")
-    return plan, None
+    return plan
 
 
 def phase_summary(plan: PhasePlan, phase: Phase) -> dict:

@@ -480,26 +480,63 @@ def check_plan(spec: TaskSpecification, cfg: PlanningConfig, caps: Capabilities)
 
     Raises ``ProposalError`` phrased for the proposer, because it runs inside the repair loop: a plan
     refused here goes back to the model with the reason, which is the whole point of checking it
-    before anything moves. Two checks:
+    before anything moves. The checks:
 
       * every robot phase is achievable by some robot operator (``feasibility.check_robot_phases``).
         It used to run after the proposal was accepted, where a failure could only end the trial;
         the model that wrote the phase never heard why.
+      * every robot LEG, as the plan will cut them (``conjoin_robot_phases``), gives the planner a
+        goal (``feasibility.robot_leg_without_a_goal``). A leg of nothing but atoms the planner
+        supplies for itself (TipTop's ``HandEmpty``) is achievable and still unplannable, and the
+        loop could only end the trial over it.
+      * no phase asks for two atoms that claim one exclusive slot (``contracts.exclusive_conflicts``):
+        ``On(toy, box)`` and ``On(toy, shelf)`` at once is a goal no planner can reach, and one that
+        cuTAMP searches for until its timeout rather than refusing.
       * when ``cfg.check_plan_effects``, no phase needs something an earlier phase deleted
         (``contracts.check_plan_effects``). The starting workspace is unknown here -- nothing has
         been classified yet -- so only what the plan itself makes false is held against it.
 
-    A malformed ``Capabilities`` declaration raises ``TandemError`` from the contract check instead,
+    A malformed ``Capabilities`` declaration raises ``TandemError`` from the contract checks instead,
     on purpose: that is not the model's mistake, and reprompting it would only burn the attempts.
     """
+    # What a robot phase can usefully be stated with: achievable, AND something the planner can be
+    # handed. A predicate with no wire name (HandEmpty) is achievable too, but a phase stated only
+    # with it is the empty-goal leg refused below, so suggesting it would steer the repair straight
+    # into the next rejection.
+    statable = sorted(
+        p
+        for p in set(caps.goal_predicates) & caps.achievable_predicates
+        if caps.goal_predicate_wire_names.get(p)
+    )
     unachievable = feasibility.check_robot_phases(spec, caps)
     if unachievable is not None:
-        statable = sorted(set(caps.goal_predicates) & caps.achievable_predicates)
         fix = f"Either state that phase with {', '.join(statable)}, or make it" if statable else "Make it"
         raise ProposalError(
             f"This plan cannot be carried out: {unachievable}. The robot can only "
             f"{caps.robot_description}. {fix} a human phase with an operator."
         )
+    empty = feasibility.robot_leg_without_a_goal(spec, caps, conjoin=cfg.conjoin_robot_phases)
+    if empty is not None:
+        named = " or ".join([", ".join(statable[:-1]), statable[-1]] if len(statable) > 1 else statable)
+        state = f"state what the robot must achieve with {named}, " if statable else ""
+        raise ProposalError(
+            f"This plan cannot be carried out: {empty}. Either {state}fold that phase into a "
+            "neighbouring robot phase, or leave it out."
+        )
+    for i, phase in enumerate(spec.phases):
+        # Every phase, a person's included: an operator that adds both is as impossible to verify
+        # as a robot goal holding both is to plan -- one of the two verdicts fails whatever the
+        # person does.
+        clash = contracts.exclusive_conflicts(phase.add_effects, caps=caps)
+        if clash:
+            first, other = clash[0]
+            thing = first.values[caps.exclusive_arguments[first.predicate]]
+            raise ProposalError(
+                f"This plan cannot be carried out: phase {i} ({phase.description!r}) asks for both "
+                f"{first} and {other}, but {thing} can be {first.predicate} only one thing at a time, "
+                "so the two can never hold together. Keep the one this phase is for, or split it into "
+                "phases in the order they should happen."
+            )
     if cfg.check_plan_effects:
         broken = contracts.check_plan_effects(spec, caps=caps)
         if broken:

@@ -251,13 +251,8 @@ async def _decompose(
     from tandem.planning.symbols import ProposalError
 
     try:
-        built, failure = await build_plan(
-            picture, instruction, list(names), table, cfg, caps, trajectory_id=None
-        )
+        return await build_plan(picture, instruction, list(names), table, cfg, caps, trajectory_id=None)
     except ProposalError as exc:
         raise TandemError(
             "The model could not produce a usable plan for that instruction.", hint=str(exc)
         ) from exc
-    if built is None:  # pragma: no cover - build_plan raises rather than returning a failure now
-        raise TandemError(failure or "the plan could not be built", hint="Try rewording the instruction.")
-    return built
