@@ -3,7 +3,8 @@
 TiPToP declares ``tamp`` as its task's and ``robot`` and ``perception`` as its machine's. Its robot's
 address and arm are the rig's own ``robot.host`` and ``robot.type``, which every planner reads; its
 cameras and their extrinsics are the rig's too. What it renders for the pinned tiptop -- tiptop.yml, the
-environment -- is put back together from both halves.
+environment -- is put back together from both halves, and FoundationStereo's address is a machine
+setting doctor checks like M2T2's.
 """
 
 from __future__ import annotations
@@ -39,8 +40,11 @@ def test_the_machine_options_fill_every_default():
         "q_home": [0.0, -0.628, 0.0, -2.513, 0.0, 1.885, 0.0],
         "q_capture": [-0.034, 0.090, 0.080, -1.319, -0.003, 1.253, 0.030],
     }
+    assert machine["perception"]["foundation_stereo"] == {"url": "http://localhost:1234"}
     assert machine["perception"]["m2t2"]["url"] == "http://localhost:8123"
     assert FACTORY.validate_rig_options(machine) == machine
+    with pytest.raises(ValidationError, match="needs a scheme and a host"):
+        FACTORY.validate_rig_options({"perception": {"foundation_stereo": {"url": "localhost"}}})
 
 
 @pytest.mark.parametrize("key", ["host", "type"])
@@ -70,6 +74,7 @@ def test_tiptop_yml_takes_the_arm_the_cameras_and_the_servers_from_the_rig(profi
             "robot.type": "panda_robotiq",
             "cameras.external_2.serial": "31425515",
             "planners.tiptop.robot.port": 6000,
+            "planners.tiptop.perception.foundation_stereo.url": "http://depth-box:1234",
             "planners.tiptop.perception.m2t2.url": "http://gpu:8123",
         }
     )
@@ -79,6 +84,7 @@ def test_tiptop_yml_takes_the_arm_the_cameras_and_the_servers_from_the_rig(profi
     assert config["cameras"]["hand"]["serial"] == "14846828"
     assert config["cameras"]["external_2"]["serial"] == "31425515"
     assert config["cameras"]["perception"] == "external"
+    assert config["perception"]["foundation_stereo"] == {"url": "http://depth-box:1234"}
     assert config["perception"]["m2t2"]["url"] == "http://gpu:8123"
 
 
@@ -123,12 +129,21 @@ def ports(monkeypatch):
 
 
 def test_doctor_probes_the_robot_and_the_servers_at_the_rigs_addresses(profile, ports):
-    rig_mod.update({"robot.host": "10.0.0.5", "planners.tiptop.robot.port": 6000})
+    rig_mod.update(
+        {
+            "robot.host": "10.0.0.5",
+            "planners.tiptop.robot.port": 6000,
+            "planners.tiptop.perception.foundation_stereo.url": "http://depth-box:4321",
+        }
+    )
     rows = {c.name: c for c in doctor.doctor_checks(profile, settings=None, runtime_ready=True, probe_hardware=True)}
     assert ("robot control", "10.0.0.5", 6000) in ports
     assert ("robot state port", "10.0.0.5", 5557) in ports
     assert ("m2t2 grasp server", "localhost", 8123) in ports
     assert rows["m2t2 grasp server"].state == probe.OK
+    assert ("foundation stereo depth server", "depth-box", 4321) in ports
+    assert rows["foundation stereo depth server"].state == probe.OK
+    assert rows["foundation stereo depth server"].group == "hardware"
 
 
 def test_doctors_rig_rows_are_in_the_rig_group_and_an_arm_it_does_not_drive_fails(profile, ports):
@@ -153,13 +168,20 @@ def test_doctor_says_tiptop_cannot_be_checked_on_a_rig_that_does_not_load(profil
 def test_the_catalog_names_where_the_servers_are_set():
     requires = " ".join(registry.info("tiptop").requires)
     assert "planners.tiptop.perception.m2t2.url" in requires
+    assert "planners.tiptop.perception.foundation_stereo.url" in requires and "http://localhost:1234" in requires
 
 
 # --- how a profile's TiPToP settings are shown ---------------------------------------------------------------------
 
 
 def test_describe_shows_the_machines_robot_and_perception_and_the_tasks_tamp(profile, machine_rig):
-    rig_mod.update({"robot.host": "10.0.0.5", "planners.tiptop.perception.m2t2.url": "http://g:1"})
+    rig_mod.update(
+        {
+            "robot.host": "10.0.0.5",
+            "planners.tiptop.perception.m2t2.url": "http://g:1",
+            "planners.tiptop.perception.foundation_stereo.url": "http://d:1",
+        }
+    )
     view = registry.describe_options("tiptop", profile)
     sections = {section.title: section for section in view.sections}
     assert list(sections) == ["robot", "perception", "tamp"]
@@ -167,5 +189,6 @@ def test_describe_shows_the_machines_robot_and_perception_and_the_tasks_tamp(pro
     assert ("address", "10.0.0.5:5555") in sections["robot"].rows
     assert sections["perception"].subtitle.startswith("this machine's (rig.yml)")
     assert ("grasps", "http://g:1") in sections["perception"].rows
+    assert ("depth", "http://d:1") in sections["perception"].rows
     assert view.summary.startswith("fr3_robotiq at 10.0.0.5")
     assert view.receives["num_particles"] == 256, "what the task gives the planner"

@@ -50,6 +50,7 @@ def test_show_lists_the_robot_the_cameras_what_is_calibrated_and_each_planners_b
     assert "robot.time_dilation_factor 0.3 " in output + " "
     assert "robot.port 5555 (default)" in output
     assert "perception.m2t2.url http://localhost:8123 (default)" in output
+    assert "perception.foundation_stereo.url http://localhost:1234 (default)" in output
 
     payload = json.loads(_run("rig", "show", "--json").output)
     assert payload["file"] == str(paths.rig_file()) and payload["exists"] is True

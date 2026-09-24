@@ -98,8 +98,8 @@ def render_tiptop_config(rig: Rig, options: Any) -> dict:
         "perception": {
             # Used: tiptop estimates a ZED's depth by sending its stereo pair to FoundationStereo
             # (perception/cameras get_depth_estimator -> zed_infer_depth_async), and the sidecar passes
-            # that estimator to run_perception. Not a setting, so the server has to be here.
-            "foundation_stereo": {"url": "http://localhost:1234"},
+            # that estimator to run_perception.
+            "foundation_stereo": {"url": o.perception.foundation_stereo.url},
             "m2t2": {
                 "url": o.perception.m2t2.url,
                 "apply_bounds": o.perception.m2t2.apply_bounds,

@@ -307,6 +307,7 @@ TIPTOP_ROWS = {
     "robot control",
     "robot state port",
     "m2t2 grasp server",
+    "foundation stereo depth server",
 }
 
 
@@ -343,7 +344,7 @@ def test_doctor_asks_tiptop_for_tiptops_rows(profile, monkeypatch):
     )
     assert checks["camera calibration"].state == probe.OK
     assert checks["camera calibration"].group == checks["robot type"].group == "rig"
-    assert not {"robot control", "m2t2 grasp server", "zed sdk"} & set(checks), (
+    assert not {"robot control", "m2t2 grasp server", "foundation stereo depth server", "zed sdk"} & set(checks), (
         "--no-hardware touches nothing"
     )
 

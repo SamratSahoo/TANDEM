@@ -86,6 +86,7 @@ def doctor_checks(
         checks.append(tiptop_probe.check_robot(robot.host, robot.port))
         checks.append(tiptop_probe.check_robot_state_port(robot.host, robot.state_port))
         checks.append(tiptop_probe.check_m2t2(options.perception.m2t2.url))
+        checks.append(tiptop_probe.check_foundation_stereo(options.perception.foundation_stereo.url))
     return checks
 
 
@@ -193,6 +194,7 @@ def describe(profile: Any, *, settings: Any) -> OptionsView:
                 (
                     ("detector", perception.gemini.model),
                     ("grasps", perception.m2t2.url),
+                    ("depth", perception.foundation_stereo.url),
                     (
                         "segmentation",
                         f"SAM-2, {perception.sam_mode}"

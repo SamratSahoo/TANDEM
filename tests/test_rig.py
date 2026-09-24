@@ -177,6 +177,7 @@ def test_tiptops_block_is_validated_and_normalised(isolated_env):
     assert block["robot"]["time_dilation_factor"] == 0.3
     assert block["robot"]["port"] == 5555, "defaults filled in, in memory"
     assert block["perception"]["m2t2"]["url"] == "http://localhost:8123"
+    assert block["perception"]["foundation_stereo"]["url"] == "http://localhost:1234"
     assert "port:" not in paths.rig_file().read_text(), "the file keeps what was written, and only that"
     assert rig_mod.planner_options(rig, "tiptop") == block
 

@@ -79,8 +79,9 @@ INFO = PlannerInfo(
         arms.requirement(),
         "2-3 ZED cameras and the ZED SDK",
         "an M2T2 grasp server (rig: planners.tiptop.perception.m2t2.url)",
-        # tiptop estimates the ZEDs' depth with it; render.py always points tiptop at this address.
-        "a FoundationStereo depth server at http://localhost:1234",
+        # tiptop estimates the ZEDs' depth with it, every rollout.
+        "a FoundationStereo depth server (rig: planners.tiptop.perception.foundation_stereo.url, default "
+        "http://localhost:1234)",
         "a Gemini API key",
     ),
     sources=SOURCES,
@@ -99,7 +100,7 @@ class TiptopFactory:
     RIG_OPTIONS = {
         "robot": "the arm's shim ports, speed, joint count, home and capture poses (its address and type are "
         "the rig's robot.host and robot.type)",
-        "perception": "the Gemini detector, the M2T2 grasp server, SAM-2 and the depth pipeline",
+        "perception": "the M2T2 grasp server, the FoundationStereo depth server, SAM-2 and the depth pipeline",
     }
 
     def capabilities(self) -> Capabilities:

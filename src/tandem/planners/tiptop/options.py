@@ -5,7 +5,7 @@
       planners:
         tiptop:
           robot:       the shim's ports, the speed, the joint count, the home and capture poses
-          perception:  the Gemini detector, the M2T2 grasp server, SAM-2, the depth pipeline
+          perception:  the M2T2 grasp server, the FoundationStereo depth server, SAM-2, the depth pipeline
 
     <profile>.yml                           the task's (OPTIONS)
       planner:
@@ -173,11 +173,27 @@ class M2T2Spec(BaseModel):
         return _usable_url(v, "http://localhost:8123")
 
 
+class FoundationStereoSpec(BaseModel):
+    """The FoundationStereo server tiptop sends every ZED stereo pair to, for its depth."""
+
+    model_config = {"extra": "forbid"}
+
+    url: str = "http://localhost:1234"
+
+    @field_validator("url")
+    @classmethod
+    def _parseable(cls, v: str) -> str:
+        return _usable_url(v, "http://localhost:1234")
+
+
 class PerceptionSpec(BaseModel):
     model_config = {"extra": "forbid"}
 
     gemini: GeminiSpec = Field(default_factory=GeminiSpec)
     m2t2: M2T2Spec = Field(default_factory=M2T2Spec)
+    # Used: tiptop estimates a ZED's depth by sending its stereo pair to FoundationStereo (perception/
+    # cameras get_depth_estimator -> zed_infer_depth_async), every rollout.
+    foundation_stereo: FoundationStereoSpec = Field(default_factory=FoundationStereoSpec)
     # Where SAM-2 runs: in the runtime ("local"), or on a SAM-2 server (tiptop's scripts/sam_server.py)
     # at sam_url. tiptop reads perception.sam.url for any mode that is not "local" -- a typo'd "Local"
     # included -- so the mode is one of the two, and a remote one has to say where.

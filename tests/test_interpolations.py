@@ -83,20 +83,25 @@ class TestUrlValidation:
 class TestProbeRobustness:
     """`doctor` is what you run WHEN something is wrong, so no probe may crash the run."""
 
-    def test_an_unparseable_url_is_a_failed_check_not_an_exception(self):
-        row = tiptop_probe.check_m2t2("http://localhost:${oc.env:TIPTOP_M2T2_PORT,8123}")
+    @pytest.mark.parametrize("check", [tiptop_probe.check_m2t2, tiptop_probe.check_foundation_stereo])
+    def test_an_unparseable_url_is_a_failed_check_not_an_exception(self, check):
+        row = check("http://localhost:${oc.env:TIPTOP_M2T2_PORT,8123}")
         assert row.state == probe.FAIL
         assert row.hint and "tandem rig set planners.tiptop.perception." in row.hint
         assert "${" in row.detail
 
-    def test_a_nonsense_url_is_a_failed_check(self):
-        assert tiptop_probe.check_m2t2("").state == probe.FAIL
-        assert tiptop_probe.check_m2t2("://////").state == probe.FAIL
+    @pytest.mark.parametrize("check", [tiptop_probe.check_m2t2, tiptop_probe.check_foundation_stereo])
+    def test_a_nonsense_url_is_a_failed_check(self, check):
+        assert check("").state == probe.FAIL
+        assert check("://////").state == probe.FAIL
 
     def test_a_reachable_looking_url_still_probes(self):
         # Nothing is listening, so this warns rather than fails — the distinction being that
         # the URL is usable and the server merely is not up yet.
         assert tiptop_probe.check_m2t2("http://127.0.0.1:1").state == probe.WARN
+        row = tiptop_probe.check_foundation_stereo("http://127.0.0.1:1")
+        assert row.state == probe.WARN
+        assert row.name == "foundation stereo depth server"
 
 
 class TestStoredProfilesSelfHeal:
