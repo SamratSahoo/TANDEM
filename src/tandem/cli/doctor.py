@@ -270,6 +270,19 @@ def _phase_planning_check(profile) -> probe.Check:
             group="profile",
         )
 
+    frames = _frame_checks_unanswerable(backend, profile.hitl)
+    if frames:
+        checks = " and ".join(f"hitl.{key}" for key in frames)
+        return probe.Check(
+            "phase planning",
+            probe.FAIL,
+            f"on, but the {backend} planner cannot capture a camera frame, and {checks} "
+            f"{'needs' if len(frames) == 1 else 'need'} one — a session will refuse to start",
+            f"Implement capture_frame(camera=...) in the planner, or set {checks} to false -- knowing that "
+            "no human step will then be verified.",
+            group="profile",
+        )
+
     # Through the profile, so this names the file a session would actually use rather than one relative
     # to wherever doctor was run from.
     cache = profiles.resolve_cache_path(profile)
@@ -292,6 +305,34 @@ def _phase_planning_check(profile) -> probe.Check:
     if profile.hitl.on_robot_phase_failure == "teleop":
         hint = "A phase the planner cannot plan is offered to you as teleop."
     return probe.Check("phase planning", probe.OK, detail, hint, group="profile")
+
+
+def _frame_checks_unanswerable(backend: str, hitl) -> list[str]:
+    """The checks ``hitl`` turns on that need a frame the planner ``backend`` can never capture.
+
+    The session refuses such a planner once it is warm (``Session._require_frames``); this says so
+    before anyone is standing at the robot. Only what the class alone settles: a planner written with
+    the SDK that never overrode ``capture_frame``. A sidecar's verbs are known only once it runs, and a
+    hand-written factory's only once it builds a backend, so both are left to the session.
+    """
+    from tandem.core.session import FRAME_CHECKS
+    from tandem.planners import registry
+    from tandem.planners.sdk import Planner
+    from tandem.planners.sidecar import SidecarPlanner
+
+    needs = [key for key in FRAME_CHECKS if getattr(hitl, key, False)]
+    if not needs:
+        return []
+    try:
+        factory = registry.factory(backend)
+    except TandemError:
+        return []
+    if not (isinstance(factory, type) and issubclass(factory, Planner)):
+        return []
+    own = getattr(factory, "capture_frame", None)
+    if issubclass(factory, SidecarPlanner) and own is SidecarPlanner.capture_frame:
+        return []
+    return needs if own is Planner.capture_frame else []
 
 
 def _human_executor_check(profile) -> probe.Check | None:

@@ -385,6 +385,7 @@ class Session:
 
     def _run(self) -> None:
         """Warm the planner once, then walk one task after another until told to stop."""
+        failure: str | None = None
         try:
             self._event("session_start")
             self._backend.warm()
@@ -417,10 +418,14 @@ class Session:
                     self._log("tandem", f"reached {self.max_episodes} episode(s); stopping")
                     break
         except Exception as exc:
-            self._fail(f"{type(exc).__name__}: {exc}")
-            return
+            # Said now, but the session reads as FAILED only once `_shutdown` has parked the arm,
+            # closed the planner and the executors, and waited for the merges: `tandem collect` exits
+            # as soon as the session has ended, and a failure marked here used to let it exit under
+            # all of that -- a merge killed half-done, an executor's process left running.
+            failure = f"{type(exc).__name__}: {exc}"
+            self._log("tandem", f"the session is failing: {failure}; releasing everything first")
         finally:
-            self._shutdown()
+            self._shutdown(failure)
 
     def _rewarm_after_planner_failure(self) -> None:
         """Warm the planner again before the next task, when one of its verbs raised in this one.
@@ -439,8 +444,12 @@ class Session:
         self._set_state(State.WARMING)
         self._backend.warm()
 
-    def _shutdown(self) -> None:
-        """Park the arm and release everything. Runs on every exit path, including a failure."""
+    def _shutdown(self, failure: str | None = None) -> None:
+        """Park the arm and release everything. Runs on every exit path, including a failure.
+
+        ``failure`` is why the session failed, if it did. The session is marked ended -- FAILED with
+        it, STOPPED without -- only at the very end, so nothing waiting on it moves on early.
+        """
         backend = self._backend
         self._backend = None
         if backend is not None:
@@ -466,6 +475,9 @@ class Session:
             loop.close()
         self._finish_merges()
         self._event("session_end")
+        if failure is not None:
+            self._fail(failure)
+            return
         with self._lock:
             if self.state not in TERMINAL:
                 self._set_state(State.STOPPED, locked=True)
@@ -507,7 +519,7 @@ class Session:
         if not self.hitl_enabled:
             return
         cfg = self._planning_config()
-        needs = [key for key in _FRAME_CHECKS if getattr(cfg, key)]
+        needs = [key for key in FRAME_CHECKS if getattr(cfg, key)]
         if not needs or _can_capture_frame(self._backend):
             return
         name = self.profile.planner.backend
@@ -826,6 +838,11 @@ class Session:
                     # The plans a replan replaced, and which plan each leg carried out a phase of.
                     "superseded": list(outcome.superseded_plans) if outcome is not None else [],
                     "leg_generations": dict(outcome.leg_generations) if outcome is not None else None,
+                    # Who recorded it and what it was asked, where the planner's leg does not say:
+                    # `tandem traj open` picks the viewer by the first, not by the profile's current
+                    # planner, which a `tandem planners use` may have switched since.
+                    "planner": self.profile.planner.backend,
+                    "instruction": self.instruction,
                 },
                 name=f"merge:{self.id}:{trajectory_id}",
                 daemon=True,
@@ -1268,7 +1285,7 @@ def _settled_by_the_loop(outcome: TrialOutcome) -> bool:
 
 # The checks that put a fresh frame from the verification camera to the classifier. The robot leg's
 # precondition check reads the perception pass's own image, so it needs none.
-_FRAME_CHECKS = ("check_human_effects", "check_human_preconditions", "check_tamp_effects")
+FRAME_CHECKS = ("check_human_effects", "check_human_preconditions", "check_tamp_effects")
 
 
 def _can_capture_frame(backend: Any) -> bool:

@@ -105,6 +105,8 @@ def merge_trajectory(
     reason: str | None = None,
     superseded: Sequence[dict] = (),
     leg_generations: Mapping[str, int] | None = None,
+    planner: str | None = None,
+    instruction: str | None = None,
 ) -> None:
     """Join a task's legs into one trajectory, in the background.
 
@@ -115,6 +117,9 @@ def merge_trajectory(
     carried out a phase of (``TrialOutcome``): the first goes into the record, the second -- after a
     replan -- into each leg's stretch of the merged episode, so ``(plan_generation, phase_index)``
     names its phase.
+
+    ``planner`` and ``instruction`` are stamped into the primary leg's ``_meta.json`` where it does not
+    already say them (`stamp_primary_meta`), before the merge, so the merged episode inherits them.
 
     The record is written into the leg the trial is filed under BEFORE the merge starts, and again
     beside the merged episode after. The first copy is the one that survives a merge that never
@@ -128,6 +133,7 @@ def merge_trajectory(
 
     record = {"reason": reason, "superseded": superseded, "leg_generations": leg_generations}
     episode_dir = promote_primary_leg(profile, trajectory_id, status, log=log)
+    stamp_primary_meta(episode_dir, planner=planner, instruction=instruction, log=log)
     write_phase_record(plan, episode_dir, status=status, vlm_dir=vlm_dir, log=log, **record)
     # Only after a replan: with one plan, phase_index alone names the phase, and a segment without
     # `plan_generation` is read as the trial's only plan (generation 0).
@@ -190,6 +196,48 @@ def promote_primary_leg(
         log(f"could not file the episode under {status}: {exc}")
         return primary["dir"]
     return destination
+
+
+def stamp_primary_meta(
+    leg_dir: Path | None,
+    *,
+    planner: str | None,
+    instruction: str | None,
+    log: Callable[[str], None],
+) -> None:
+    """Say who recorded the trial, and what it was asked, in its primary leg's ``_meta.json``.
+
+    The leg is the planner's to stamp, and the recording contract asks it to state the instruction --
+    but nothing asks it to name itself, and a planner that leaves either out used to leave a merged
+    episode that could not say which planner's viewer replays it (`tandem traj open` then guessed from
+    the profile, which `tandem planners use` may have switched since) or what it demonstrates. Only
+    keys the leg does not state are added: what the planner wrote stands. ``planner`` only on a leg the
+    planner recorded -- a trial with no robot leg is primarily a person's, which no planner recorded.
+    Best-effort: a meta that cannot be read or written costs the stamp, never the episode.
+    """
+    if leg_dir is None or not (planner or instruction):
+        return
+    path = Path(leg_dir) / "_meta.json"
+    try:
+        meta = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return
+    if not isinstance(meta, dict):
+        return
+    added: dict = {}
+    if instruction and not meta.get("instruction"):
+        added["instruction"] = instruction
+    if planner and not meta.get("planner") and str(meta.get("source") or "tamp") == "tamp":
+        added["planner"] = planner
+    if not added:
+        return
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(json.dumps({**meta, **added}, indent=2))
+        tmp.replace(path)
+    except OSError as exc:
+        log(f"could not stamp {', '.join(added)} into {path}: {exc}")
+        tmp.unlink(missing_ok=True)
 
 
 def trial_outcome(outcome: str | None, status: str | None, *, failure_stage: str | None = None) -> dict:

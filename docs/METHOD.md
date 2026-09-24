@@ -326,6 +326,9 @@ A trial with a single leg is not merged. Its leg directory is the episode.
 The primary leg's `_meta.json` (the first planner leg) with these keys set:
 
 - `trajectory_id`: the id every leg carries.
+- `planner` and `instruction`: as the planner stamped them, or, where it did not, stamped by the
+  session into the primary leg before the merge (`planner` only on a planner's leg). `tandem traj
+  open` picks the viewer by `planner`. A single-leg episode carries them the same way.
 - `segment_source`: `null`.
 - `source`: `"trajectory"`.
 - `video_aligned`: `true`.

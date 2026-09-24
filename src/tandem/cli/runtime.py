@@ -481,6 +481,10 @@ def install_pixi(log=None) -> None:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        # A byte that is not UTF-8 (a progress bar, a localized curl error) must not end the install
+        # with a UnicodeDecodeError halfway through; the planners' own build streams read the same way.
+        encoding="utf-8",
+        errors="backslashreplace",
         env={**os.environ, "PIXI_NO_PATH_UPDATE": os.environ.get("PIXI_NO_PATH_UPDATE", "1")},
     )
     assert proc.stdout is not None
