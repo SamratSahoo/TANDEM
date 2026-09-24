@@ -22,7 +22,6 @@ from pathlib import Path
 import typer
 
 from tandem.cli import theme
-from tandem.core.errors import TandemError
 from tandem.planners import registry
 
 
@@ -54,40 +53,29 @@ def plan(
         None, "--save-vlm-io", help="Write every image sent to the model, and its reply, here."
     ),
 ) -> None:
+    from tandem import api
     from tandem.planning import objects as objects_mod
-    from tandem.planning.grounding import descriptions_for, to_pil
-    from tandem.planning.plan import build_plan
+    from tandem.planning.grounding import descriptions_for
     from tandem.planning.record import recording_to
-    from tandem.planning.symbols import ProposalError, describe
+    from tandem.planning.symbols import describe
 
-    try:
-        from PIL import Image
-    except ImportError as exc:  # pragma: no cover - Pillow is a base dependency
-        raise TandemError("Pillow is needed to read the workspace photo.", hint="pip install pillow") from exc
-
+    # The same steps `tandem.plan_task` takes (tandem/api.py), split open here only so progress can be
+    # printed between naming the objects and proposing the plan.
     backend = backend or _planner_for(profile_name)
     caps = registry.capabilities(backend)
     cfg = _config_for(profile_name)
-    picture = to_pil(Image.open(image).convert("RGB"))
+    picture = api._picture(image)
 
     async def run():
         names = objects_mod.sanitize_all(objects or [])
         if not names:
             _status(as_json, theme.busy, "naming the objects in the photo")
-            names = await objects_mod.detect_objects(picture, goal, cfg)
+            names = await api._name_objects(picture, goal, cfg)
         _status(as_json, theme.info, "objects", ", ".join(names))
-        return names, await build_plan(picture, goal, names, table, cfg, caps, trajectory_id=None)
+        return await api._decompose(picture, goal, names, table, cfg, caps)
 
     with recording_to(save_vlm_io):
-        try:
-            names, (built, failure) = asyncio.run(run())
-        except ProposalError as exc:
-            raise TandemError(
-                "The model could not produce a usable plan for that instruction.", hint=str(exc)
-            ) from exc
-
-    if built is None:
-        raise TandemError(failure or "the plan could not be built", hint="Try rewording the instruction.")
+        built = asyncio.run(run())
 
     if as_json:
         # Written straight to stdout, not through the console: rich would wrap and colour it, and
@@ -209,31 +197,13 @@ def _goal_of(phase, caps):
 
 def _planner_for(profile_name: str | None) -> str:
     """The planner a plan is proposed for when --backend does not say: the profile's, or the machine's default."""
-    from tandem.core import profiles
-    from tandem.core import settings as settings_mod
+    from tandem import api
 
-    if profile_name:
-        return profiles.load(profile_name).planner.backend
-    return settings_mod.load().default_planner
+    return api._planner_name(profile_name)
 
 
 def _config_for(profile_name: str | None):
-    """Planning settings from a profile, or the defaults with planning turned on.
+    """Planning settings from a profile, or the defaults with planning turned on (``api._profile_config``)."""
+    from tandem import api
 
-    ``enabled`` is forced on: asking for a plan IS asking for one, and refusing because a profile has
-    the feature switched off for collection would be obtuse.
-    """
-    import dataclasses
-
-    from tandem.planning.config import PlanningConfig
-
-    if not profile_name:
-        return PlanningConfig(enabled=True)
-
-    from tandem.core import profiles
-
-    profile = profiles.load(profile_name)
-    # Through the profile, so this reads the same file a collection session would rather than one
-    # relative to wherever the command was run.
-    cache = profiles.resolve_cache_path(profile)
-    return dataclasses.replace(profile.hitl.to_planning_config(cache_path=cache), enabled=True)
+    return api._profile_config(profile_name)

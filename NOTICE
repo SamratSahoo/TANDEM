@@ -1,13 +1,15 @@
 tandem — third-party notices
 ============================
 
-tandem's own code is MIT licensed (see LICENSE).
+tandem is the code for "TANDEM: Task and Motion Planning with As-Needed Demonstrations for
+Efficient Vision-Language-Action Model Fine-tuning" (https://prpl-group.com/tandem/). Its own
+code is MIT licensed (see LICENSE).
 
 tandem does NOT ship the planners it drives. A planner's runtime is built on your machine from
-a recipe that pins each source tree to an exact commit, and `tandem init` / `tandem runtime build`
-fetches those trees from their upstream repositories at install time (or reads them from a
-directory you provide, for an offline machine). The sources are then under their own licences,
-on your machine, exactly as if you had cloned them yourself.
+a recipe that pins each source tree to an exact commit, and `tandem planners install NAME` (which
+`tandem init` runs) fetches those trees from their upstream repositories at install time, or reads
+them from a directory you provide, for an offline machine. The sources are then under their own
+licences, on your machine, exactly as if you had cloned them yourself.
 
 Read this before redistributing tandem, or before using it with the TiPToP planner commercially.
 
@@ -69,9 +71,9 @@ cuTAMP. Installing it, running it, and publishing results from it are all fine. 
 commercial product is not, without a separate license from NVIDIA. A planner that does not
 depend on them is not affected.
 
-If you make an offline bundle of the sources (tools/bundle.py) and pass it on, that bundle IS a
-redistribution of cuRobo and cuTAMP: keep each tree's LICENSE with it, as §3.1 requires. The
-bundle tool exports whole trees, so it does.
+If you make an offline bundle of the sources (tools/bundle.py, in the repository) and pass it
+on, that bundle IS a redistribution of cuRobo and cuTAMP: keep each tree's LICENSE with it, as
+§3.1 requires. The bundle tool exports whole trees, so it does.
 
 
 Python dependencies

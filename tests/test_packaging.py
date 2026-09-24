@@ -15,6 +15,8 @@ FORBIDDEN = ("torch", "cv2", "pyzed", "open3d", "curobo", "cutamp", "tiptop", "w
 # blocked, so an accidental top-level import fails here rather than on a user's laptop.
 LIGHT_MODULES = [
     "tandem",
+    # The library entry point (`tandem.plan_task`): a decomposition from a photo, on a laptop.
+    "tandem.api",
     "tandem.cli.app",
     "tandem.cli.theme",
     "tandem.core.paths",
