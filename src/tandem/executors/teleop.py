@@ -21,6 +21,7 @@ Two behaviours are carried over from the session's hand-off on purpose:
 
 from __future__ import annotations
 
+import logging
 import tempfile
 import threading
 from collections.abc import Callable
@@ -304,12 +305,18 @@ class _ChildHost:
         self._ctx.on_emit(payload)
 
     def _pump(self, stream, name: str) -> None:
+        # Never stops before the stream closes: a drain that ends leaves the driver blocked on a full
+        # pipe, holding the arm. Decoding cannot fail (the child's pipe is decoded leniently); a log sink
+        # that fails is skipped past rather than allowed to end it.
         def drain() -> None:
             try:
                 for raw in stream:
-                    self._ctx.on_log(name, raw.rstrip("\n"))
+                    try:
+                        self._ctx.on_log(name, raw.rstrip("\n"))
+                    except Exception:
+                        logging.getLogger(__name__).exception("the log sink failed on a teleop driver line")
             except (ValueError, OSError):
-                pass
+                pass  # closed under the drain: the driver is gone
 
         threading.Thread(target=drain, name=f"{name}:{self.id}", daemon=True).start()
 

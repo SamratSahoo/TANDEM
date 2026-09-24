@@ -160,7 +160,13 @@ def _leg() -> LegSpec:
 def _recorded(directory: Path, **meta_overrides) -> ExecuteResult:
     """A complete toy leg, with _meta.json overridden."""
     directory.mkdir(parents=True, exist_ok=True)
-    np.savez(directory / "robot_state.npz", **{key: np.zeros(4) for key in merge.STATE_KEYS})
+    # The documented shapes: [F,7] joints, [F] gripper, a float64 clock. A leg of any other width is one
+    # the export cannot read, and the kit says so.
+    widths = {"joint_position": 7, "cmd_joint_position": 7, "cmd_joint_velocity": 7}
+    np.savez(
+        directory / "robot_state.npz",
+        **{key: np.zeros((4, widths[key]) if key in widths else 4) for key in merge.STATE_KEYS},
+    )
     (directory / "external_cam.mp4").write_bytes(b"clip")
     meta = {
         "trajectory_id": "t-1",

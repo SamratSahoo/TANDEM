@@ -154,6 +154,10 @@ class TeleopChild:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            # Leniently: one byte of a camera SDK's output that is not UTF-8 ended the drain, and the
+            # driver then blocked on a full pipe holding the arm (planners/rpc.py says more).
+            encoding="utf-8",
+            errors="backslashreplace",
             bufsize=1,
             start_new_session=True,
         )

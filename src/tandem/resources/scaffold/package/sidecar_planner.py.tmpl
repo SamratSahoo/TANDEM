@@ -53,6 +53,14 @@ CAPABILITIES = Capabilities(
     moved_arguments={"At": 0},
     # The planner's own operators, for the record of each rollout. Never shown to the model.
     robot_operators=("Move(?obj: movable, ?place: surface)",),
+    # TODO: what the solver assumes. initial_state_is_clean=True makes tandem plan consecutive robot
+    # phases as ONE goal -- one perception pass, the atoms sorted, the proposer's order between them
+    # dropped -- which is sound only if every goal is planned from the same state and nothing symbolic
+    # orders two phases. The stand-in sidecar keeps where things are between legs, so it is False:
+    # every robot phase is its own leg. one_pick_per_object=True keeps two phases that move the same
+    # object apart.
+    initial_state_is_clean=False,
+    one_pick_per_object=True,
     # TODO: switch each on once the sidecar honours it; the conformance kit then checks it. The
     # sidecar's plan() is sent movables / return_home only once they are declared here, and a stop
     # reaches it through tandem_sidecar.should_stop() only once cooperative stop is.

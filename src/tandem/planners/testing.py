@@ -16,8 +16,11 @@ The easy way in is to subclass the test class in your own suite::
         planner = MyPlanner              # a Planner subclass, any BackendFactory, or a registered name
 
 pytest collects every ``test_*`` it inherits. Tune it with class attributes (``records_legs``,
-``options``, ``task_hint``) and hooks (``goal`` to choose what is planned, ``make_backend`` to build
-the backend some other way). Each check is also a plain function (``check_declarations``,
+``phase_planning``, ``verifies_human_phases``, ``options``, ``task_hint``) and hooks (``goal`` to
+choose what is planned, ``make_backend`` to build the backend some other way). The two in the middle
+are on by default and hold a planner to what the method needs of it: an image from every perception
+pass, which the task is decomposed from, and a camera frame, which a person's step is verified from.
+Each check is also a plain function (``check_declarations``,
 ``check_protocol``, ``check_scene``, ``check_plan_result``, ``check_leg``, ``check_sidecar_script``,
 ``check_presets``) raising ``ConformanceError`` -- an ``AssertionError`` listing every problem found,
 not just the first.
@@ -165,8 +168,13 @@ def check_protocol(backend: Any, caps: Capabilities | None = None) -> None:
     _raise(f"{title} does not implement the planner protocol", problems)
 
 
-def check_scene(scene: Any) -> None:
-    """A perception pass reported what the phase planner can use."""
+def check_scene(scene: Any, *, require_image: bool = False) -> None:
+    """A perception pass reported what the phase planner can use.
+
+    ``require_image``: ``rgb_path`` must be an image on disk. Phase planning decomposes the task from
+    that image, so without it every trial with ``hitl.enabled`` ends at ``invention`` before the arm
+    moves -- a planner the rest of this kit would pass, and one that cannot run the method.
+    """
     problems: list[str] = []
     if not isinstance(scene, SceneView):
         _raise(
@@ -195,6 +203,17 @@ def check_scene(scene: Any) -> None:
         problems.append("scene_id is empty, so plan() cannot be told which pass to plan in")
     if scene.rgb_path is not None and not Path(scene.rgb_path).is_file():
         problems.append(f"rgb_path {scene.rgb_path!r} is not a file; the verifier would be shown nothing")
+    elif require_image:
+        if scene.rgb_path is None:
+            problems.append(
+                "rgb_path is None: phase planning decomposes the task from that image, so with "
+                "hitl.enabled every trial would end at invention (set phase_planning = False in the kit "
+                "only for a planner that is never run with it)"
+            )
+        else:
+            problem = image_problem(scene.rgb_path)
+            if problem:
+                problems.append(f"rgb_path {scene.rgb_path!r} {problem}; the phase planner could not read it")
     for atom in scene.detected_goal:
         if not (
             isinstance(atom, GoalAtom)
@@ -203,6 +222,25 @@ def check_scene(scene: Any) -> None:
         ):
             problems.append(f"detected_goal holds {atom!r}, which is not a GoalAtom of strings")
     _raise("perceive() reported a malformed scene", problems)
+
+
+def image_problem(path: Any) -> str | None:
+    """Why ``path`` is not an image a model could be shown, or None when it is one.
+
+    Opened the way the phase loop opens it (Pillow, imported here, lazily: it is tandem's dependency,
+    and the kit's functions are imported where it may not be wanted yet). A file that merely exists --
+    a placeholder, a log, a video -- is exactly the frame that would reach the classifier as nothing.
+    """
+    if not isinstance(path, (str, Path)) or not Path(path).is_file():
+        return "is not a file"
+    from PIL import Image
+
+    try:
+        with Image.open(path) as image:
+            image.verify()
+    except Exception as exc:
+        return f"is not an image ({type(exc).__name__}: {exc})"
+    return None
 
 
 def check_plan_result(result: Any) -> None:
@@ -259,10 +297,11 @@ def check_plan_result(result: Any) -> None:
 def check_leg(result: Any, leg: LegSpec, save_dir: Path, *, records: bool = True) -> None:
     """``execute`` stamped its leg so merging can find it -- and, when ``records``, recorded it completely.
 
-    The stamp: ``_meta.json`` carrying ``leg``'s trajectory id, segment source and phase. The
-    recording contract (``tandem.core.trajectories.is_complete``): ``_meta.json`` with
+    The stamp: ``_meta.json`` carrying ``leg``'s trajectory id, segment source, instruction and phase.
+    The recording contract (``tandem.core.trajectories.is_complete``): ``_meta.json`` with
     ``record_start``/``record_stop``/``fps``, ``robot_state.npz`` with exactly the arrays
-    ``tandem.core.merge`` joins, all one row per frame, and the camera clips ``_meta.json`` names.
+    ``tandem.core.merge`` joins, all one row per frame and each of the documented width, and the
+    camera clips ``_meta.json`` names.
     """
     if not isinstance(result, ExecuteResult):
         _raise(
@@ -290,6 +329,11 @@ def check_leg(result: Any, leg: LegSpec, save_dir: Path, *, records: bool = True
             problems.append(f"_meta.json is not JSON: {exc}")
     if meta:
         expected = {"trajectory_id": leg.trajectory_id, "segment_source": leg.segment_source}
+        if leg.instruction:
+            # The dataset's language label. Nothing on tandem's side stamps it: the merge copies the
+            # planner's leg's _meta.json, and the export falls back to the profile's prompt -- which is
+            # not the task that ran when the operator typed another one at the prompt.
+            expected["instruction"] = leg.instruction
         if leg.phase_index is not None:
             expected.update(
                 phase_index=leg.phase_index, n_phases=leg.n_phases, phase_description=leg.phase_description
@@ -337,6 +381,7 @@ def _recording_problems(result: ExecuteResult, directory: Path, meta: dict) -> l
             problems.append(f"the arrays in {trajectories.STATE_FILE} are not one row per frame: {lengths}")
         if arrays and not any(lengths.values()):
             problems.append(f"{trajectories.STATE_FILE} holds no frames")
+        problems += _width_problems(arrays)
     if not trajectories.is_complete(directory, meta):
         reasons = []
         if not state_path.is_file():
@@ -353,6 +398,39 @@ def _recording_problems(result: ExecuteResult, directory: Path, meta: dict) -> l
         problems.append(
             "the leg does not meet the recording contract (tandem.core.trajectories.is_complete): "
             + "; ".join(reasons or ["see is_complete"])
+        )
+    return problems
+
+
+# The arm arrays of the recording contract, [F,7] each: the export writes DROID's 7-joint schema, and
+# the merge joins legs of any source side by side, so one leg of another width is a dataset that cannot
+# be built. Counting rows alone passed a 6-joint arm, whose legs then took `tandem export` down half-way.
+_ARM_JOINTS = 7
+_JOINT_KEYS = ("joint_position", "cmd_joint_position", "cmd_joint_velocity", "action_joint_velocity")
+_GRIPPER_KEYS = ("gripper_position", "cmd_gripper")
+
+
+def _width_problems(arrays: Mapping[str, Any]) -> list[str]:
+    """Every state array whose shape is not the documented one ([F,7] joints, [F] gripper, float64 time)."""
+    problems: list[str] = []
+    for key in _JOINT_KEYS:
+        value = arrays.get(key)
+        shape = list(getattr(value, "shape", ()))
+        if value is not None and not (len(shape) == 2 and shape[1] == _ARM_JOINTS):
+            problems.append(
+                f"{key} is {shape}; merging and the export expect [F,{_ARM_JOINTS}] (the export writes "
+                f"DROID's {_ARM_JOINTS}-joint schema)"
+            )
+    for key in _GRIPPER_KEYS:
+        value = arrays.get(key)
+        shape = list(getattr(value, "shape", ()))
+        if value is not None and not (len(shape) == 1 or (len(shape) == 2 and shape[1] == 1)):
+            problems.append(f"{key} is {shape}; merging and the export expect [F] (or [F,1])")
+    frame_time = arrays.get("frame_time")
+    if frame_time is not None and str(getattr(frame_time, "dtype", "")) != "float64":
+        problems.append(
+            f"frame_time is {frame_time.dtype}, not float64: near the current epoch float32 resolves to "
+            "about two minutes, so every frame of a leg lands on one timestamp"
         )
     return problems
 
@@ -516,6 +594,17 @@ class PlannerConformance:
     #: Whether ``execute`` records legs completely (state, video, timing). False for a planner that
     #: only stamps ``_meta.json`` -- a stand-in with nothing to record; then only the stamp is checked.
     records_legs: bool = True
+    #: Whether the planner is meant to run with phase planning (``hitl.enabled``), which decomposes a
+    #: task from the image ``perceive`` reports: every scene must then carry an ``rgb_path`` that opens
+    #: as an image. On by default, because that is the method; turn it off, visibly, only for a planner
+    #: that is never run with phase planning.
+    phase_planning: bool = True
+    #: Whether a person's step can be verified with it: ``capture_frame`` must return an image. On by
+    #: default -- ``hitl.check_human_effects`` and ``verify_final_phase`` are on by default -- and a
+    #: planner that cannot take a frame fails rather than skips, since a session on it would otherwise
+    #: pass every human phase unchecked. Turn it off, visibly, only for a planner whose profiles turn
+    #: those checks off.
+    verifies_human_phases: bool = True
     #: The ``planner.options`` the backend is built with.
     options: Mapping[str, Any] = {}
     #: The instruction handed to ``perceive`` as its detection hint.
@@ -582,7 +671,7 @@ class PlannerConformance:
 
     def perceived(self, backend: Any, tmp_path: Path) -> tuple[SceneView, list[GoalAtom]]:
         scene = backend.perceive(task_hint=self.task_hint, save_dir=tmp_path / "perceive")
-        check_scene(scene)
+        check_scene(scene, require_image=self.phase_planning)
         return scene, self.goal(scene, backend.capabilities())
 
     # ---- declarations ----------------------------------------------------------------------------
@@ -660,12 +749,16 @@ class PlannerConformance:
 
     def test_perception_reports_a_scene(self, tmp_path: Path) -> None:
         with self.warmed(tmp_path) as backend:
-            check_scene(backend.perceive(task_hint=self.task_hint, save_dir=tmp_path / "first"))
+            check_scene(
+                backend.perceive(task_hint=self.task_hint, save_dir=tmp_path / "first"),
+                require_image=self.phase_planning,
+            )
             # The pass after a human phase: the arm where a person left it, the hand opened first.
             check_scene(
                 backend.perceive(
                     task_hint=self.task_hint, save_dir=tmp_path / "after", reset_arm=False, open_gripper=True
-                )
+                ),
+                require_image=self.phase_planning,
             )
 
     def test_a_plan_is_json_safe_and_says_what_it_runs(self, tmp_path: Path) -> None:
@@ -775,7 +868,8 @@ class PlannerConformance:
             backend.reacquire_hardware()
             backend.reacquire_hardware()
             check_scene(
-                backend.perceive(task_hint=self.task_hint, save_dir=tmp_path / "after", reset_arm=False)
+                backend.perceive(task_hint=self.task_hint, save_dir=tmp_path / "after", reset_arm=False),
+                require_image=self.phase_planning,
             )
             backend.home()
 
@@ -783,8 +877,20 @@ class PlannerConformance:
         with self.warmed(tmp_path) as backend:
             try:
                 path = backend.capture_frame(camera="external")
-            except UnsupportedVerb:
-                _skip(f"{backend.name} cannot capture a frame, so human phases cannot be verified with it")
-            assert isinstance(path, str) and Path(path).is_file(), (
-                f"capture_frame returned {path!r}, not an image file"
-            )
+            except UnsupportedVerb as exc:
+                if not self.verifies_human_phases:
+                    _skip(f"{backend.name} cannot capture a frame, so human phases cannot be verified")
+                _raise(
+                    f"{backend.name} cannot capture a frame for the verifier",
+                    [
+                        f"capture_frame raised UnsupportedVerb ({exc.message}). A session checks a person's "
+                        "step from that frame (hitl.check_human_effects, on by default) and the task's end "
+                        "(hitl.verify_final_phase), so every human phase would go unverified. Implement "
+                        "capture_frame, or set verifies_human_phases = False in the kit for a planner "
+                        "whose profiles turn those checks off",
+                    ],
+                )
+            assert isinstance(path, str), f"capture_frame returned {path!r}, not a path"
+            problem = image_problem(path)
+            if problem:
+                _raise("capture_frame did not return an image", [f"{path!r} {problem}"])

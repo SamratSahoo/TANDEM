@@ -166,6 +166,10 @@ class TrialOutcome:
     # provenance you want.
     plan: PhasePlan | None = None
     legs_recorded: int = 0
+    # The planner RAISED during the attempt -- perceive, plan or execute -- rather than answering. A
+    # sidecar that crashed or was stopped for not answering is not running any more, so the session
+    # warms the planner again before the next task (``Planner.warm`` relaunches a dead sidecar).
+    planner_raised: bool = False
 
 
 @dataclass
@@ -362,6 +366,8 @@ class PhaseLoop:
                 leg_dir = self.legs.new()
                 try:
                     scene = self._perceive(leg_dir, first_leg=leg == 0)
+                    if scene is None:
+                        break  # the planner raised; `_perceive` has ended the attempt
                     if self._plan is None:
                         # Also re-run with phase planning OFF, where it refreshes the planner's own
                         # goal from THIS pass's object labels -- the previous pass's labels may not
@@ -449,8 +455,11 @@ class PhaseLoop:
         else:
             self._run_robot_phase(scene, leg_dir)
 
-    def _perceive(self, leg_dir: Path, *, first_leg: bool) -> SceneView:
+    def _perceive(self, leg_dir: Path, *, first_leg: bool) -> SceneView | None:
         """Look at the workspace. The arm is only parked first when nothing is mid-task.
+
+        None when the planner raised instead of answering; the attempt has then been ended
+        (``_planner_raised``).
 
         Resetting between phases would undo the step before it — and after a hand-off it could
         drive an arm a person just handed us, holding something, back to home.
@@ -469,14 +478,40 @@ class PhaseLoop:
             options["open_gripper"] = True
             self.events.log("a person had the arm last, so the gripper is opened before looking")
         self._after_human = False
-        scene = self.backend.perceive(
-            task_hint=self._task,
-            save_dir=leg_dir,
-            reset_arm=first_leg,
-            **options,
-        )
+        try:
+            scene = self.backend.perceive(
+                task_hint=self._task,
+                save_dir=leg_dir,
+                reset_arm=first_leg,
+                **options,
+            )
+        except Exception as exc:
+            what = f"the {self.caps.name} planner could not perceive the scene"
+            self._planner_raised("tamp_planning", what, exc)
+            return None
         self.events.log(f"perceived: {', '.join(scene.object_labels) or 'nothing'}")
         return scene
+
+    def _planner_raised(self, stage: str, what: str, exc: Exception) -> None:
+        """End the trial over a planner verb that raised instead of answering.
+
+        A sidecar that crashed (its exit code in the message), or that did not answer in time and was
+        stopped, raises here -- the likeliest way a real planner fails mid-trial. It used to unwind
+        straight out of the loop: no stage, no reason, no record, and the session then sent whatever
+        legs had reached disk to the label prompt as though the trial had simply ended, so a
+        demonstration that stopped half-way could be labelled a success and exported.
+
+        Not routed through ``on_robot_phase_failure``: a planner that raised is not a goal it could
+        not plan, and neither teleop (which hands the planner's hardware over) nor a re-plan (which
+        perceives through it) can be served by a backend that may not be running. Only the backend's
+        own calls are guarded; a preempt or a custody failure comes from elsewhere and still unwinds.
+        """
+        reason = f"{what}: {type(exc).__name__}: {exc}"
+        self.events.log(f"{reason}; ending this attempt")
+        self.outcome.planner_raised = True
+        self._plan = None
+        self._task_done = True
+        self._end("failure", stage, reason)
 
     def _prepare_plan(self, scene) -> bool:
         """Decompose the task into phases, or fall through to the planner's own goal.
@@ -644,7 +679,13 @@ class PhaseLoop:
             self.events.log(
                 "more of the task follows this leg, so it ends where it stops rather than at home"
             )
-        result = self.backend.plan(scene.scene_id, goal, surfaces=surfaces, save_dir=save_dir, **options)
+        try:
+            result = self.backend.plan(scene.scene_id, goal, surfaces=surfaces, save_dir=save_dir, **options)
+        except Exception as exc:
+            self._planner_raised(
+                "tamp_planning", f"the {self.caps.name} planner failed while planning {description!r}", exc
+            )
+            return
 
         if not result.ok:
             self._on_plan_failure(result.failure_reason or "no plan found", run)
@@ -655,18 +696,29 @@ class PhaseLoop:
             # On the record before the arm moves, not once the leg has run: a leg that then fails to
             # execute is audited by exactly this -- which plan it was carrying out.
             self._plan.record_plan(self._plan.index, result)
-        execution = self.backend.execute(
-            result.plan_handle,
-            LegSpec(
-                trajectory_id=self._trajectory_id,
-                instruction=self._instruction,
-                phase_index=index,
-                n_phases=total,
-                phase_description=description,
-                record=self.record,
-            ),
-            save_dir=save_dir,
-        )
+        try:
+            execution = self.backend.execute(
+                result.plan_handle,
+                LegSpec(
+                    trajectory_id=self._trajectory_id,
+                    instruction=self._instruction,
+                    phase_index=index,
+                    n_phases=total,
+                    phase_description=description,
+                    record=self.record,
+                ),
+                save_dir=save_dir,
+            )
+        except Exception as exc:
+            # A robot execution failure, like any other: the plan never advances (`_execution_failed`).
+            # The planner may have stamped the leg before it went -- the contract asks it to stamp
+            # first -- and a stamped leg is kept on disk (`LegDirs.retire`), so it is counted: filing is
+            # what joins it to the trial's other legs, instead of leaving it an episode of its own.
+            if (Path(save_dir) / "_meta.json").is_file():
+                self._leg_recorded(1)
+            self.outcome.planner_raised = True
+            self._execution_failed(f"the planner raised {type(exc).__name__}: {exc}", description)
+            return
         self.operator.rollout_saved(execution.n_frames)
         self._leg_recorded(execution.n_frames)
         self.events.event("rollout_saved", dir=str(save_dir), n_frames=execution.n_frames)

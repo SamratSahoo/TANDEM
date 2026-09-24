@@ -114,12 +114,42 @@ STOP_FILE_ENV = "TANDEM_SIDECAR_STOP_FILE"
 # interleaved on the protocol stream are one unparseable line and one lost reply.
 _WRITE_LOCK = threading.Lock()
 
+# Set once tandem has gone away: a write to it failed. Likeliest mid-execute, since that is the longest
+# verb -- tandem crashed, or was killed, while the arm moved.
+_PARENT_GONE = threading.Event()
+
 
 def _emit(payload):
     line = json.dumps(payload) + "\n"
     with _WRITE_LOCK:
-        _PROTOCOL_OUT.write(line)
-        _PROTOCOL_OUT.flush()
+        if _PARENT_GONE.is_set():
+            return
+        try:
+            _PROTOCOL_OUT.write(line)
+            _PROTOCOL_OUT.flush()
+        except (OSError, ValueError):
+            # BrokenPipeError: nobody is reading. It used to escape serve() from inside its own error
+            # handler, and the planner's close() -- which releases the robot and the cameras -- never ran.
+            _parent_gone()
+
+
+def _parent_gone():
+    """tandem is not there any more: stop writing to it, and point everything that would at nowhere.
+
+    Not only the protocol stream. The planner's own prints and stderr go to the same dead parent, and
+    each would raise BrokenPipeError too -- inside the close() that is about to run because of this.
+    """
+    _PARENT_GONE.set()
+    try:
+        fd = os.open(os.devnull, os.O_WRONLY)
+    except OSError:
+        return
+    for target in (_PROTOCOL_OUT.fileno(), 1, 2):
+        try:
+            os.dup2(fd, target)
+        except (OSError, ValueError):
+            pass
+    os.close(fd)
 
 
 def log(message, level="info"):
@@ -160,7 +190,9 @@ def serve(handlers, verbs=None, on_exit=None):
     tandem's ``SidecarPlanner.call`` reaches it -- so a planner can expose a debugging verb of its own.
 
     On the way out ``on_exit`` runs, or else the ``close`` handler when there is one, so the
-    planner releases its hardware even when tandem went away without asking it to.
+    planner releases its hardware even when tandem went away without asking it to -- between two
+    requests (its stdin closes) or in the middle of one (the reply cannot be written): whatever ends
+    the loop, the cleanup runs.
     """
     try:
         table = _resolve(handlers, verbs)
@@ -171,7 +203,23 @@ def serve(handlers, verbs=None, on_exit=None):
         return 1
 
     _emit({"ready": True, "pid": os.getpid(), "verbs": list(table), "kit": KIT_VERSION})
+    try:
+        _answer(table)
+    finally:
+        cleanup = on_exit if on_exit is not None else table.get("close")
+        if cleanup is not None:
+            try:
+                cleanup()
+            except Exception:
+                log(traceback.format_exc())
+    return 0
+
+
+def _answer(table):
+    """Answer requests until tandem says quit, closes stdin, or can no longer be written to."""
     for line in sys.stdin:
+        if _PARENT_GONE.is_set():
+            return
         line = line.strip()
         if not line:
             continue
@@ -188,7 +236,7 @@ def serve(handlers, verbs=None, on_exit=None):
         request_id = request.get("id")
         args = request.get("args") or {}
         if verb == "quit":
-            break
+            return
         handler = table.get(verb)
         if handler is None:
             _emit({"id": request_id, "ok": False, "error": f"unknown verb {verb!r}"})
@@ -201,14 +249,9 @@ def serve(handlers, verbs=None, on_exit=None):
             # words, with the traceback beside it in the session log rather than inside the message.
             log(traceback.format_exc())
             _emit({"id": request_id, "ok": False, "error": f"{verb} failed -- {type(exc).__name__}: {exc}"})
-
-    cleanup = on_exit if on_exit is not None else table.get("close")
-    if cleanup is not None:
-        try:
-            cleanup()
-        except Exception:
-            log(traceback.format_exc())
-    return 0
+        if _PARENT_GONE.is_set():
+            # Nobody will read another reply, nor send another request worth answering.
+            return
 
 
 def _resolve(handlers, verbs):

@@ -93,6 +93,8 @@ until the trial is over:
         scene = backend.perceive(task_hint=task, save_dir=leg_dir,
                                  reset_arm=first,       # park the arm only before the first leg
                                  open_gripper=True if a person had the arm last)
+        # perceive raised (a sidecar that crashed, or was stopped for not answering) → failure at
+        # "tamp_planning"; the session warms the planner again before the next task
         if plan is None:
             if hitl.enabled is false:  goal = scene.detected_goal       # the planner's own goal
             else:  plan = build_plan(scene.rgb_path, task, scene.object_labels, ...)   # §2
@@ -120,6 +122,7 @@ goal = to_goal_atoms(the union of their atoms)     # in the planner's wire spell
 result = backend.plan(scene.scene_id, goal, surfaces=plan.surfaces(), save_dir=leg_dir,
                       movables=plan.robot_movables()   if caps.supports_movable_restriction,
                       return_home=plan.is_last_leg()   if caps.supports_return_home)
+if plan raised:    end: failure at "tamp_planning"     # not a goal it could not plan: no teleop, no replan
 if not result.ok:  on_robot_phase_failure
                      abort  → end: failure at "tamp_planning"
                      teleop → this phase becomes a person's (atoms only, no operator); run it now
@@ -129,7 +132,7 @@ record result.task_plan against every phase in run
 execution = backend.execute(result.plan_handle,
                             LegSpec(trajectory_id, instruction, phase_index, n_phases,
                                     phase_description, record), save_dir=leg_dir)
-if not execution.ok:  end: failure at "tamp_execution"      # never advances
+if execute raised or not execution.ok:  end: failure at "tamp_execution"      # never advances
 [check_tamp_effects] put the run's add effects to the camera; recorded, never enforced
 plan.advance()   # past every phase in run
 ```

@@ -7,6 +7,8 @@ exactly as ``SidecarPlanner`` launches a real one inside a runtime. It imports n
 Flags, so one script covers the failure paths too:
 
     --crash-on VERB        exit with status 3 when VERB arrives (a planner that segfaults mid-plan)
+    --crash-on-nth VERB N  exit with status 3 when VERB arrives for the N-th time (a leg that dies after
+                           an earlier one was recorded)
     --hang-up-on VERB      close the protocol stream when VERB arrives, then exit with status 4 half
                            a second later (a crash whose exit status is not in yet when tandem looks)
     --slow VERB SECONDS    sleep before answering VERB (a planner that wedges)
@@ -42,6 +44,8 @@ def _flag(name: str, count: int = 1) -> list[str] | None:
 
 def main() -> int:
     crash_on = (_flag("--crash-on") or [None])[0]
+    crash_on_nth = _flag("--crash-on-nth", 2)
+    asked: dict = {}
     hang_up_on = (_flag("--hang-up-on") or [None])[0]
     slow = _flag("--slow", 2)
     only = set((_flag("--only") or [""])[0].split(",")) - {""}
@@ -79,8 +83,9 @@ def main() -> int:
         def handler(**kwargs):
             if verb != "last_args":
                 last_args[verb] = kwargs
-            if verb == crash_on:
-                log(f"crashing on {verb}, as asked")
+            asked[verb] = asked.get(verb, 0) + 1
+            if verb == crash_on or (crash_on_nth and [verb, str(asked[verb])] == crash_on_nth):
+                log(f"crashing on {verb} (#{asked[verb]}), as asked")
                 os._exit(3)
             if verb == hang_up_on:
                 tandem_sidecar._PROTOCOL_OUT.close()

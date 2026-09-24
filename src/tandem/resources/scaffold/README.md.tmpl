@@ -31,14 +31,18 @@ tandem planners use {{name}}    # plan with it in the active profile
    use, how each is spelled on the wire, which the camera can check, which argument is the object a
    phase moves. The phase planner reads nothing else about your planner, so this is what makes it
    plan phases your planner can do.
-2. **`perceive`**: every object's label, the support surface, which objects are surfaces, and an image.
+2. **`perceive`**: every object's label, the support surface, which objects are surfaces, and an image
+   (`rgb_path`): tandem splits a task into phases from it, and the kit requires it.
 3. **`plan`**: a plan for one goal, or `ok=False` with the reason.
 4. **`execute`**: run it on the robot and record the leg. When legs are recorded completely -- the
    recording contract is in `tandem.planners.sdk.Planner.execute` -- set `records_legs = True` in
    `tests/test_conformance.py` so the kit checks the recording too.
-5. **The capability switches** (`supports_movable_restriction`, `supports_return_home`,
-   `supports_cooperative_stop`): turn each on as the planner learns to honour it. The kit checks
+5. **`capture_frame`**: a current frame from the camera it is asked for. tandem checks a person's
+   step from it, and the kit requires it.
+6. **The capability switches** (`supports_movable_restriction`, `supports_return_home`,
+   `supports_cooperative_stop`) and **what the solver assumes** (`initial_state_is_clean`,
+   `one_pick_per_object`): turn each switch on as the planner learns to honour it. The kit checks
    every one you declare.
-6. **A runtime**, if the planner needs more than pip (torch, compiled kernels, a solver with an
+7. **A runtime**, if the planner needs more than pip (torch, compiled kernels, a solver with an
    environment of its own): declare `recipe = RuntimeRecipe(...)` -- pinned sources, a pixi
    environment, build steps -- and `tandem planners install {{name}}` builds it.

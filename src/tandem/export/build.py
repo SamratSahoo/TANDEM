@@ -199,8 +199,39 @@ def _skip(reason: str) -> None:
     _last_skip_reason = reason
 
 
+# DROID's arm: the schema this export writes has seven joints, and nothing else fits it.
+ARM_JOINTS = 7
+
+
+def _shape_problem(store) -> str | None:
+    """Why the state arrays do not fit DROID's schema, or None. Read BEFORE anything is reshaped.
+
+    ``reshape(-1, 7)`` on a 6-joint arm's [F,6] raised a ValueError that nothing caught, and the whole
+    export died half-way with a traceback -- or, when F*6 happened to divide by 7, succeeded, and the
+    episode was then skipped as "state arrays disagree on length", hiding the real reason.
+    """
+    for key in ("joint_position", "cmd_joint_position", "cmd_joint_velocity"):
+        if key in store.files:
+            shape = tuple(store[key].shape)
+            if len(shape) != 2 or shape[1] != ARM_JOINTS:
+                return (
+                    f"{key} has shape {list(shape)}, expected [F,{ARM_JOINTS}] (the export writes DROID's "
+                    f"{ARM_JOINTS}-joint schema)"
+                )
+    if "gripper_position" in store.files:
+        shape = tuple(store["gripper_position"].shape)
+        if not (len(shape) == 1 or (len(shape) == 2 and shape[1] == 1)):
+            return f"gripper_position has shape {list(shape)}, expected [F] or [F,1]"
+    return None
+
+
 def _add_episode(writer: V3DatasetWriter, traj_dir: Path, default_instruction: str):
     with np.load(traj_dir / traj_mod.STATE_FILE) as store:
+        problem = _shape_problem(store)
+        if problem is not None:
+            _skip(problem)
+            log.error("%s: %s; skipping", traj_dir.name, _last_skip_reason)
+            return None
         try:
             jp = store["joint_position"].astype(np.float32).reshape(-1, 7)
             gp = store["gripper_position"].astype(np.float32).reshape(-1)
@@ -210,6 +241,12 @@ def _add_episode(writer: V3DatasetWriter, traj_dir: Path, default_instruction: s
         except KeyError as exc:
             _skip(f"missing array {exc}")
             log.warning("%s: %s; skipping", traj_dir.name, _last_skip_reason)
+            return None
+        except ValueError as exc:
+            # A backstop for a shape _shape_problem did not foresee: one bad episode is skipped, loudly,
+            # rather than ending the export with every episode after it unwritten.
+            _skip(f"its state arrays cannot be read as DROID's schema: {exc}")
+            log.error("%s: %s; skipping", traj_dir.name, _last_skip_reason)
             return None
 
         cmd_g_shape = tuple(cmd_g_raw.shape)

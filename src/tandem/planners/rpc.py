@@ -27,6 +27,7 @@ The child half of this protocol, for any planner, is ``tandem/planners/sidecar_k
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -55,6 +56,18 @@ EXIT_GRACE = 60.0
 # enough that a stop asked for mid-execution reaches the child within a step, rarely enough to cost
 # nothing.
 POLL_INTERVAL = 0.1
+# How long whatever is left of the child's process group gets to go after SIGTERM, then after SIGKILL.
+GROUP_TERM_GRACE = 8.0
+GROUP_KILL_GRACE = 2.0
+# How long the child may take to exit once its stdout has closed before it is taken to be still alive
+# (it closed the stream and carried on) rather than gone.
+EXIT_AFTER_EOF = 2.0
+
+
+class BackendTimeout(BackendError):
+    """The child did not answer in time. Unlike every other ``BackendError`` it may still be running --
+    busy, or wedged holding the robot -- so what is done about it is the caller's decision, not a
+    refusal to read past (``SidecarPlanner`` stops it, with everything it started)."""
 
 
 class HostedBackendChannel:
@@ -87,6 +100,10 @@ class HostedBackendChannel:
         # that wedges holding a robot is exactly the case the timeout exists for.
         self._replies: queue.Queue = queue.Queue()
         self._reader: threading.Thread | None = None
+        # Held while the child's process group is signalled, so the reader thread (the child died) and
+        # stop() (tandem is done with it) never signal it twice over; and whether that has been done.
+        self._group_lock = threading.Lock()
+        self._group_done = False
 
     # ---- lifecycle ---------------------------------------------------------
 
@@ -105,6 +122,13 @@ class HostedBackendChannel:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                # Decoded leniently, never strictly. One byte that is not UTF-8 -- a camera SDK's Latin-1
+                # message, a path -- raised UnicodeDecodeError in the reader, which ended it silently;
+                # nothing drained the pipe after that, and once it filled the child blocked writing
+                # and every verb timed out, holding the robot, with the log saying nothing. The
+                # requests going the other way are json.dumps output, ASCII whatever this says.
+                encoding="utf-8",
+                errors="backslashreplace",
                 bufsize=1,
                 # Its own process group: the launcher is usually a wrapper (`pixi run`), and the
                 # process actually holding the robot is its grandchild, so a signal to the direct
@@ -121,11 +145,15 @@ class HostedBackendChannel:
 
         try:
             hello = self._await_reply(None, timeout=HANDSHAKE_TIMEOUT, expect_hello=True)
-        except BackendError:
+        except BackendTimeout:
             # A child that was too slow, or wedged on a camera the previous process still holds, is
             # still holding the robot and the cameras. Abandoning it here leaves no handle to kill it
             # with, and the operator's retry then fails on hardware their own last attempt is sitting
-            # on -- with nothing on screen connecting the two.
+            # on -- with nothing on screen connecting the two. Killed rather than asked: a child that
+            # has not said hello is not reading its requests yet.
+            self.kill()
+            raise
+        except BackendError:
             self.stop()
             raise
         if not hello.get("ready"):
@@ -135,7 +163,7 @@ class HostedBackendChannel:
         return self
 
     def stop(self) -> None:
-        """Ask the child to quit, then make sure it has."""
+        """Ask the child to quit, then make sure it -- and everything it started -- has gone."""
         proc = self._proc
         if proc is None:
             return
@@ -147,7 +175,27 @@ class HostedBackendChannel:
             try:
                 proc.wait(timeout=EXIT_GRACE)
             except subprocess.TimeoutExpired:
-                self._signal_group()
+                pass
+        # Every time, however the child went: quit when asked, would not, or had crashed before this
+        # was called. It used to be signalled only when it outlived EXIT_GRACE, so a sidecar that exited
+        # cleanly left behind whatever it had started -- a camera server, a recorder, a worker pool --
+        # holding the cameras the next sidecar, or the teleop driver, then could not open.
+        self._reap_group(proc)
+        self._close_stdin(proc)
+        self._proc = None
+
+    def kill(self) -> None:
+        """End the child and its whole process group now, without asking it to quit.
+
+        For a child that has stopped answering: asked to quit, it would not read the request, and
+        EXIT_GRACE would pass with it still holding the robot. SIGTERM first, so it can let go of what it
+        holds; SIGKILL after GROUP_TERM_GRACE.
+        """
+        proc = self._proc
+        if proc is None:
+            return
+        self._reap_group(proc)
+        self._close_stdin(proc)
         self._proc = None
 
     # ---- requests ----------------------------------------------------------
@@ -207,10 +255,10 @@ class HostedBackendChannel:
                 except ValueError:
                     # Not ours: library banners, warnings, progress bars. Worth seeing in the session
                     # log, never worth failing on -- and never mistaken for a reply.
-                    self._on_log("backend", line)
+                    self._log_safely("backend", line)
                     continue
                 if not isinstance(payload, dict) or "log" in payload:
-                    self._on_log(
+                    self._log_safely(
                         "backend", str(payload.get("log", line)) if isinstance(payload, dict) else line
                     )
                     continue
@@ -219,14 +267,38 @@ class HostedBackendChannel:
                     try:
                         self._on_event(payload)
                     except Exception as exc:  # a broken sink must not stop replies being read
-                        self._on_log("backend", f"could not record an event from the backend: {exc}")
+                        self._log_safely("backend", f"could not record an event from the backend: {exc}")
                     continue
                 self._replies.put(payload)
         except (ValueError, OSError):
-            pass
+            pass  # the stream was closed under the reader: the child is gone
         finally:
             # Wake anyone waiting: the child is gone and no reply is ever coming.
             self._replies.put(None)
+            self._after_exit(proc)
+
+    def _after_exit(self, proc: subprocess.Popen) -> None:
+        """The child's stdout has closed. If the child has gone with it, so must what it started.
+
+        A crashed sidecar leaves its helpers orphaned, still holding the cameras, and a relaunch at the
+        next warm would find them taken. A child that closed the stream and carried on is left alone
+        here -- stop() deals with it.
+        """
+        with contextlib.suppress(Exception):
+            proc.stdout.close()  # at EOF, from the thread that read it: nothing else reads it
+        try:
+            proc.wait(timeout=EXIT_AFTER_EOF)
+        except subprocess.TimeoutExpired:
+            return
+        self._reap_group(proc)
+
+    def _log_safely(self, stream: str, text: str) -> None:
+        """A line to the log sink, which may fail. A reader that died with it would stop draining the
+        child's pipe, and a child blocked on a full pipe answers nothing, ever."""
+        try:
+            self._on_log(stream, text)
+        except Exception:
+            _log.exception("the log sink failed on a line from the planner backend")
 
     def _await_reply(
         self,
@@ -247,7 +319,7 @@ class HostedBackendChannel:
                 poll()
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise BackendError(
+                raise BackendTimeout(
                     f"the planner backend did not answer within {timeout:.0f}s; it may be wedged "
                     "holding the robot"
                 )
@@ -288,27 +360,82 @@ class HostedBackendChannel:
             return None
 
     def _pump(self, stream, name: str) -> None:
+        """Drain ``stream`` into the log until it closes, whatever arrives on it.
+
+        Never stops early: a drain that ends leaves the child blocked on a full pipe the first time it
+        writes 64 KB more, and from then on it answers nothing. Decoding cannot fail (``start`` decodes
+        leniently) and a sink that fails is logged past (``_log_safely``); only the stream closing ends
+        it.
+        """
+
         def run() -> None:
             try:
                 for raw in stream:
-                    self._on_log(name, raw.rstrip("\n"))
+                    self._log_safely(name, raw.rstrip("\n"))
             except (ValueError, OSError):
-                pass
+                pass  # closed under the drain: the child is gone
+            finally:
+                with contextlib.suppress(Exception):
+                    stream.close()
 
         threading.Thread(target=run, name=name, daemon=True).start()
 
-    def _signal_group(self) -> None:
+    def _reap_group(self, proc: subprocess.Popen | None = None) -> None:
+        """SIGTERM, then SIGKILL, to whatever is left of the child's process group, until it is empty.
+
+        The group, not the child: the launcher is usually a wrapper (`pixi run`), so what holds the
+        robot is its grandchild, and a sidecar may start helpers of its own. They outlive a child that
+        exits -- asked to, or not -- and waiting on the child alone never saw them. Done once per
+        channel: the group id is only known to be this child's while something of it is left.
+        """
         import signal
 
-        if self._pgid is None or self._proc is None or self._proc.poll() is not None:
-            return
-        for sig, grace in ((signal.SIGTERM, 8.0), (signal.SIGKILL, 2.0)):
-            try:
-                os.killpg(self._pgid, sig)
-            except (ProcessLookupError, PermissionError):
+        with self._group_lock:
+            pgid, proc = self._pgid, proc or self._proc
+            if pgid is None or self._group_done:
                 return
-            try:
-                self._proc.wait(timeout=grace)
-                return
-            except subprocess.TimeoutExpired:
-                continue
+            for sig, grace in ((signal.SIGTERM, GROUP_TERM_GRACE), (signal.SIGKILL, GROUP_KILL_GRACE)):
+                if not _group_alive(pgid, proc):
+                    break
+                try:
+                    os.killpg(pgid, sig)
+                except ProcessLookupError:
+                    break
+                except PermissionError:
+                    continue
+                deadline = time.monotonic() + grace
+                while time.monotonic() < deadline and _group_alive(pgid, proc):
+                    time.sleep(0.05)
+            else:
+                if _group_alive(pgid, proc):
+                    self._log_safely(
+                        "backend",
+                        f"processes of the planner backend's group {pgid} outlived SIGKILL; check "
+                        f"`ps -g {pgid}` before starting another",
+                    )
+            self._group_done = True
+
+    @staticmethod
+    def _close_stdin(proc: subprocess.Popen) -> None:
+        # The end tandem writes. The ends it reads are closed by their drains, at EOF: closing one
+        # from here while a drain is blocked reading it can block this thread instead.
+        with contextlib.suppress(Exception):
+            if proc.stdin is not None:
+                proc.stdin.close()
+
+
+def _group_alive(pgid: int, proc: subprocess.Popen | None) -> bool:
+    """Whether anything is left in the process group ``pgid``.
+
+    The child itself is reaped on the way (``poll``): until it is, its zombie still counts as a member,
+    and the group would read as alive long after everything in it had gone.
+    """
+    if proc is not None:
+        proc.poll()
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True

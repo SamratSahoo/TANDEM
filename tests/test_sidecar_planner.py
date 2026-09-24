@@ -248,12 +248,19 @@ def test_a_wedged_sidecar_is_reported_as_one_that_may_hold_the_robot(toy, tmp_pa
 
     planner = toy("--slow", "plan", "1.0", cls=Impatient)
     planner.warm()
+    wedged = planner._channel.hello["pid"]
     scene = planner.perceive(task_hint="x", save_dir=tmp_path / "p")
     with pytest.raises(BackendError, match="did not answer within 0s; it may be wedged holding the robot"):
         planner.plan(scene.scene_id, GOAL, save_dir=tmp_path / "l")
-    # The late answer is thrown away rather than read as the reply to the next question.
-    assert planner.perceive(task_hint="x", save_dir=tmp_path / "p2").object_labels
-    assert any("discarding a late reply" in text for _, text in planner.seen)
+    # And then it is stopped, rather than left holding the robot while the session carries on around
+    # it: what else it holds cannot be known. (That a late answer on a channel still running is thrown
+    # away, not read as the next reply, is the channel's own promise: tests/test_review_sdk_process.py.)
+    assert not planner._channel.alive
+    with pytest.raises(BackendError, match="not running"):
+        planner.perceive(task_hint="x", save_dir=tmp_path / "p2")
+    planner.warm()
+    assert planner._channel.hello["pid"] != wedged
+    assert planner.perceive(task_hint="x", save_dir=tmp_path / "p3").object_labels
 
 
 def test_a_verb_the_sidecar_does_not_answer_falls_back_to_the_default(toy):

@@ -369,6 +369,7 @@ class Session:
                 except Exception as exc:  # a bad task must not end a warm session
                     self._log("tandem", f"the task attempt failed: {type(exc).__name__}: {exc}")
                     self._event("rollout_aborted", error=str(exc))
+                self._rewarm_after_planner_failure()
                 if self.max_episodes and self.labeled_count >= self.max_episodes:
                     self._log("tandem", f"reached {self.max_episodes} episode(s); stopping")
                     break
@@ -377,6 +378,23 @@ class Session:
             return
         finally:
             self._shutdown()
+
+    def _rewarm_after_planner_failure(self) -> None:
+        """Warm the planner again before the next task, when one of its verbs raised in this one.
+
+        The phase loop ends such a trial itself (``PhaseLoop._planner_raised``). What it cannot do is
+        bring the planner back: a sidecar that crashed, or was stopped for not answering, is not
+        running, and every later task would fail at its first perception pass -- "the planner backend
+        is not running" -- until the session was restarted. ``warm`` on a planner that is still warm
+        does nothing, and on a sidecar that is gone starts a fresh one. If even that fails, the session
+        fails with it rather than returning to a task prompt it could never serve.
+        """
+        outcome = self._last_outcome
+        if self._stopping or outcome is None or not outcome.planner_raised:
+            return
+        self._log("tandem", "the planner failed during that attempt; warming it again before the next task")
+        self._set_state(State.WARMING)
+        self._backend.warm()
 
     def _shutdown(self) -> None:
         """Park the arm and release everything. Runs on every exit path, including a failure."""
@@ -821,16 +839,6 @@ class Session:
                 f"Cannot {action} while the session is {self.state.value}.",
                 hint=f"That is only possible at {expected.value}.",
             )
-
-    def _pump(self, stream, name: str) -> None:
-        def run() -> None:
-            try:
-                for raw in stream:
-                    self._log(name, raw.rstrip("\n"))
-            except (ValueError, OSError):
-                pass
-
-        threading.Thread(target=run, name=f"{name}:{self.id}", daemon=True).start()
 
     def _log(self, stream: str, text: str) -> None:
         line = LogLine(stream=stream, text=secrets.redact(text))

@@ -75,14 +75,16 @@ Then replace each `TODO`, in the order the generated README lists them, and keep
 
 1. **The goal language** (`CAPABILITIES`).
 2. **`perceive`**: every object's label, the table's, which objects are surfaces, a scene id, and
-   an image.
+   an image (`rgb_path`), which the kit requires.
 3. **`plan`**: one goal, planned; or `ok=False` with the reason.
 4. **`execute`**: run it, record the leg. Once legs are really recorded, set
    `records_legs = True` in `tests/test_conformance.py` so the kit checks the recording too.
-5. **The switches**: turn on `supports_movable_restriction`, `supports_return_home` and
+5. **`capture_frame`**: a current frame from the camera asked for, which the kit requires.
+6. **The switches**: turn on `supports_movable_restriction`, `supports_return_home` and
    `supports_cooperative_stop` as the planner learns to honour each. The kit checks every one
-   declared.
-6. **A runtime recipe**, if the planner needs more than pip.
+   declared. Say what the solver assumes (`initial_state_is_clean`, `one_pick_per_object`); the
+   scaffold states both, with the safe values.
+7. **A runtime recipe**, if the planner needs more than pip.
 
 A name is `lowercase letters, digits, _ and -, starting with a letter` (`tandem/core/names.py`). The
 same rule holds for human executors. It is typed into YAML and onto command lines, and it becomes a
@@ -155,15 +157,15 @@ drives (`tests/toy_planner.py`) drops items into bins, with no table and no excl
 |---|---|---|---|
 | `name` | Must equal `info.name`. | `"tiptop"` | `"toy"` |
 | `goal_predicates` | Ψ₀: name → `Predicate(name, (Parameter(name, type), …))`. The goal language shown to the model; a robot phase may use nothing else. Declaration order is shown order: put the load-bearing one first. | `On(?obj: movable, ?surface: surface)`, `Holding(?obj: movable)`, `HandEmpty()` | `InBin(?obj: item, ?bin: container)` |
-| `robot_description` | One abstract sentence of what the robot does. The model reads it instead of real operator signatures. | `"pick an object up and place it on a surface"` | `"drop an item into a bin"` |
+| `robot_description` | One abstract sentence of what the robot does. The model reads it instead of real operator signatures. Required: there is no default, and an empty one is refused. | `"pick an object up and place it on a surface"` | `"drop an item into a bin"` |
 | `goal_predicate_wire_names` | How each goal predicate is spelled in `plan(goal=)`. A predicate **absent** here is one the planner supplies itself: it may be stated, and is dropped from goals. | `{"On": "on", "Holding": "holding"}` (no `HandEmpty`) | `{"InBin": "in_bin"}` |
 | `achievable_predicates` | Everything some operator can make true. A robot phase asking for anything else is refused, and repaired, before perception is paid for. Must include every goal predicate. | cuTAMP's add effects, plus what a fresh scene holds | `{"InBin"}` |
 | `reserved_predicate_names` | Names the model may not invent. Must include every goal predicate. | all 19 cuTAMP fluents | `{"InBin"}` |
-| `movable_type`, `surface_type` | The two object types, and which is which. Must differ. | `movable`, `surface` | `item`, `container` |
+| `movable_type`, `surface_type` | The two object types, and which is which. Must differ. They are the only two: tandem types every perceived object as one or the other, so every parameter of a goal predicate and of a robot operator must be typed with one of them. A third type is refused, since no atom over it could ever be grounded. | `movable`, `surface` | `item`, `container` |
 | `predicate_descriptions` | `{0}`-templates saying what each goal predicate means, for the operator and for the camera. | `"{0} is resting on top of {1}"`, … | `"{0} is inside {1}"` |
 | `checkable_predicates` | Goal predicates a camera can judge from one photo. Invented predicates are always checkable. | `{"On"}` (the gripper is usually out of shot) | `{"InBin"}` |
-| `one_pick_per_object` | One plan picks each object at most once, so two phases moving the same object are never conjoined. | `True` (cuTAMP deletes `HasNotPickedUp`) | `False` |
-| `initial_state_is_clean` | Every goal is planned from the same clean state, so consecutive robot phases may be conjoined into one goal (`hitl.conjoin_robot_phases`). | `True` | `False`: every robot phase is its own leg |
+| `one_pick_per_object` | One plan picks each object at most once, so two phases moving the same object are never conjoined. Default `True`, the safe value: it only ever keeps phases apart. | `True` (cuTAMP deletes `HasNotPickedUp`) | `False` |
+| `initial_state_is_clean` | Every goal is planned from the same clean state, so consecutive robot phases may be conjoined into one goal (`hitl.conjoin_robot_phases`): one perception pass, the atoms sorted, the proposer's order between them dropped. Default `False`: every robot phase is its own leg. Set it only when the solver really makes that promise. | `True` | `False`: every robot phase is its own leg |
 | `supports_cooperative_stop` | `execute` polls `should_stop` at step boundaries. Otherwise a preempt is an abort. | `False` | `True` |
 | `supports_skeleton_reuse` | `plan` can reuse a previous `PlanResult.skeleton`. | `False` | `False` |
 | `prompt_fragments` | Planner-specific paragraphs of the segmentation prompt, by slot (`tandem.planning.prompts.PROMPT_SLOTS`): `placement_semantics`, `precondition_vocabulary`, `delete_effect_example`, `work_division`, `intermediate_state_example`, `robot_phase_rules`. A slot left out gets a generic paragraph rendered from the goal predicates, so `{}` is a complete declaration. | all six, the paper's Appendix-B wording (pinned byte for byte by a golden test) | `{}` |
@@ -206,6 +208,10 @@ class BinPlanner(Planner):
         predicate_descriptions={"InBin": "{0} is inside {1}"},
         checkable_predicates=frozenset({"InBin"}),
         moved_arguments={"InBin": 0},
+        # What the solver assumes: each robot phase its own leg, and an item may be dropped more
+        # than once in one plan.
+        initial_state_is_clean=False,
+        one_pick_per_object=False,
     )
     OPTIONS = {"bins": "the bin names, left to right"}
 
@@ -228,6 +234,8 @@ class BinPlanner(Planner):
 **Checked when the class is defined.** Every problem is listed in one `TandemError` at import:
 
 - an unachievable or unreserved goal predicate;
+- a goal-predicate or robot-operator parameter typed as neither `movable_type` nor `surface_type`;
+- an empty `robot_description`;
 - a moved argument that points at a surface;
 - a wire name for a predicate that does not exist;
 - a misspelt prompt slot;
@@ -302,12 +310,19 @@ What it does for you:
 - **Streams output.** Log lines and stderr go into the session log. Events go into the session's
   events file (`on_event`).
 - **Times out** every verb. Defaults: `warm` 900 s, `perceive` 300, `plan` 900, `execute` 1800,
-  `capture_frame`, `home`, `release_hardware` and `reacquire_hardware` 180 each. A crash is
-  reported with its exit code, and a dead sidecar is relaunched at the next `warm`.
+  `capture_frame`, `home`, `release_hardware` and `reacquire_hardware` 180 each. A sidecar that
+  does not answer in time is stopped (SIGTERM, then SIGKILL, to its whole process group), so it is
+  not left holding the robot. A crash is reported with its exit code. Either way the trial ends as a
+  failure at the stage it was in (`tamp_planning` for `perceive` and `plan`, `tamp_execution` for
+  `execute`), and the session calls `warm` again before the next task, which relaunches the sidecar.
+  `warm` on a sidecar that is running and warm does nothing.
+- **Pipes** are decoded leniently and drained until they close, so a byte that is not UTF-8 in
+  what a library prints cannot stop the drain and leave the sidecar blocked on a full pipe.
 - **Stops cooperatively** when declared. While `execute` runs, `should_stop` is polled in tandem
   and passed to the sidecar as a stop file (`TANDEM_SIDECAR_STOP_FILE`).
 - **`close`** asks the sidecar to quit, then makes sure the whole process group is gone, so nothing
-  is left holding a camera.
+  is left holding a camera. That includes helpers the sidecar started itself, after it exits or
+  crashes.
 
 Override `launch_command`, `launch_cwd`, `launch_env`, `warm_args` (what the sidecar's `warm` is
 handed; by default `output_dir`, `execute`, `record`) or `on_event` when the defaults are wrong for
@@ -538,8 +553,10 @@ Entry points are read by name when listing and imported only when used. So keep 
 entry point names light: torch and robot clients go inside `warm()`, or into a sidecar. A plugin
 that fails to import does not stop tandem. It is listed as `broken` with its error, and every other
 planner keeps working. A plugin that loses to a registered or built-in planner of the same name is
-listed with the reason it is not used. A package installed while `tandem ui` runs is seen on the
-next listing.
+listed with the reason it is not used. A plugin that calls `sys.exit()` at import (argv parsing,
+absl, hydra) is listed as broken too. A package installed while `tandem ui` runs is seen on the
+next listing, an editable one (`pip install -e .`) included: the `.pth` file that puts it on the
+path is read then.
 
 Then `planner: {backend: arm}` in a profile (or `tandem planners use arm`) is all it takes.
 `tandem planners use arm --default` also makes it the planner every new profile gets
@@ -637,15 +654,23 @@ Override `goal(scene, caps)` when the kit cannot guess a plannable goal from you
 raises `ConformanceError` listing every problem found: `check_declarations`, `check_protocol`,
 `check_scene`, `check_plan_result`, `check_leg`, `check_sidecar_script`, `check_presets`.
 
-The kit checks the protocol, not your planner's quality, and it does not require two things phase
-planning needs:
+The kit checks the protocol, not your planner's quality. It does hold a planner to the two things
+phase planning needs of it, with two class switches that are on by default:
 
-- **an image from `perceive`**: without `rgb_path` a task cannot be decomposed, and the trial ends
-  at `invention`;
-- **`capture_frame`**: without it no human phase can be verified.
+- **`phase_planning = True`**: every scene's `rgb_path` must open as an image. Without it a task
+  cannot be decomposed, and every trial with `hitl.enabled` ends at `invention`.
+- **`verifies_human_phases = True`**: `capture_frame(camera="external")` must return an image. A
+  planner that raises `UnsupportedVerb` fails, naming `hitl.check_human_effects` and
+  `hitl.verify_final_phase`, since a session on it could verify no human phase.
 
-The scaffold returns neither until you wire them in. Before collecting with phase planning on, run a
-session with `--no-execute`, and run `tandem plan --backend NAME` on a photo of your workspace.
+Turn one off, visibly, only for a planner that is never run that way. The scaffold returns a
+stand-in image for both until you wire the real cameras in. Before collecting with phase planning
+on, run a session with `--no-execute`, and run `tandem plan --backend NAME` on a photo of your
+workspace.
+
+With `records_legs`, the recording is held to the documented shapes too: `[F,7]` joint arrays,
+`[F]` gripper arrays and a float64 `frame_time`. `_meta.json` must carry `leg.instruction`, whether
+or not the leg records.
 
 ---
 

@@ -272,6 +272,9 @@ STACKER = Capabilities(
     surface_type="block",
     moved_arguments={"Stacked": 0},
     one_pick_per_object=True,
+    # Stated, not inherited: a run is conjoined only for a planner that promises a clean state, and
+    # these tests are about what splits a run that could otherwise be one.
+    initial_state_is_clean=True,
 )
 
 
