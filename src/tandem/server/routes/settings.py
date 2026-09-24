@@ -33,6 +33,7 @@ async def get_settings() -> dict:
         "settings": {key: value for key, value in settings_mod.flatten(cfg)},
         "paths": {
             "config": str(paths.config_file()),
+            "rig": str(paths.rig_file()),
             "credentials": str(paths.credentials_file()),
             "data_root": str(cfg.resolved_data_root()),
             "runtime": str(cfg.resolved_runtime_dir()),

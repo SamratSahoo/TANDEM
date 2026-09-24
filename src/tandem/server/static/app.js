@@ -17,6 +17,10 @@ const ROUTES = [
 export const state = {
   profile: null,
   profiles: [],
+  // The paper's five tasks by name, which a new profile can copy whether or not this machine has them.
+  builtin: [],
+  // Profiles in the layout before version 3, which `tandem init` moves: not listed until it has.
+  oldLayout: [],
   version: "",
   runtimeReady: false,
 };
@@ -120,6 +124,8 @@ async function refreshShell() {
     const payload = await api.profiles();
     state.profiles = payload.profiles || [];
     state.profile = payload.active;
+    state.builtin = payload.builtin || [];
+    state.oldLayout = payload.old_layout || [];
     clear(profileSelect);
     for (const profile of state.profiles) {
       profileSelect.appendChild(

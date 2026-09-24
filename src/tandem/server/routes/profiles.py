@@ -1,4 +1,4 @@
-"""Profile routes.
+"""Profile routes: one YAML file per profile, the paper's five tasks among them.
 
 The page shows every planner's settings the same way -- a summary, titled sections, what the planner
 will receive and what is wrong with it -- because each planner describes its own options
@@ -49,6 +49,8 @@ def _card(name: str, active: str) -> dict:
         "counts": counts,
         "file": str(profile.file()),
         "trajectories": str(profile.trajectories_dir()),
+        # One of the paper's five tasks (it may have been edited since: once copied in, it is the user's).
+        "builtin": name in profiles_mod.BUILTIN,
     }
 
 
@@ -78,6 +80,8 @@ async def list_profiles() -> dict:
         # Profiles written before version 3, not loaded until `tandem init` (or `tandem profile migrate`)
         # moves them: the page says so rather than show fewer profiles than there are.
         "old_layout": layout.pending(),
+        # The paper's five, which a new profile can copy whether or not this machine has them yet.
+        "builtin": list(profiles_mod.BUILTIN),
     }
 
 
@@ -155,8 +159,12 @@ CREATE_KEYS = ("name", "from", "prompt")
 
 @router.post("/profiles")
 async def create_profile(body: dict[str, Any] = Body(...)) -> dict:
-    from tandem import resources
+    """A new profile, made as `tandem profile create` makes one (``profiles.create``): the paper's settings with
+    the task given, or a copy of a profile -- one here, or one of the paper's five before `tandem init` has
+    copied them in. The file is written as its source reads, comments included.
 
+    What a person can fix in the form is a 400 with the field to fix, said before anything is written.
+    """
     unknown = sorted(set(body) - set(CREATE_KEYS))
     if unknown:
         raise TandemError(
@@ -165,42 +173,46 @@ async def create_profile(body: dict[str, Any] = Body(...)) -> dict:
         )
     name = str(body.get("name") or "").strip()
     if not name:
-        raise ProfileError("A profile needs a name.")
+        raise TandemError("A profile needs a name.", hint="Such as fold-cloth: it is also the file's name.")
+    if not profiles_mod.is_name(name):
+        raise TandemError(
+            f"{name!r} is not a profile name.",
+            hint="Lowercase letters, digits, - and _, starting with a letter or a digit: it is also the file's name.",
+        )
     if profiles_mod.exists(name):
-        raise ProfileError(f"Profile {name!r} already exists.")
-
-    source = body.get("from")
-    if source:
-        base = profiles_mod.load(str(source))
-        profile = base.model_copy(deep=True)
-        profile.name = name
-        profile.description = f"copied from {source}"
-    else:
-        from tandem.cli import planners as planners_cli
-
-        profile = profiles_mod.load_file(resources.path("profile_template.yml"), name=name)
-        profile.description = ""
-        # The machine's default planner, as `tandem profile create` gives it -- keeping the template's
-        # options when the template already names that planner.
-        chosen = planners_cli.planner_for_new_profile()
-        if profile.planner.backend != chosen:
-            profile.planner = profiles_mod.planner_spec(chosen, profile=name)
-
-    if body.get("prompt"):
-        profile.task.prompt = str(body["prompt"])
-    elif not source:
-        # The template is the paper's settings with no task of its own: as `tandem profile create` does, a
-        # new profile is never written with its placeholder as the task. (A 400, not a ProfileError's 404.)
+        raise TandemError(f"Profile {name!r} already exists.", hint="Choose another name, or open that one to edit it.")
+    source = str(body.get("from") or "").strip() or None
+    prompt = str(body.get("prompt") or "").strip() or None
+    if source is None and prompt is None:
+        # The template is the paper's settings with no task of its own: a new profile is never written with
+        # its placeholder as the task.
         raise TandemError(
             "A new profile needs its task.",
             hint="Say what the robot and you are to do, or start from a copy of a profile (the paper's five "
             "included).",
         )
 
-    profiles_mod.save(profile)
+    planner = None
+    if source is None:
+        from tandem.cli import planners as planners_cli
 
+        # The machine's default planner, checked by name before anything is written, as the CLI does.
+        planner = planners_cli.planner_for_new_profile()
+    profiles_mod.create(name, source=source, prompt=prompt, planner=planner)
     cfg = settings_mod.load()
     return _card(name, cfg.active_profile)
+
+
+@router.post("/profiles/builtin")
+async def add_builtin() -> dict:
+    """Copy in the paper's five tasks this machine does not have, as `tandem init` does: never over one that is
+    here, since once copied a profile is its owner's. With no usable active profile, the first becomes it."""
+    added = profiles_mod.seed_builtins()
+    cfg = settings_mod.load()
+    if not profiles_mod.exists(cfg.active_profile):
+        cfg.active_profile = profiles_mod.BUILTIN[0]
+        settings_mod.save(cfg)
+    return {"added": added, "active": cfg.active_profile}
 
 
 @router.delete("/profiles/{name}")

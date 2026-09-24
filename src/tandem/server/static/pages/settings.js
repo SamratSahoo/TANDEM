@@ -1,8 +1,8 @@
-// Settings — paths, credentials (write-only), the planner and human-executor catalogs, runtime
-// status, and the doctor report.
+// Settings — this machine's rig, credentials (write-only), paths, the planner and human-executor catalogs,
+// runtime status, and the doctor report.
 
 import { api } from "../api.js";
-import { clear, h, mount } from "../dom.js";
+import { clear, h, mount, prettyJson } from "../dom.js";
 import { reloadShell, reportError, toast } from "../app.js";
 
 const GLYPH = { ok: ["✔", "var(--green)"], warn: ["!", "var(--amber)"], fail: ["✖", "var(--red)"], skip: ["·", "var(--faint)"] };
@@ -24,6 +24,7 @@ export function renderSettings(host, state) {
   function load() {
     api.settings()
       .then((payload) => mount(paneHost,
+        rigCard(),
         credentialsCard(payload, load),
         pathsCard(payload),
         plannersCard(state),
@@ -190,6 +191,183 @@ function executorRow(row, payload) {
     h("td", ...about),
     h("td", actions));
 }
+
+// ---- the rig -----------------------------------------------------------------
+//
+// The robot, the cameras and their calibration: this machine's, shared by every profile (rig.yml). Saving
+// sends only what was changed, as `tandem rig set` would one key at a time, so a setting left at its
+// default stays one rather than being written into the file; the server checks the whole rig before it
+// writes anything. A planner's machine settings are its own (RIG_OPTIONS): shown and edited as a block,
+// as the planner validated them, with the keys it declares listed under it.
+
+const CAMERA_ROLES = [
+  ["hand", "Wrist camera"],
+  ["external", "External camera"],
+  ["external_2", "Second external camera"],
+];
+
+function rigCard() {
+  const body = h("div", h("div.row", h("span.spin"), h("span.faint.small", "loading…")));
+
+  function load() {
+    api.rig()
+      .then((payload) => mount(body, ...rigForm(payload, load)))
+      .catch((error) => mount(body,
+        h("div.alert.err", error.message),
+        error.hint ? h("div.desc", error.hint) : null,
+        h("div.desc", "Fix it in a terminal: ", h("span.mono", "tandem rig edit"), " opens the file.")));
+  }
+
+  load();
+  return h("div.card",
+    h("div.card-title", "Rig"),
+    h("div.card-hint", "This machine's robot, cameras and calibration. Shared by every profile. ",
+      h("span.mono", "tandem rig show"), " in a terminal."),
+    body);
+}
+
+// A nested block as {"perception.m2t2.url": ...}: one entry per setting, as `tandem rig set` names them.
+function flatten(value, prefix = "", out = {}) {
+  if (value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length) {
+    for (const [key, item] of Object.entries(value)) flatten(item, prefix ? `${prefix}.${key}` : key, out);
+  } else if (prefix) {
+    out[prefix] = value;
+  }
+  return out;
+}
+
+function rigForm(payload, reload) {
+  const rig = payload.rig;
+  const typeInput = h("input", { value: rig.robot.type });
+  const hostInput = h("input", { value: rig.robot.host, placeholder: "172.16.0.2" });
+  const perceptionSelect = h("select",
+    ...["external", "hand"].map((role) =>
+      h("option", { value: role, selected: role === rig.cameras.perception }, role)));
+
+  const serialInputs = {};
+  const cameraFields = CAMERA_ROLES.map(([role, label]) => {
+    const camera = rig.cameras[role];
+    const input = h("input", { value: camera ? camera.serial : "", placeholder: "none" });
+    serialInputs[role] = input;
+    const calibrated = camera && payload.calibrated.includes(camera.serial);
+    return h("div.field",
+      h("label", `${label} (${role})`),
+      h("div.row",
+        input,
+        camera
+          ? h("span.chip" + (calibrated ? ".success" : ".failure"),
+              { title: calibrated ? "its extrinsics are in the calibration file" : "no extrinsics for it yet" },
+              calibrated ? "✓ calibrated" : "✗ not calibrated")
+          : null));
+  });
+  const configured = CAMERA_ROLES.filter(([role]) => rig.cameras[role]).length;
+
+  // Each installed planner's machine settings, as it validated them (defaults filled in).
+  const plannerAreas = [];
+  const plannerFields = Object.entries(payload.planners || {})
+    .filter(([, planner]) => planner.installed && planner.declared && Object.keys(planner.declared).length)
+    .map(([name, planner]) => {
+      const area = h("textarea", {
+        value: prettyJson(planner.options || {}),
+        style: { minHeight: "220px" },
+      });
+      plannerAreas.push({ name, area, before: planner.options || {} });
+      return h("div.field",
+        h("label", `${name}'s machine settings (planners.${name})`),
+        planner.problem ? h("div.alert.err", { style: { marginBottom: "6px" } }, planner.problem) : null,
+        area,
+        h("dl.kv", { style: { marginTop: "6px" } },
+          ...Object.entries(planner.declared).flatMap(([key, text]) => [h("dt", key), h("dd.small", text)])));
+    });
+
+  function changes() {
+    const out = {};
+    const robotType = typeInput.value.trim();
+    const host = hostInput.value.trim();
+    if (robotType !== rig.robot.type) out["robot.type"] = robotType;
+    if (host !== rig.robot.host) out["robot.host"] = host;
+    if (perceptionSelect.value !== rig.cameras.perception) out["cameras.perception"] = perceptionSelect.value;
+    for (const [role] of CAMERA_ROLES) {
+      const was = rig.cameras[role] ? rig.cameras[role].serial : "";
+      const now = serialInputs[role].value.trim();
+      // A blank serial is no camera in that role: the whole camera goes, not just its serial.
+      if (now !== was) out[now ? `cameras.${role}.serial` : `cameras.${role}`] = now || null;
+    }
+    for (const { name, area, before } of plannerAreas) {
+      let after;
+      try {
+        after = JSON.parse(area.value || "{}");
+      } catch (error) {
+        throw new Error(`${name}'s machine settings are not valid JSON: ${error.message}`);
+      }
+      const old = flatten(before);
+      const now = flatten(after);
+      for (const key of new Set([...Object.keys(old), ...Object.keys(now)])) {
+        if (JSON.stringify(old[key]) !== JSON.stringify(now[key])) {
+          out[`planners.${name}.${key}`] = key in now ? now[key] : null;
+        }
+      }
+    }
+    return out;
+  }
+
+  async function save() {
+    let changed;
+    try {
+      changed = changes();
+    } catch (error) {
+      toast.err("Not saved", error.message);
+      return;
+    }
+    if (!Object.keys(changed).length) {
+      toast.info("Nothing to save");
+      return;
+    }
+    try {
+      const saved = await api.saveRig(changed);
+      toast.ok("Rig saved", saved.file);
+      reload();
+    } catch (error) {
+      reportError(error, "Could not save the rig");
+    }
+  }
+
+  const alerts = [];
+  if (!payload.exists) {
+    alerts.push(h("div.alert.info", "Not written yet: these are the defaults. ",
+      h("span.mono", "tandem init"), " asks for the robot and cameras; saving here writes ", h("span.mono", payload.file), "."));
+  }
+  if (payload.perception_missing) alerts.push(h("div.alert.err", payload.perception_missing));
+  if (payload.calibration_problem) alerts.push(h("div.alert.err", payload.calibration_problem));
+  for (const problem of payload.problems || []) {
+    if (problem.detail === payload.perception_missing) continue;
+    alerts.push(h("div.alert.err", h("strong", problem.name), " — ", problem.detail,
+      problem.hint ? h("div.desc", problem.hint) : null));
+  }
+
+  return [
+    ...alerts.map((node) => { node.style.marginBottom = "10px"; return node; }),
+    h("div.section-title", "robot"),
+    h("div.field-row",
+      h("div.field", h("label", "Arm type"), typeInput, h("div.desc", "As the planner names it, such as fr3_robotiq.")),
+      h("div.field", h("label", "Address (the NUC)"), hostInput, h("div.desc", "A hostname or IP address, no port."))),
+    h("div.section-title", "cameras"),
+    h("div.field", h("label", "Perception reads"), perceptionSelect,
+      h("div.desc", "external: the arm stays home while it looks. hand: the wrist camera.")),
+    ...cameraFields,
+    h("div.section-title", "calibration"),
+    h("dl.kv",
+      h("dt", "file"), h("dd", h("span.mono.faint", payload.calibration_file)),
+      h("dt", "calibrated"), h("dd", `${payload.calibrated.length} of ${configured} camera(s)`)),
+    ...(plannerFields.length ? [h("div.section-title", "planners"), ...plannerFields] : []),
+    h("div.row", { style: { marginTop: "12px" } },
+      h("button.primary", { onclick: save, style: { whiteSpace: "nowrap", flexShrink: 0 } }, "Save rig"),
+      h("div.spacer"),
+      h("span.faint.small.mono", payload.file)),
+  ];
+}
+
+// ---- credentials, paths, catalogs ----------------------------------------------
 
 function credentialsCard(payload, reload) {
   const creds = payload.credentials || {};

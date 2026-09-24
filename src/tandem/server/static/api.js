@@ -28,6 +28,7 @@ export const api = {
   get: (path) => request("GET", path),
   post: (path, body) => request("POST", path, body),
   put: (path, body) => request("PUT", path, body),
+  patch: (path, body) => request("PATCH", path, body),
   del: (path) => request("DELETE", path),
 
   // ---- profiles
@@ -38,6 +39,12 @@ export const api = {
   deleteProfile: (name, purge) =>
     request("DELETE", `/profiles/${encodeURIComponent(name)}${purge ? "?purge=true" : ""}`),
   setActive: (name) => request("POST", "/profiles/active", { name }),
+  addPaperProfiles: () => request("POST", "/profiles/builtin"),
+
+  // ---- the rig: this machine's robot and cameras, which every profile shares
+  rig: () => request("GET", "/rig"),
+  // Only what changed, as dotted keys (`tandem rig set` several at once); null removes one.
+  saveRig: (changes) => request("PATCH", "/rig", changes),
 
   // ---- trajectories
   trajectories: (profile, status) => {

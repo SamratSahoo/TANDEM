@@ -21,11 +21,14 @@ from tandem import __version__
 from tandem.core.errors import ProfileError, ProfileInvalid, SessionConflict, TandemError
 from tandem.server.routes import planners as planners_routes
 from tandem.server.routes import profiles as profiles_routes
+from tandem.server.routes import rig as rig_routes
 from tandem.server.routes import sessions as sessions_routes
 from tandem.server.routes import settings as settings_routes
 from tandem.server.routes import trajectories as trajectories_routes
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+#: The web app's own files: revalidated on every load (see ``spa``).
+NO_CACHE = {"Cache-Control": "no-cache"}
 
 log = logging.getLogger("tandem.server")
 
@@ -102,6 +105,7 @@ def create_app() -> FastAPI:
         return JSONResponse(status_code=400, content={"error": exc.message, "hint": exc.hint})
 
     app.include_router(profiles_routes.router, prefix="/api")
+    app.include_router(rig_routes.router, prefix="/api")
     app.include_router(trajectories_routes.router, prefix="/api")
     app.include_router(sessions_routes.router, prefix="/api")
     app.include_router(settings_routes.router, prefix="/api")
@@ -123,9 +127,14 @@ def create_app() -> FastAPI:
                 return JSONResponse(status_code=404, content={"error": f"No such endpoint: /{full_path}"})
             # Serve real files directly; everything else falls through to index.html so the
             # client-side router owns the URL space.
+            #
+            # Never from a cache without asking: the pages are ES modules importing each other, and with
+            # no Cache-Control a browser keeps each one fresh for a while by guesswork -- so after an
+            # upgrade it ran a new page against an old module that lacked what the page imported, and
+            # showed a blank page. Asking costs a 304 per file (the ETag), on a local server.
             candidate = (STATIC_DIR / full_path).resolve()
             if full_path and STATIC_DIR in candidate.parents and candidate.is_file():
-                return FileResponse(candidate)
-            return FileResponse(STATIC_DIR / "index.html")
+                return FileResponse(candidate, headers=NO_CACHE)
+            return FileResponse(STATIC_DIR / "index.html", headers=NO_CACHE)
 
     return app

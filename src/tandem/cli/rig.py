@@ -256,11 +256,11 @@ def path_(
         typer.echo(str(paths.rig_file()))
 
 
-def warn_planner_rig_checks() -> None:
-    """What stops collection on this rig, said the moment it is changed: a camera perception reads that is
-    not configured, and the FAILs the active profile's planner has about the rig (an arm TiPToP does not
-    drive, a camera it opens that is not there, missing extrinsics). Asked as `tandem doctor` asks, touching
-    no hardware; the softer findings are doctor's to list."""
+def rig_failures() -> list:
+    """What stops collection on this rig: a camera perception reads that is not configured, and the FAILs the
+    active profile's planner has about the rig (an arm TiPToP does not drive, a camera it opens that is not
+    there, missing extrinsics). Asked as `tandem doctor` asks, touching no hardware; the softer findings are
+    doctor's to list."""
     from tandem.cli import doctor
     from tandem.core import probe
     from tandem.planners import registry
@@ -271,9 +271,13 @@ def warn_planner_rig_checks() -> None:
         checks += registry.doctor_checks(
             profile.planner.backend, profile, settings=settings_mod.load(), probe_hardware=False
         )
-    for check in checks:
-        if check.group == "rig" and check.state == probe.FAIL:
-            theme.warn(f"{check.name}: {check.detail}", check.hint or None)
+    return [check for check in checks if check.group == "rig" and check.state == probe.FAIL]
+
+
+def warn_planner_rig_checks() -> None:
+    """``rig_failures``, said the moment the rig is changed."""
+    for check in rig_failures():
+        theme.warn(f"{check.name}: {check.detail}", check.hint or None)
 
 
 def _profile_to_ask():

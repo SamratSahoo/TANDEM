@@ -585,6 +585,12 @@ def coerce(key: str, raw: str) -> Any:
         raise TandemError(f"{raw!r} is not a value for {dotted}: {exc}") from None
 
 
+def check_key(key: str) -> None:
+    """Refuse ``key`` unless it is a rig setting, with the nearest real one: `tandem rig set`'s check, for a
+    caller whose values are already typed (the web's rig card sends JSON)."""
+    _check_key(_parts(key))
+
+
 def _check_key(parts: list[str]) -> None:
     top = parts[0]
     if top == "version":
