@@ -19,9 +19,9 @@ from tandem.planners.tiptop import probe as tiptop_probe
 from tandem.planners.tiptop import render
 from tandem.planners.tiptop.options import TiptopOptions, options_of
 
-# A check_assets finding that has a row of its own (camera calibration), and so is not repeated among
-# the TAMP ones.
-_EXTRINSICS = "no camera extrinsics"
+# check_assets findings that have rows of their own (camera calibration, tiptop cameras), and so are not
+# repeated among the TAMP ones.
+_OWN_ROWS = (render.MISSING_EXTRINSICS, render.MISSING_CAMERA)
 
 
 def doctor_checks(
@@ -45,12 +45,13 @@ def doctor_checks(
         checks.append(probe.Check("tiptop options", probe.FAIL, str(exc).splitlines()[0], group="profile"))
         return checks
 
+    checks.append(_cameras(profile, runtime_ready))
     checks.append(_calibration(profile))
     runtime_dir = settings.resolved_runtime_dir() if settings is not None else None
     warnings = [
         w
         for w in render.check_assets(profile, options, runtime_dir=runtime_dir)
-        if not w.startswith(_EXTRINSICS)
+        if not w.startswith(_OWN_ROWS)
     ]
     # A setting of the perception block that does nothing is not a TAMP finding; it gets its own row.
     for warning in (w for w in warnings if w.startswith("perception.")):
@@ -87,6 +88,26 @@ def _gemini_for_perception(runtime_ready: bool) -> probe.Check:
         # A machine that cannot collect with TiPToP anyway: worth a note, not a failure it cannot act on.
         return probe.Check(name, probe.WARN, "not set (only needed to collect)", hint, group="credentials")
     return probe.Check(name, probe.FAIL, "not set", hint, group="credentials")
+
+
+def _cameras(profile: Any, runtime_ready: bool) -> probe.Check:
+    """The two cameras the pinned tiptop opens at every warm-up, whichever one perception reads.
+
+    Graded like the Gemini key: a FAIL where TiPToP could collect, a WARN on a machine that cannot
+    anyway -- a laptop keeping a profile's trajectories often has no cameras in it at all.
+    """
+    name = "tiptop cameras"
+    missing = [slot for slot in ("hand", "external") if slot not in profile.cameras.configured()]
+    if not missing:
+        return probe.Check(name, probe.OK, "hand and external configured", group="profile")
+    detail = "no " + " or ".join(f"cameras.{slot}" for slot in missing)
+    hint = (
+        "The pinned tiptop opens cameras.hand and cameras.external at every warm-up, whichever one "
+        "perception reads, so a session fails to start without both. Add them with `tandem profile edit`."
+    )
+    if not runtime_ready:
+        return probe.Check(name, probe.WARN, detail + " (only needed to collect)", hint, group="profile")
+    return probe.Check(name, probe.FAIL, detail, hint, group="profile")
 
 
 def _calibration(profile: Any) -> probe.Check:
@@ -134,7 +155,11 @@ def describe(profile: Any, *, settings: Any) -> OptionsView:
                 (
                     ("detector", perception.gemini.model),
                     ("grasps", perception.m2t2.url),
-                    ("segmentation", f"SAM-2, {perception.sam_mode}"),
+                    (
+                        "segmentation",
+                        f"SAM-2, {perception.sam_mode}"
+                        + (f" at {perception.sam_url}" if perception.sam_mode == "remote" else ""),
+                    ),
                 ),
                 f"from the {profile.cameras.perception} camera",
             ),

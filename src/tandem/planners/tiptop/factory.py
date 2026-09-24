@@ -36,6 +36,27 @@ from tandem.planners.tiptop.runtime import TiptopRuntime
 #: The serialized plan tiptop writes into a leg it planned, and what its viewer replays.
 PLAN_FILE = "tiptop_plan.json"
 
+#: Everything the pinned tiptop's viewer (scripts/viz_tiptop_run.py) opens to replay a plan, relative to
+#: the leg. The sidecar leaves each one: perception writes the images, the depth and the point cloud
+#: (save_perception_outputs), planning the plan and metadata.json (save_run_metadata), execution the
+#: rest (save_run_outputs). A merged trajectory has its first planned leg's at the top (core/merge.py).
+#: tests/test_review_tiptop.py checks the list against the viewer's source and the recorder's.
+REPLAY_FILES = (
+    "metadata.json",
+    "tiptop.yml",
+    "rgb.png",
+    "bboxes_viz.png",
+    "masks_viz.png",
+    "perception/intrinsics.json",
+    "perception/depth.png",
+    "perception/pointcloud.ply",
+    "perception/grasps.pt",
+    # Read inside a try by the viewer, which then draws everything but the plan -- so for a replay of
+    # the plan, required.
+    "perception/cutamp_env.pkl",
+    PLAN_FILE,
+)
+
 # What an install builds the runtime from: the commits the recipe fetches. Read from the recipe rather
 # than restated, because a catalog that names a commit the install does not deliver is a false
 # statement about every dataset collected with it.
@@ -111,9 +132,27 @@ class TiptopFactory:
                 f"{rollout_dir.name} has no {PLAN_FILE}, so there is no plan to replay.",
                 hint="Only rollouts whose planning succeeded record one.",
             )
+        # Checked here, not left to the viewer: it would start Rerun, then die of the first one missing
+        # with a traceback that says nothing about why the leg lacks it.
+        missing = [name for name in REPLAY_FILES if not (rollout_dir / name).is_file()]
+        if missing:
+            why = (
+                "A leg recorded before tandem wrote tiptop's metadata.json into each one cannot be replayed."
+                if "metadata.json" in missing
+                else "Its recording did not finish: the sidecar's log for that session says why."
+            )
+            raise TandemError(
+                f"{rollout_dir.name} has no {', '.join(missing)}, which tiptop's viewer needs to replay it.",
+                hint=f"{why} `tandem ui` shows any trajectory's cameras and robot state.",
+            )
         runtime = self.runtime(settings)
         runtime.require_ready()
-        subprocess.call(runtime.replay_command(rollout_dir), cwd=str(runtime.tiptop_dir))
+        code = subprocess.call(runtime.replay_command(rollout_dir), cwd=str(runtime.tiptop_dir))
+        if code != 0:
+            raise TandemError(
+                f"tiptop's viewer exited with status {code} replaying {rollout_dir.name}.",
+                hint="Its own output, above, says why.",
+            )
 
     @property
     def importer(self):
@@ -154,10 +193,18 @@ class TiptopFactory:
         profile = ctx.profile
 
         # Problems that would otherwise surface minutes into a warmed session: a checkpoint the VAE
-        # cost loads lazily, a blending key that does nothing. Missing extrinsics are fatal, because
-        # tiptop raises for them at warm-up with the arm already moving to its capture pose.
+        # cost loads lazily, a blending key that does nothing. Two are fatal, because tiptop raises
+        # for them at warm-up, the first with the arm already moving to its capture pose: missing
+        # extrinsics, and a camera tiptop opens that the profile does not configure.
         problems = render.check_assets(profile, options, runtime_dir=runtime.root)
-        fatal = [p for p in problems if p.startswith("no camera extrinsics")]
+        cameras = [p for p in problems if p.startswith(render.MISSING_CAMERA)]
+        if cameras:
+            raise TandemError(
+                "\n".join(cameras),
+                hint="Add the missing camera to the profile (`tandem profile edit`). TiPToP needs both a hand "
+                "and an external camera, even though perception reads only one of them.",
+            )
+        fatal = [p for p in problems if p.startswith(render.MISSING_EXTRINSICS)]
         if fatal:
             raise TandemError(
                 "\n".join(fatal),

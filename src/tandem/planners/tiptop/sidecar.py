@@ -712,6 +712,7 @@ class Sidecar:
         opened only when asked (``open_gripper``), never as part of the reset -- which is where this
         departs from the planner's own pre-rollout reset, which does both.
         """
+        import time
         from pathlib import Path
 
         import rerun as rr
@@ -762,6 +763,8 @@ class Sidecar:
             detected.extend(detected_atoms or [])
             return [], None
 
+        # Timed the way tiptop-run times it, from after the capture, for the leg's metadata.json.
+        started = time.perf_counter()
         _, _, processed_scene, _ = self.loop.run_until_complete(
             run_perception(
                 self.http,
@@ -773,6 +776,7 @@ class Sidecar:
                 goal_builder=goal_builder,
             )
         )
+        perception_seconds = time.perf_counter() - started
 
         scene_id = uuid.uuid4().hex[:12]
         self._remember(
@@ -784,6 +788,8 @@ class Sidecar:
                 "detected_atoms": list(detected),
                 "save_dir": directory,
                 "arm_placed": arm_placed,
+                "task_hint": task_hint,
+                "perception_seconds": perception_seconds,
             },
         )
         return {
@@ -925,6 +931,14 @@ class Sidecar:
             cost_overrides=self.cost_overrides,
             q_return=q_return,
         )
+        self._save_metadata(
+            directory,
+            entry,
+            goal,
+            planned=cutamp_plan is not None,
+            failure_reason=failure_reason,
+            planning_seconds=planning_seconds,
+        )
         if cutamp_plan is None:
             return {
                 "ok": False,
@@ -976,6 +990,54 @@ class Sidecar:
             "artifacts": {"plan": str(plan_path)},
             "task_plan": task_plan,
         }
+
+    def _save_metadata(
+        self, directory, entry: dict, goal: list, *, planned: bool, failure_reason, planning_seconds
+    ) -> None:
+        """The leg's ``metadata.json``, as tiptop-run leaves one in every rollout directory it plans.
+
+        tiptop's own viewer (``tandem traj open``) reads nothing of a rollout before this file: without
+        it, every leg tandem recorded is one it refuses to open. Written once planning has an answer,
+        found or not, the way tiptop-run writes it whatever became of the plan; the goal is the one
+        this leg planned for, which is what tiptop records as the grounded atoms. Best effort, like
+        curobo_config.json beside it: a leg is not failed over a record of it.
+        """
+        from datetime import datetime
+        from pathlib import Path
+
+        import tiptop
+        from tiptop.recording import save_run_metadata
+
+        observation = entry["observation"]
+        # save_run_metadata records the git state of whatever repository tiptop's package sits in, and
+        # writes its whole diff into the leg when it is dirty. tandem's tiptop is an export with no
+        # .git, so git would search on upward and find some other repository -- a dotfiles repo in the
+        # home directory, the checkout a runtime was put under -- and file its diff with every leg.
+        # The ceiling stops the search at the runtime; which commits the runtime holds is its record's
+        # business (.tandem-runtime.json).
+        runtime_root = Path(tiptop.__file__).resolve().parents[2]
+        ceiling = os.environ.get("GIT_CEILING_DIRECTORIES")
+        os.environ["GIT_CEILING_DIRECTORIES"] = os.pathsep.join(filter(None, (str(runtime_root), ceiling)))
+        try:
+            save_run_metadata(
+                save_dir=directory,
+                timestamp=datetime.now().isoformat(timespec="seconds"),
+                task_instruction=entry.get("task_hint"),
+                q_at_capture=observation.q_init,
+                world_from_cam=observation.world_from_cam,
+                perception_duration=entry.get("perception_seconds"),
+                grounded_atoms=list(goal),
+                planning_success=planned,
+                planning_failure_reason=failure_reason,
+                planning_duration=planning_seconds,
+            )
+        except Exception as exc:
+            _log(f"could not write {directory / 'metadata.json'}: {exc}")
+        finally:
+            if ceiling is None:
+                os.environ.pop("GIT_CEILING_DIRECTORIES", None)
+            else:
+                os.environ["GIT_CEILING_DIRECTORIES"] = ceiling
 
     def execute(self, *, plan_handle: str, leg: dict, save_dir: str) -> dict:
         """Run the plan on the robot and record it as one leg of a trajectory."""

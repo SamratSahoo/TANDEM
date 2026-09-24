@@ -193,6 +193,7 @@ def test_the_preset_keeps_the_rig_and_replaces_the_experiment():
     base = _template("rig")
     base.planner.options["robot"]["host"] = "10.0.0.9"
     base.planner.options["perception"]["sam_mode"] = "remote"
+    base.planner.options["perception"]["sam_url"] = "http://10.0.0.9:8000"
     base.planner.options["tamp"]["grasp_center_weight"] = 5.0
     base.hitl.on_robot_phase_failure = "teleop"
     base.hitl.cache_path = "proposals.sqlite"
@@ -201,6 +202,7 @@ def test_the_preset_keeps_the_rig_and_replaces_the_experiment():
 
     laid = presets.apply(base, "paper")
     assert options_of(laid).robot.host == "10.0.0.9" and options_of(laid).perception.sam_mode == "remote"
+    assert options_of(laid).perception.sam_url == "http://10.0.0.9:8000"
     assert laid.cameras == base.cameras and laid.task.prompt == "stack the cups"
     # The experiment is the paper's, whatever the clone had.
     assert "grasp_center_weight" not in options_of(laid).tamp

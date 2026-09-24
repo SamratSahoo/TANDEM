@@ -10,10 +10,11 @@ installs from a directory instead -- ``tandem planners install NAME --sources DI
         cuTAMP/
         curobo/
 
-Each export carries a ``.tandem-source.json`` marker naming its commit, and an install checks the
-marker against its own pins, so a bundle made for one version of tandem is refused by another
-instead of quietly building the wrong planner. Patches are NOT applied here: the install applies
-them, the same way whether the tree came from the network or from a bundle.
+Each export carries a ``.tandem-source.json`` marker naming its commit and a digest of its files, and
+an install checks both: the commit against its own pins, so a bundle made for one version of tandem is
+refused by another instead of quietly building the wrong planner, and the files against the digest,
+so a bundle edited or damaged since is not recorded as that commit. Patches are NOT applied here: the
+install applies them, the same way whether the tree came from the network or from a bundle.
 
 The pins, the trims and the fetching are the recipe's own (tandem/planners/runtime.py and the
 planner's recipe), so a bundle is byte-for-byte what an online install would fetch.
@@ -44,6 +45,7 @@ from tandem.planners.runtime import (  # noqa: E402
     RecipeRuntime,
     export_from_tree,
     export_pinned,
+    tree_digest,
     trim,
 )
 
@@ -95,6 +97,9 @@ def bundle(planner: str, out: Path, *, only: list[str], local: dict[str, Path], 
                 "planner": planner,
                 "trimmed": dropped,
                 "fetched_from": origin.get("origin"),
+                # Of the files as they leave here, trimmed. The install recomputes it, so the commit
+                # above is recorded as verified only for the files that were really exported from it.
+                "sha256": tree_digest(staged),
             }
             (staged / SOURCE_MARKER).write_text(json.dumps(marker, indent=2) + "\n")
             shutil.rmtree(dest, ignore_errors=True)

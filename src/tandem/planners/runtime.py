@@ -23,8 +23,9 @@ fetched, and ``git archive`` stamps the commit into the tarball it makes -- GitH
 ``tandem planners install NAME --sources DIR``, names a directory holding one checkout or export per source,
 named as the recipe names them. A checkout is used as an object store: the pinned commit is exported
 out of it, whatever its working tree holds. An export made by ``tools/bundle.py`` carries a marker
-naming its commit, which has to be the pinned one. A bare directory with neither is taken on trust
-and recorded as unverified. Nothing is ever fetched while a sources directory is in force: a source
+naming its commit, which has to be the pinned one, and a digest of its files, which have to be the
+ones that were bundled (``tree_digest``). A bare directory with neither is taken on trust and
+recorded as unverified. Nothing is ever fetched while a sources directory is in force: a source
 missing from it is an error, because an air-gapped rig reaching for the network is a hang, not a
 fallback.
 
@@ -41,13 +42,22 @@ Layout, for a recipe with sources ``a`` and ``b`` and a pixi environment whose m
         a/  b/                    each source tree at its pinned commit, trimmed and patched
         a/.pixi -> ../env         where pixi looks for the environment
         env/                      the environment itself, OUTSIDE every source tree
+        cache/a/...               what a tree writes into itself at run time, kept outside it too
         .tandem-runtime.json      what is installed, and from where
+        .install.lock             held by the one install that may be running
 
 The environment lives outside the trees on purpose. A tree is replaced wholesale when its pin moves,
 and an environment inside it would be deleted with it and solved again from nothing -- a full torch
 and CUDA download -- on every bump. pixi keeps a manifest's environment in ``<manifest dir>/.pixi``,
 so that one path is a symlink: the tree is swapped underneath it and the environment is found again,
-at the same absolute path it was built at.
+at the same absolute path it was built at. A directory a planner downloads into its own tree at run
+time (``Source.persistent``: TiPToP's SAM-2 checkpoint) is kept out of the swap the same way, under
+``cache/``.
+
+**Only what tandem installed is ever replaced.** The root is a setting, and pointed at a workspace by
+mistake -- the monorepo this layout mirrors, say -- a tree swap would delete someone's checkout, its
+uncommitted work included. So a tree the record does not list is replaced only in a root that holds
+tandem's record, and a git checkout never is: nothing tandem installs contains ``.git``.
 
 Standard library and tandem's own light modules only: a planner's recipe is imported to list
 planners, on a laptop that will never build one.
@@ -62,7 +72,9 @@ import re
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Callable, Mapping, Sequence
+import threading
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -81,6 +93,10 @@ SOURCE_MARKER = ".tandem-source.json"
 #: Scratch space inside the runtime, so a half-fetched tree never sits where a finished one belongs
 #: and a rename into place stays on one filesystem.
 STAGING = ".staging"
+#: Held for as long as an install runs (``RecipeRuntime._install_lock``).
+LOCK_FILE = ".install.lock"
+#: Where each source's ``persistent`` directories live, outside every tree.
+PERSISTENT = "cache"
 FORMAT = 2
 
 Log = Callable[[str], None]
@@ -92,6 +108,10 @@ _PLACEHOLDER = re.compile(r"\{(root|source|version|commit)(?::([A-Za-z0-9_.-]+))
 # artifacts of a previous build (a compiled extension from someone else's machine is worse than none).
 _JUNK_NAMES = {".git", ".pixi", "__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache", SOURCE_MARKER}
 _JUNK_SUFFIXES = (".egg-info", ".pyc", ".so")
+
+
+def _is_junk(name: str) -> bool:
+    return name in _JUNK_NAMES or name.endswith(_JUNK_SUFFIXES)
 
 
 def _quiet(_line: str) -> None:
@@ -114,6 +134,11 @@ class Source:
     # A path inside the tree that exists only when the tree is really there (its manifest, a
     # package's __init__.py). Status trusts it over a directory that may be half-extracted.
     marker: str = ""
+    # Directories inside the tree that the planner writes into at run time and that must outlive the
+    # tree: a checkpoint it downloads into its own package, say. A replaced tree takes everything
+    # inside it along, so each of these is kept under <runtime>/cache/<source>/ instead and the tree
+    # holds a symlink to it, the way it holds one to the environment.
+    persistent: tuple[str, ...] = ()
 
     @property
     def name(self) -> str:
@@ -237,7 +262,7 @@ def _validate(recipe: RuntimeRecipe) -> None:
         raise bad("it names no planner")
     if not recipe.sources:
         raise bad("it has no sources")
-    reserved = {MANIFEST_FILE, STAGING}
+    reserved = {MANIFEST_FILE, STAGING, LOCK_FILE, PERSISTENT}
     names: set[str] = set()
     for source in recipe.sources:
         name = source.name
@@ -254,7 +279,7 @@ def _validate(recipe: RuntimeRecipe) -> None:
             raise bad(f"{name} is pinned to {source.pin.commit!r}, which is not a full 40-character commit")
         if not source.pin.url:
             raise bad(f"{name} has no URL to fetch it from")
-        for relative in (*source.trim, *([source.marker] if source.marker else [])):
+        for relative in (*source.trim, *source.persistent, *([source.marker] if source.marker else [])):
             if not _is_inside(relative):
                 raise bad(f"{name}: {relative!r} is not a path inside the tree")
 
@@ -471,14 +496,28 @@ class RecipeRuntime:
                 assets_present = False
                 problems.append(f"{asset.dest} is missing")
 
-        built = record.get("built") or None
-        if (recipe.environment is not None or recipe.steps) and not problems:
+        built = record.get("built") or {}
+        failed = record.get("last_build") or {}
+        builds = recipe.environment is not None or bool(recipe.steps)
+        if builds and failed.get("ok") is False:
+            # Said whatever else is wrong. A failed step can leave behind exactly what its `produces`
+            # globs look for (one compiled extension of five), and without this the only problem
+            # left to report would be the branch below's "not built since its sources changed" --
+            # which blames sources nobody changed for a build that failed.
+            at = f" ({failed['at']})" if failed.get("at") else ""
+            problems.append(
+                f"{failed.get('command') or 'the build'} did not finish{at}, and no build has since; "
+                f"the build log in {paths.log_dir()} says why"
+            )
+        elif builds and not problems:
             # Everything is on disk -- but was it built for THESE sources? The environment outlives
             # a bump by design, so after one it is there, whole, and solved for the old commits.
             have = {s.name: s.commit for s in states}
-            built_for = (built or {}).get("sources") or {}
+            built_for = built.get("sources") or {}
             changed = sorted(n for n, c in have.items() if built_for.get(n) != c)
-            if not built or changed:
+            if not built_for:
+                problems.append("the runtime has not been built since its sources were installed")
+            elif changed or not built.get("at"):
                 problems.append(
                     "the runtime has not been built since "
                     + (", ".join(changed) if changed else "its sources")
@@ -492,7 +531,7 @@ class RecipeRuntime:
             environment_built=env_built,
             steps=tuple(steps),
             assets_present=assets_present,
-            built_at=(built or {}).get("at"),
+            built_at=built.get("at"),
             problems=tuple(problems),
             notes=tuple(notes),
         )
@@ -551,10 +590,14 @@ class RecipeRuntime:
         )
 
     def record(self) -> dict:
-        """The installed record (``.tandem-runtime.json``), normalised: ``{planner, sources, assets, built}``.
+        """The installed record (``.tandem-runtime.json``), normalised:
+        ``{planner, sources, assets, built, last_build}``.
 
         ``sources`` maps each installed tree to ``{url, commit, origin, verified, trimmed, patches}``.
-        Empty, never an error, for a runtime that has none yet.
+        ``built`` is ``{at, sources}``: when the build last finished (None since a tree changed) and
+        the commits it was for. ``last_build`` is ``{step, command, ok: False, at}`` while a build
+        that failed has not been followed by one that finished. Empty, never an error, for a runtime
+        that has none yet.
         """
         return _read_manifest(self.manifest_file)
 
@@ -610,19 +653,26 @@ class RecipeRuntime:
                 hint="Run `tandem init`, which installs it, or install it from https://pixi.sh.",
             )
 
-        announce("sources", stages["sources"])
-        self.fetch(sources_dir=sources_dir, force=force, log=say)
-        self.place_assets(log=say)
+        # Before the lock, whose file would be the first thing written into a directory that is not
+        # tandem's. fetch checks again once it holds it, and checks the sources directory too.
+        self._refuse_foreign_trees(None, force=force)
+        with self._install_lock():
+            announce("sources", stages["sources"])
+            self.fetch(sources_dir=sources_dir, force=force, log=say)
+            self.place_assets(log=say)
 
-        if self.recipe.environment is not None:
-            announce("environment", stages["environment"])
-            self.build_environment(log=say)
-        if env_only:
-            return
-        for step in self.recipe.steps:
-            announce(step.name, stages[step.name])
-            self.run_step(step, log=say)
-        self.record_built()
+            env = self.recipe.environment
+            if env is not None:
+                announce("environment", stages["environment"])
+                with self._build_stage("environment", f"{env.tool} install"):
+                    self.build_environment(log=say)
+            if env_only:
+                return
+            for step in self.recipe.steps:
+                announce(step.name, stages[step.name])
+                with self._build_stage(step.name, f"pixi run {step.task}"):
+                    self.run_step(step, log=say)
+            self.record_built()
 
         st = self.inspect()
         if not st.ready:
@@ -630,6 +680,57 @@ class RecipeRuntime:
                 "The build finished but the runtime still looks incomplete: " + "; ".join(st.problems),
                 hint="Run the install again; every finished step is skipped.",
             )
+
+    @contextmanager
+    def _build_stage(self, key: str, command: str) -> Iterator[None]:
+        """Write down a build stage that did not finish, whatever stopped it, so status can say so.
+
+        Interrupted counts: a build stopped with Ctrl-C is as unfinished as one that failed.
+        ``record_built`` clears it once a whole build has run.
+        """
+        try:
+            yield
+        except BaseException:
+            record = _read_manifest(self.manifest_file)
+            record["last_build"] = {"step": key, "command": command, "ok": False, "at": _now()}
+            _write_manifest(self.manifest_file, record)
+            raise
+
+    @contextmanager
+    def _install_lock(self) -> Iterator[None]:
+        """Hold this runtime's install lock for the duration: one install at a time, per runtime.
+
+        Every install stages its trees in the same ``.staging`` and builds in the same environment.
+        Two at once delete each other's staged trees -- the old tree kept to roll back to included --
+        and run one CUDA build twice, concurrently, into one environment; the loser dies of a
+        FileNotFoundError that names neither. The second install is refused rather than queued: it
+        is usually the same command typed again in another terminal by someone who thought the first
+        had hung, and a silent wait would look like exactly that.
+
+        Re-entrant within a thread, since ``install`` holds it and calls ``fetch``, which takes it
+        for a caller that fetches on its own. Another thread of this process is refused just as
+        another process is: it would share the staging area just the same.
+        """
+        self.root.mkdir(parents=True, exist_ok=True)
+        key = str(self.root.resolve())
+        me = threading.get_ident()
+        with _LOCKS_GUARD:
+            held = _LOCKS.get(key)
+            if held is None:
+                held = _Held(_acquire(self.root / LOCK_FILE, self.recipe.display_name), me)
+                _LOCKS[key] = held
+            elif held.owner != me:
+                raise _busy(self.recipe.display_name, str(os.getpid()))
+            held.depth += 1
+        try:
+            yield
+        finally:
+            with _LOCKS_GUARD:
+                held.depth -= 1
+                if held.depth == 0:
+                    del _LOCKS[key]
+                    if held.fd is not None:
+                        os.close(held.fd)  # closing the descriptor releases the flock
 
     def fetch(
         self, *, sources_dir: Path | None = None, force: bool = False, log: Log | None = None
@@ -639,47 +740,104 @@ class RecipeRuntime:
         A tree already recorded at its pin, with the recipe's patches, is left alone unless ``force``.
         Each tree is staged beside the runtime and renamed into place only once it is exported,
         trimmed and patched, so an interrupted fetch never leaves half a tree where a whole one was.
+        A tree the record does not list is replaced only if tandem could have put it there
+        (``_refuse_foreign_tree``); ``force`` does not change that.
         """
         say = log or _quiet
         self._check_shipped_files()
+        override = self._sources_override(sources_dir)
+        if override is not None:
+            say(f"sources: installing from {override}, not fetching")
+        # Before the lock, whose file would be the first thing written into a directory that is not
+        # tandem's; checked again once it is held.
+        self._refuse_foreign_trees(override, force=force)
+        with self._install_lock():
+            return self._fetch(override, force=force, say=say)
+
+    def _sources_override(self, sources_dir: Path | None) -> Path | None:
+        """The directory to install from instead of the network, checked: ``sources_dir``, else the
+        environment's, else None."""
         override = (
             Path(sources_dir).expanduser() if sources_dir is not None else paths.planner_sources_override()
         )
-        if override is not None:
-            if not override.is_dir():
-                raise TandemError(
-                    f"The planner sources directory {override} does not exist.",
-                    hint="Point --sources or $TANDEM_PLANNER_SOURCES at a directory holding one checkout "
-                    "or export per source, or unset it to fetch them.",
-                )
-            say(f"sources: installing from {override}, not fetching")
+        if override is None:
+            return None
+        if not override.is_dir():
+            raise TandemError(
+                f"The planner sources directory {override} does not exist.",
+                hint="Point --sources or $TANDEM_PLANNER_SOURCES at a directory holding one checkout "
+                "or export per source, or unset it to fetch them.",
+            )
+        if self.root.exists() and override.resolve() == self.root.resolve():
+            # Every tree would be exported from itself, straight into its own replacement.
+            raise TandemError(
+                f"The planner sources directory {override} is the runtime itself.",
+                hint="Point --sources or $TANDEM_PLANNER_SOURCES at the directory holding your checkouts "
+                "or bundle, and the runtime somewhere else (`tandem runtime path` shows where it is).",
+            )
+        return override
 
-        self.root.mkdir(parents=True, exist_ok=True)
+    def _pending(self, record: dict, *, force: bool) -> list[tuple[Source, dict, Path, bool]]:
+        """Every source as (source, its record entry, its tree, whether it has to be installed)."""
+        out = []
+        for source in self.recipe.sources:
+            entry = record["sources"].get(source.name) or {}
+            tree = self.root / source.name
+            present = (tree / source.marker).exists() if source.marker else _non_empty(tree)
+            current = (
+                present
+                and entry.get("commit") == source.pin.commit
+                and _patches_match(entry.get("patches"), source.patches)
+            )
+            out.append((source, entry, tree, force or not current))
+        return out
+
+    def _refuse_foreign_trees(self, override: Path | None, *, force: bool) -> None:
+        """``_refuse_foreign_tree`` for every tree a fetch would replace -- all of them before any is
+        touched, so a workspace holding one checkout among three trees is refused whole rather than
+        left with two of tandem's trees beside one of its own."""
+        if not self.root.is_dir():
+            return
+        had_record = self.manifest_file.is_file()
+        for source, entry, tree, due in self._pending(_read_manifest(self.manifest_file), force=force):
+            if due:
+                self._refuse_foreign_tree(source, entry, tree, override, had_record=had_record)
+
+    def _fetch(self, override: Path | None, *, force: bool, say: Log) -> list[str]:
         staging = self.root / STAGING
+        self._refuse_foreign_trees(override, force=force)
         record = _read_manifest(self.manifest_file)
-        # Before any tree is replaced: a runtime built when the environment lived INSIDE the tree
-        # has it moved out, or the swap would delete it.
+        todo = []
+        for source, entry, _tree, due in self._pending(record, force=force):
+            if due:
+                todo.append((source, entry))
+            else:
+                say(f"{source.name}: already at {source.pin.short()}")
+
+        # Before any tree is replaced: a runtime built when the environment lived INSIDE the tree has
+        # it moved out, and so does one whose trees still keep what they must not lose -- or the swap
+        # would delete them.
         self._adopt_environment(say)
+        self._link_persistent(say)
 
         changed: list[str] = []
         try:
-            for source in self.recipe.sources:
-                entry = record["sources"].get(source.name) or {}
-                tree = self.root / source.name
-                present = (tree / source.marker).exists() if source.marker else _non_empty(tree)
-                if (
-                    not force
-                    and present
-                    and entry.get("commit") == source.pin.commit
-                    and _patches_match(entry.get("patches"), source.patches)
-                ):
-                    say(f"{source.name}: already at {source.pin.short()}")
-                    continue
+            for source, entry in todo:
+                if not self.manifest_file.is_file():
+                    # Written before the first tree lands, so that a root with no record is one
+                    # tandem never installed anything into -- which _refuse_foreign_tree relies on.
+                    record["planner"] = self.recipe.planner
+                    _write_manifest(self.manifest_file, record)
                 if entry.get("commit") and entry.get("commit") != source.pin.commit:
                     say(f"{source.name}: replacing {str(entry['commit'])[:7]} with {source.pin.short()}")
                 record["sources"][source.name] = self._install_source(source, override, staging, say)
-                # The environment and anything built in it were built for the old tree.
-                record["built"] = None
+                self._link_persistent(say)
+                # The environment and anything built in it were built for the old tree. What it was
+                # built for is kept, so status can name the tree that moved; a build that failed
+                # before this is about trees that are gone.
+                built_for = (record.get("built") or {}).get("sources") or {}
+                record["built"] = {"at": None, "sources": built_for}
+                record["last_build"] = None
                 record["planner"] = self.recipe.planner
                 # Written after every tree, so an install interrupted halfway resumes with what it has.
                 _write_manifest(self.manifest_file, record)
@@ -688,7 +846,42 @@ class RecipeRuntime:
             shutil.rmtree(staging, ignore_errors=True)
 
         self._link_environment()
+        self._link_persistent(say)
         return changed
+
+    def _refuse_foreign_tree(
+        self, source: Source, entry: dict, tree: Path, override: Path | None, *, had_record: bool
+    ) -> None:
+        """Refuse to replace a tree at ``tree`` that tandem did not install.
+
+        A tree the record lists is tandem's. One it does not list is ordinarily an install that was
+        interrupted before its record was written -- and replacing it is how that install resumes --
+        but the root is a setting, and this layout is the monorepo's: pointed at a workspace, the
+        swap would delete a person's checkout, uncommitted work and all. Two things tell them apart:
+        tandem writes its record into a root before the first tree lands there, and nothing it
+        installs has a ``.git`` (``git archive`` has none, and a copy leaves it out).
+        """
+        if override is not None and (override / source.name).resolve() == tree.resolve():
+            raise TandemError(
+                f"{tree} is both the tree being installed and the one it would be installed from.",
+                hint="Point --sources or $TANDEM_PLANNER_SOURCES at the directory holding your checkouts or "
+                "bundle, not at the runtime.",
+            )
+        if entry.get("commit") or not (tree.is_symlink() or _non_empty(tree)):
+            return
+        if _is_repository(tree):
+            why = "it is a git checkout, and nothing tandem installs has a .git"
+        elif not had_record:
+            why = f"{self.root} has no {MANIFEST_FILE}, so tandem never installed anything there"
+        else:
+            return
+        raise TandemError(
+            f"{tree} is not a tree tandem installed ({why}), so it was not replaced.",
+            hint=f"The runtime is configured to be {self.root} (`tandem runtime path`). Point it at an empty "
+            "directory, or at one tandem made. To build from checkouts you already have, name the directory "
+            "holding them with --sources (or $TANDEM_PLANNER_SOURCES): they are only read, never changed. "
+            f"If {tree} really is disposable, move or delete it by hand.",
+        )
 
     def _install_source(self, source: Source, override: Path | None, staging: Path, say: Log) -> dict:
         staging.mkdir(parents=True, exist_ok=True)
@@ -776,6 +969,7 @@ class RecipeRuntime:
                 if name in self.recipe_names
             },
         }
+        record["last_build"] = None
         _write_manifest(self.manifest_file, record)
 
     # ---- entering it -------------------------------------------------------
@@ -832,15 +1026,22 @@ class RecipeRuntime:
     # ---- uninstall ---------------------------------------------------------
 
     def looks_like_a_runtime(self) -> bool:
-        """Whether ``root`` holds this recipe's runtime -- or nothing at all -- and so may be deleted."""
-        if not self.root.is_dir():
+        """Whether ``root`` holds a runtime tandem made -- or nothing at all -- and so may be deleted.
+
+        Only tandem's own record says so. A directory holding something named like one of the
+        recipe's sources does not: this layout is the monorepo's, and a workspace holding a
+        ``tiptop/`` checkout is exactly the directory a mistyped setting points at. A git checkout
+        anywhere a tree would be never is one, record or not -- nothing tandem installs has a .git.
+        """
+        root = self.root
+        if not root.is_dir():
             return False
-        if not any(self.root.iterdir()):
+        if _is_repository(root) or any(_is_repository(root / s.name) for s in self.recipe.sources):
+            return False
+        # The lock an install takes before it writes anything is not something of anyone else's.
+        if not any(p.name != LOCK_FILE for p in root.iterdir()):
             return True
-        markers = [MANIFEST_FILE, *(s.name for s in self.recipe.sources)]
-        if self.recipe.environment is not None:
-            markers.append(self.recipe.environment.home)
-        return any((self.root / marker).exists() for marker in markers)
+        return self.manifest_file.is_file()
 
     def uninstall(self) -> None:
         root = self.root
@@ -854,7 +1055,9 @@ class RecipeRuntime:
                 hint="Check where the runtime is configured (`tandem runtime path`), and delete it by hand "
                 "if it really is one.",
             )
-        shutil.rmtree(root)
+        # Not from under an install that is still running.
+        with self._install_lock():
+            shutil.rmtree(root)
 
     # ---- internals ---------------------------------------------------------
 
@@ -947,6 +1150,42 @@ class RecipeRuntime:
             return
         os.symlink(target, link, target_is_directory=True)
 
+    def _link_persistent(self, say: Log) -> None:
+        """Point each tree's ``persistent`` directories at their home under ``<runtime>/cache``.
+
+        A tree that holds one as a real directory -- a runtime from before it had a home, or a tree
+        that shipped the directory itself -- has what is in it moved out first, a rename, before the
+        link takes its place. The home is created before the link: a planner that ``mkdir``s the
+        directory with ``exist_ok`` still fails on a link to nothing.
+        """
+        for source in self.recipe.sources:
+            tree = self.root / source.name
+            if not tree.is_dir() or tree.is_symlink():
+                continue
+            for relative in source.persistent:
+                link = tree / relative
+                home = self.root / PERSISTENT / source.name / relative
+                home.mkdir(parents=True, exist_ok=True)
+                target = os.path.relpath(home, link.parent)
+                if link.is_symlink():
+                    if os.readlink(link) == target:
+                        continue
+                    link.unlink()
+                elif link.is_dir():
+                    for item in sorted(link.iterdir()):
+                        if not (home / item.name).exists():
+                            os.replace(item, home / item.name)
+                    # Whatever is left the home already had, under the same name.
+                    shutil.rmtree(link)
+                    say(f"{source.name}: moved {relative} out of the tree, to {home}")
+                elif link.exists():
+                    raise TandemError(
+                        f"{link} is a file, but the {self.recipe.display_name} recipe keeps a directory there.",
+                        hint="This is a bug in the planner package's recipe, or the source moved on under it.",
+                    )
+                link.parent.mkdir(parents=True, exist_ok=True)
+                os.symlink(target, link, target_is_directory=True)
+
     def _pixi(
         self, args: list[str], *, log: Log | None, extra_env: Mapping[str, str] | None, what: str
     ) -> None:
@@ -1013,8 +1252,9 @@ def export_from_directory(
     """Put ``pin``'s tree at ``dest`` from ``directory/<name>``: a checkout, or an export.
 
     A checkout is an object store: the PINNED commit is exported out of it, whatever its working tree
-    is at. An export is copied, and its marker (from ``tools/bundle.py``) must name the pinned commit.
-    One with no marker is copied on trust and recorded as unverified.
+    is at. An export is copied, its marker (from ``tools/bundle.py``) must name the pinned commit, and
+    its files must be the ones the marker's digest was taken of. One with no marker -- or with a marker
+    from before markers carried a digest -- is copied on trust and recorded as unverified.
     """
     entry = Path(directory) / pin.name
     if not entry.is_dir():
@@ -1040,9 +1280,12 @@ def export_from_tree(
     marker = entry / SOURCE_MARKER
     if marker.is_file():
         try:
-            claimed = json.loads(marker.read_text()).get("commit")
+            stated = json.loads(marker.read_text())
+            if not isinstance(stated, dict):
+                raise ValueError("it is not a JSON object")
         except (ValueError, OSError) as exc:
             raise TandemError(f"{marker} is unreadable: {exc}", hint="Make the bundle again.") from exc
+        claimed = stated.get("commit")
         if claimed != pin.commit:
             raise TandemError(
                 f"{entry} is {pin.name} at {str(claimed)[:7]}, but the recipe pins {pin.short()}.",
@@ -1051,6 +1294,24 @@ def export_from_tree(
             )
         say(f"{pin.name}: copying the export at {entry}")
         _copy_tree(entry, dest)
+        # The marker is a file anyone can copy onto any tree, and a tree can be edited under it. Its
+        # commit is only as good as the check that the files are still the ones it was written for.
+        recorded = stated.get("sha256")
+        if not recorded:
+            say(
+                f"{pin.name}: warning: the export at {entry} names its commit but records no digest of its "
+                "files (a bundle made by an older tandem), so they are taken as that commit on trust. Make "
+                "the bundle again to have them checked."
+            )
+            return {"origin": f"export {entry}", "verified": False}
+        if tree_digest(dest) != recorded:
+            raise TandemError(
+                f"The export at {entry} is not the {pin.name} {pin.short()} it was bundled as: its files have "
+                "changed since.",
+                hint="The bundle was edited or damaged after it was made. Make it again with "
+                f"`python tools/bundle.py`. To install these files on purpose, delete {marker}: they are "
+                "then taken on trust, and recorded as unverified.",
+            )
         return {"origin": f"export {entry}", "verified": True}
 
     say(
@@ -1135,65 +1396,115 @@ def extract(archive: Path, dest: Path, *, commit: str | None = None, strip: int 
     directory a GitHub archive wraps everything in is removed, and must itself name the commit when
     the header is absent. Written out rather than left to ``extractall(filter="data")``, which is
     missing from the earliest Python 3.10 releases tandem supports.
+
+    "Outside" is decided on the disk, not on the names. A check of each entry's name alone passes a
+    link ``c/d -> ..`` (it lands on the tree's own root), then a link ``e -> c/d/..`` (spelled, it is
+    ``c``; followed, it is the directory ABOVE the tree), then a file ``e/x`` -- written through both,
+    outside. So links are created last, after every file, directory and hard link, which means
+    nothing is ever written through one; each is checked where it really points once they all exist;
+    and a tree that fails any of it is deleted rather than left for a trim or a patch to follow.
     """
     import tarfile
 
     dest.mkdir(parents=True, exist_ok=True)
-    # Compared as spelled, not resolved: resolving one side and not the other turns every link in a
-    # tree under a symlinked directory (macOS's /tmp) into one that looks like it escapes.
-    base = os.path.normpath(os.path.abspath(dest))
     try:
         tar = tarfile.open(archive)
     except (tarfile.TarError, OSError) as exc:
         raise TandemError(f"{archive.name} is not a readable archive: {exc}") from exc
-    with tar:
-        members = tar.getmembers()
-        stamped = tar.pax_headers.get("comment")
-        tops = {PurePosixPath(m.name).parts[0] for m in members if PurePosixPath(m.name).parts}
-        if commit is not None:
-            if stamped is not None and stamped != commit:
-                raise TandemError(f"The archive is commit {stamped[:7]}, not the pinned {commit[:7]}.")
-            if stamped is None and not (strip and len(tops) == 1 and next(iter(tops)).endswith(commit)):
-                raise TandemError(
-                    f"Cannot confirm the archive is commit {commit[:7]}: it names no commit.",
-                    hint="Fetch it with git instead.",
-                )
-        if strip and len(tops) != 1:
-            raise TandemError(f"{archive.name} does not have the single top-level directory it should.")
+    try:
+        _extract(tar, archive, dest, commit=commit, strip=strip)
+    except BaseException:
+        # rmtree never follows a link, so whatever a refused link points at is not touched.
+        shutil.rmtree(dest, ignore_errors=True)
+        raise
+    finally:
+        tar.close()
 
-        hardlinks = []
-        for member in members:
-            parts = PurePosixPath(member.name).parts[strip:]
-            if not parts:
-                continue
-            if PurePosixPath(member.name).is_absolute() or ".." in parts:
-                raise TandemError(f"The archive has an entry outside its own tree: {member.name!r}")
-            target = Path(base).joinpath(*parts)
-            if member.isdir():
-                target.mkdir(parents=True, exist_ok=True)
-            elif member.isfile():
-                target.parent.mkdir(parents=True, exist_ok=True)
-                source = tar.extractfile(member)
-                assert source is not None
-                with source, open(target, "wb") as out:
-                    shutil.copyfileobj(source, out, length=1 << 20)
-                os.chmod(target, (member.mode & 0o777) | 0o600)
-            elif member.issym():
-                resolved = os.path.normpath(os.path.join(os.path.dirname(target), member.linkname))
-                if os.path.isabs(member.linkname) or not (resolved + os.sep).startswith(base + os.sep):
-                    raise TandemError(f"The archive has a link out of its own tree: {member.name!r}")
-                target.parent.mkdir(parents=True, exist_ok=True)
-                os.symlink(member.linkname, target)
-            elif member.islnk():
-                hardlinks.append((member, target))
-            # Devices and FIFOs have no business in a source tree; they are skipped.
-        for member, target in hardlinks:
-            link_parts = PurePosixPath(member.linkname).parts[strip:]
-            origin = Path(base).joinpath(*link_parts)
-            if ".." in link_parts or not origin.is_file():
-                raise TandemError(f"The archive has a hard link to nothing it contains: {member.name!r}")
+
+def _extract(tar: Any, archive: Path, dest: Path, *, commit: str | None, strip: int) -> None:
+    # The name checks compare as spelled; the disk checks compare real paths, on both sides --
+    # resolving only one would turn every link in a tree under a symlinked directory (macOS's /tmp)
+    # into one that looks like it escapes.
+    base = os.path.normpath(os.path.abspath(dest))
+    real_base = os.path.realpath(base)
+
+    def inside(path: str | Path) -> bool:
+        real = os.path.realpath(path)
+        return real == real_base or real.startswith(real_base + os.sep)
+
+    def place(member: Any, target: Path) -> None:
+        """Refuse a target whose directory is not really inside the tree, or that is a link to write through."""
+        if not inside(target.parent) or (not member.issym() and target.is_symlink()):
+            raise TandemError(f"The archive has an entry outside its own tree: {member.name!r}")
+
+    members = tar.getmembers()
+    stamped = tar.pax_headers.get("comment")
+    tops = {PurePosixPath(m.name).parts[0] for m in members if PurePosixPath(m.name).parts}
+    if commit is not None:
+        if stamped is not None and stamped != commit:
+            raise TandemError(f"The archive is commit {stamped[:7]}, not the pinned {commit[:7]}.")
+        if stamped is None and not (strip and len(tops) == 1 and next(iter(tops)).endswith(commit)):
+            raise TandemError(
+                f"Cannot confirm the archive is commit {commit[:7]}: it names no commit.",
+                hint="Fetch it with git instead.",
+            )
+    if strip and len(tops) != 1:
+        raise TandemError(f"{archive.name} does not have the single top-level directory it should.")
+
+    hardlinks, symlinks = [], []
+    for member in members:
+        parts = PurePosixPath(member.name).parts[strip:]
+        if not parts:
+            continue
+        if PurePosixPath(member.name).is_absolute() or ".." in parts:
+            raise TandemError(f"The archive has an entry outside its own tree: {member.name!r}")
+        target = Path(base).joinpath(*parts)
+        if member.isdir():
+            place(member, target)
+            target.mkdir(parents=True, exist_ok=True)
+        elif member.isfile():
+            place(member, target)
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(origin, target)
+            source = tar.extractfile(member)
+            assert source is not None
+            with source, open(target, "wb") as out:
+                shutil.copyfileobj(source, out, length=1 << 20)
+            os.chmod(target, (member.mode & 0o777) | 0o600)
+        elif member.issym():
+            resolved = os.path.normpath(os.path.join(os.path.dirname(target), member.linkname))
+            if os.path.isabs(member.linkname) or not (resolved + os.sep).startswith(base + os.sep):
+                raise TandemError(f"The archive has a link out of its own tree: {member.name!r}")
+            symlinks.append((member, target))
+        elif member.islnk():
+            hardlinks.append((member, target))
+        # Devices and FIFOs have no business in a source tree; they are skipped.
+
+    for member, target in hardlinks:
+        link_parts = PurePosixPath(member.linkname).parts[strip:]
+        origin = Path(base).joinpath(*link_parts)
+        if ".." in link_parts or origin.is_symlink() or not origin.is_file() or not inside(origin):
+            raise TandemError(f"The archive has a hard link to nothing it contains: {member.name!r}")
+        place(member, target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(origin, target)
+
+    # Last, so that nothing above was written through one.
+    for member, target in symlinks:
+        place(member, target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.symlink(member.linkname, target)
+        except FileExistsError:
+            # Something else is already there: two entries of one name, or two whose names only a
+            # case-insensitive filesystem confuses -- either way, not a tree git could have made.
+            raise TandemError(
+                f"The archive has two entries at {member.name!r}, one of them a link."
+            ) from None
+    # Checked once every link exists, because a link is only as contained as the links it goes
+    # through, and those may come after it in the archive.
+    for member, target in symlinks:
+        if not inside(target):
+            raise TandemError(f"The archive has a link out of its own tree: {member.name!r}")
 
 
 # --------------------------------------------------------------------------- trimming and patching
@@ -1310,7 +1621,14 @@ def _read_manifest(path: Path) -> dict:
     out of a ``git archive`` of exactly those commits, so they are read as verified, and a runtime
     whose commits still match the pins is current without fetching anything again.
     """
-    record: dict[str, Any] = {"format": FORMAT, "planner": None, "sources": {}, "assets": {}, "built": None}
+    record: dict[str, Any] = {
+        "format": FORMAT,
+        "planner": None,
+        "sources": {},
+        "assets": {},
+        "built": None,
+        "last_build": None,
+    }
     if not path.is_file():
         return record
     try:
@@ -1336,7 +1654,7 @@ def _read_manifest(path: Path) -> dict:
         if raw.get("built_at"):
             record["built"] = {"at": raw["built_at"], "sources": {n: m["commit"] for n, m in sources.items()}}
         return record
-    for key in ("planner", "sources", "assets", "built"):
+    for key in ("planner", "sources", "assets", "built", "last_build"):
         if key in raw and raw[key] is not None:
             record[key] = raw[key]
     return record
@@ -1375,11 +1693,96 @@ def default_root(planner: str) -> Path:
     return paths.runtimes_dir() / planner
 
 
+@dataclass
+class _Held:
+    """One runtime's install lock, as this process holds it."""
+
+    fd: int | None
+    owner: int
+    depth: int = 0
+
+
+# Runtime root -> the lock this process holds on it. A flock belongs to an open file, not to a process,
+# so a second one taken here on a new descriptor would be refused by the first; re-entry goes through
+# this table instead.
+_LOCKS: dict[str, _Held] = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+def _acquire(path: Path, title: str) -> int | None:
+    """Take the install lock at ``path`` without waiting, and write this process's pid into it."""
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - Windows, where no planner runtime is built (pixi envs are linux-64)
+        return None
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        try:
+            holder = os.read(fd, 64).decode(errors="replace").strip()
+        finally:
+            os.close(fd)
+        raise _busy(title, holder) from None
+    # The file stays after the lock is released -- deleting it would race the next install opening
+    # it -- so the pid is only ever read while someone holds it.
+    os.ftruncate(fd, 0)
+    os.write(fd, f"{os.getpid()}\n".encode())
+    return fd
+
+
+def _busy(title: str, holder: str) -> TandemError:
+    return TandemError(
+        f"Another install of the {title} runtime is running (pid {holder or '?'}).",
+        hint="Wait for it to finish, or stop it, then run the install again: every step it finished is "
+        "skipped.",
+    )
+
+
+def tree_digest(root: Path) -> str:
+    """sha256 of a tree's contents: each file's bytes and each symlink's target, by relative path.
+
+    What ``tools/bundle.py`` writes into an export's marker and an install from that export checks,
+    so an export recorded as verified is the commit its marker names, not merely one that says so.
+    Paths and contents only, not modes or times: a bundle carried on a stick keeps neither reliably,
+    and neither changes which commit a tree is. The junk an install never copies (``_copy_tree``) is
+    left out on both sides, the marker itself included.
+    """
+    root = Path(root)
+    entries: list[tuple[str, str, Path]] = []
+    for directory, dirnames, filenames in os.walk(root):
+        here = Path(directory)
+        descend = []
+        for name in dirnames:
+            if _is_junk(name):
+                continue
+            if (here / name).is_symlink():
+                entries.append(((here / name).relative_to(root).as_posix(), "L", here / name))
+            else:
+                descend.append(name)
+        dirnames[:] = descend
+        for name in filenames:
+            path = here / name
+            if _is_junk(name) or not (path.is_symlink() or path.is_file()):
+                continue
+            entries.append((path.relative_to(root).as_posix(), "L" if path.is_symlink() else "F", path))
+
+    digest = hashlib.sha256()
+    for relative, kind, path in sorted(entries):
+        if kind == "L":
+            target = os.readlink(path).encode()
+            digest.update(f"L {len(target)} {relative}\0".encode() + target)
+            continue
+        digest.update(f"F {path.stat().st_size} {relative}\0".encode())
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda fh=fh: fh.read(1 << 20), b""):
+                digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _copy_tree(src: Path, dest: Path) -> None:
     def ignore(_directory: str, names: list[str]) -> set[str]:
-        out = {n for n in names if n in _JUNK_NAMES or n.endswith(_JUNK_SUFFIXES)}
-        out.discard("__init__.py")
-        return out
+        return {n for n in names if _is_junk(n)}
 
     shutil.copytree(src, dest, symlinks=True, ignore=ignore)
 

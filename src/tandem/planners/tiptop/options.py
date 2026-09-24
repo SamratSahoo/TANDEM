@@ -20,15 +20,36 @@ the factory builds a session's backend from them.
 
 from __future__ import annotations
 
+import difflib
 import math
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from tandem.planners.tiptop import tamp_keys
 
 # --------------------------------------------------------------------------- the arm
+
+
+#: The arms both halves of the pinned planner know: tiptop's robot client and cuRobo solvers
+#: (get_robot_client, and get_ik_solver / get_motion_gen under build_curobo_solvers), which raise
+#: "Unknown robot type" at warm-up for anything else, and cuTAMP's validate_tamp_config, which tiptop
+#: hands the same name as TAMPConfiguration.robot at every plan. Left out on purpose:
+#:   - "fr3" (a Franka Hand on an FR3): tiptop calls it "fr3" and cuTAMP "fr3_franka", so neither name
+#:     gets through both -- it warms and then fails every plan.
+#:   - the bimanual YAM types: the recipe trims their meshes, and bimanual is out of scope.
+#: tests/test_review_tiptop.py reads the set out of the pinned sources, so a bump that changes it fails
+#: there.
+ROBOT_TYPES = frozenset({"fr3_robotiq", "panda_robotiq", "panda", "ur5"})
+
+# Names people reach for that are not the planner's, and what they mean by them.
+_ROBOT_ALIASES = {
+    "franka": "panda (a Panda with the Franka Hand) or fr3_robotiq (an FR3 with a Robotiq 2F-85)",
+    "fr3": "fr3_robotiq (an FR3 with a Robotiq 2F-85); an FR3 with the Franka Hand is not supported",
+    "fr3_franka": "fr3_robotiq (an FR3 with a Robotiq 2F-85); an FR3 with the Franka Hand is not supported",
+    "ur5e": "ur5",
+}
 
 
 class RobotSpec(BaseModel):
@@ -51,8 +72,11 @@ class RobotSpec(BaseModel):
     @field_validator("type")
     @classmethod
     def _known_robot(cls, v: str) -> str:
-        if v not in {"fr3_robotiq", "ur5", "franka", "panda_robotiq"}:
-            raise ValueError(f"unsupported robot type {v!r} (fr3_robotiq | ur5 | franka | panda_robotiq)")
+        if v not in ROBOT_TYPES:
+            known = " | ".join(sorted(ROBOT_TYPES))
+            meant = _ROBOT_ALIASES.get(v) or next(iter(difflib.get_close_matches(v, sorted(ROBOT_TYPES), n=1)), "")
+            hint = f"; did you mean {meant}?" if meant else ""
+            raise ValueError(f"unsupported robot type {v!r} ({known}){hint}")
         return v
 
     @field_validator("time_dilation_factor")
@@ -94,6 +118,25 @@ class GeminiSpec(BaseModel):
     temperature: float | None = None
 
 
+def _usable_url(v: str, example: str) -> str:
+    """Reject a URL that cannot be parsed, where the field name is still in hand.
+
+    An import used to leave OmegaConf's ``${oc.env:TIPTOP_M2T2_PORT,8123}`` in here, and
+    the first thing to notice was urlparse raising several layers away, inside the
+    diagnostic command you run *because* something is wrong.
+    """
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(v)
+        parsed.port  # noqa: B018 — raises when the port is not an integer
+    except ValueError as exc:
+        raise ValueError(f"{v!r} is not a usable URL: {exc}") from exc
+    if not parsed.scheme or not parsed.hostname:
+        raise ValueError(f"{v!r} needs a scheme and a host, e.g. {example}")
+    return v
+
+
 class M2T2Spec(BaseModel):
     model_config = {"extra": "forbid"}
 
@@ -103,22 +146,7 @@ class M2T2Spec(BaseModel):
     @field_validator("url")
     @classmethod
     def _parseable(cls, v: str) -> str:
-        """Reject a URL that cannot be parsed, where the field name is still in hand.
-
-        An import used to leave OmegaConf's ``${oc.env:TIPTOP_M2T2_PORT,8123}`` in here, and
-        the first thing to notice was urlparse raising several layers away, inside the
-        diagnostic command you run *because* something is wrong.
-        """
-        from urllib.parse import urlparse
-
-        try:
-            parsed = urlparse(v)
-            parsed.port  # noqa: B018 — raises when the port is not an integer
-        except ValueError as exc:
-            raise ValueError(f"{v!r} is not a usable URL: {exc}") from exc
-        if not parsed.scheme or not parsed.hostname:
-            raise ValueError(f"{v!r} needs a scheme and a host, e.g. http://localhost:8123")
-        return v
+        return _usable_url(v, "http://localhost:8123")
 
 
 class PerceptionSpec(BaseModel):
@@ -126,7 +154,11 @@ class PerceptionSpec(BaseModel):
 
     gemini: GeminiSpec = Field(default_factory=GeminiSpec)
     m2t2: M2T2Spec = Field(default_factory=M2T2Spec)
-    sam_mode: str = "local"
+    # Where SAM-2 runs: in the runtime ("local"), or on a SAM-2 server (tiptop's scripts/sam_server.py)
+    # at sam_url. tiptop reads perception.sam.url for any mode that is not "local" -- a typo'd "Local"
+    # included -- so the mode is one of the two, and a remote one has to say where.
+    sam_mode: Literal["local", "remote"] = "local"
+    sam_url: str | None = None
     # Temporal depth smoothing: N stereo frames grabbed back-to-back at the static capture
     # pose and per-pixel median-fused. 1 disables it.
     depth_smoothing_frames: int = 5
@@ -137,6 +169,22 @@ class PerceptionSpec(BaseModel):
     voxel_downsample_size: float = 0.0075
     contact_threshold_m: float = 0.01
     mask_erosion_pixels: int = 3
+
+    @field_validator("sam_url")
+    @classmethod
+    def _sam_url_parseable(cls, v: str | None) -> str | None:
+        return None if v is None else _usable_url(v, "http://localhost:8000")
+
+    @model_validator(mode="after")
+    def _remote_sam_says_where(self):
+        # Otherwise the rendered tiptop.yml has no perception.sam.url, and the first thing to read it is
+        # the warm-up's sam2_client(), with an OmegaConf missing-key error that names no setting of ours.
+        if self.sam_mode == "remote" and not self.sam_url:
+            raise ValueError(
+                "sam_mode is 'remote' but perception.sam_url is not set; name the SAM-2 server, "
+                "e.g. sam_url: http://localhost:8000"
+            )
+        return self
 
 
 # --------------------------------------------------------------------------- the whole block
@@ -221,24 +269,32 @@ def validate_tamp(raw: dict | None) -> dict:
 
 
 def _normalise_traj_norm(value: Any) -> str | float:
-    """Force the infinity norm to the STRING "inf".
+    """Force the infinity norm to the STRING "inf", and refuse a finite norm below 1.
 
     YAML `inf` parses as a string but `.inf` parses as float infinity, and the overrides dict
     round-trips through JSON, which cannot represent Infinity. Both spellings land here as
     the one form tiptop's resolve_traj_length_norm accepts.
+
+    Below 1 is cuTAMP's own refusal (validate_tamp_config, run at every plan), in its own words:
+    accepted here, it would load, warm and perceive, and then fail every robot leg's plan.
     """
     if isinstance(value, str):
         if value.strip().lower() in tamp_keys.INFINITY_ALIASES:
             return "inf"
         try:
-            return float(value)
+            norm = float(value)
         except ValueError as exc:
             raise ValueError(f"traj_length_norm must be a number or 'inf' (got {value!r})") from exc
-    if isinstance(value, (int, float)):
-        if math.isinf(float(value)):
+    elif isinstance(value, (int, float)) and not isinstance(value, bool):
+        norm = float(value)
+        if math.isinf(norm) and norm > 0:  # -.inf is refused below, not read as the infinity norm
             return "inf"
-        return float(value)
-    raise ValueError(f"traj_length_norm must be a number or 'inf' (got {value!r})")
+    else:
+        raise ValueError(f"traj_length_norm must be a number or 'inf' (got {value!r})")
+    # `not >=` rather than `<`, so NaN -- which float() accepts and every comparison fails -- is refused.
+    if not norm >= 1:
+        raise ValueError(f"traj_length_norm must be >= 1 (or inf), not {norm}")
+    return norm
 
 
 def _validate_blend_ops(key: str, value: Any) -> list[str]:
@@ -298,6 +354,16 @@ def _check_positives(cfg: dict) -> None:
     for key in tamp_keys.NON_NEGATIVE_KEYS:
         if key in cfg and cfg[key] < 0:
             raise ValueError(f"{key} must be >= 0 (got {cfg[key]})")
-    tdf = cfg.get("time_dilation_factor_literal")
-    if tdf is not None and not 0.0 < tdf <= 1.0:
-        raise ValueError(f"time_dilation_factor_literal must be in (0, 1] (got {tdf})")
+    # Both replace robot.time_dilation_factor -- the speed the robot block guards to (0, 1] -- for
+    # every plan (resolve_time_dilation_factor), and neither is checked again before the arm moves:
+    # cuTAMP's validate_tamp_config does not look, and cuRobo refuses > 1 only at the first plan. 1.0
+    # stays legal: for time_dilation_factor it is tiptop's "no extra scaling" sentinel, which falls
+    # back to robot.time_dilation_factor.
+    for key in ("time_dilation_factor", "time_dilation_factor_literal"):
+        tdf = cfg.get(key)
+        # `not (0 < tdf <= 1)`, so NaN is refused too.
+        if tdf is not None and not 0.0 < tdf <= 1.0:
+            raise ValueError(
+                f"{key} must be in (0, 1] (got {tdf}); it replaces robot.time_dilation_factor, so start at "
+                "0.2 (20% speed)"
+            )
