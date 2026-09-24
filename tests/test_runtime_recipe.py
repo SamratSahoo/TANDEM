@@ -859,7 +859,7 @@ def test_the_web_ui_and_doctor_read_the_same_runtime_the_terminal_does(profile):
     assert {"sources_present", "env_built", "kernels_built", "vendor", "built_at", "root"} <= set(payload)
 
     (check,) = [
-        c for c in collect_checks(profile_name=profile.name, probe_hardware=False) if c.name == "gpu runtime"
+        c for c in collect_checks(profile_name=profile.name, probe_hardware=False) if c.name == "planner runtime"
     ]
     assert check.state == "warn" and "has not been created" in check.detail
 

@@ -252,7 +252,7 @@ function runtimeCard() {
     }
   }).catch((error) => mount(body, h("div.alert.err", error.message)));
 
-  return h("div.card", h("div.card-title", "GPU runtime"), body);
+  return h("div.card", h("div.card-title", "Planner runtime"), body);
 }
 
 function doctorCard(state) {

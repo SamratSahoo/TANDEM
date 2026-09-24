@@ -11,8 +11,10 @@ import pytest
 from pydantic import ValidationError
 
 from tandem.core import probe
-from tandem.core.importers import _deref
 from tandem.core.profiles import Profile
+from tandem.planners.tiptop import probe as tiptop_probe
+from tandem.planners.tiptop.importers import _deref
+from tandem.planners.tiptop.options import options_of
 
 
 class TestDeref:
@@ -62,7 +64,9 @@ class TestUrlValidation:
         with pytest.raises(ValidationError) as excinfo:
             Profile.model_validate({
                 "name": "x",
-                "perception": {"m2t2": {"url": "http://localhost:${oc.env:TIPTOP_M2T2_PORT,8123}"}},
+                "planner": {
+                    "options": {"perception": {"m2t2": {"url": "http://localhost:${oc.env:TIPTOP_M2T2_PORT,8123}"}}}
+                },
             })
         message = str(excinfo.value)
         assert "m2t2" in message
@@ -70,32 +74,34 @@ class TestUrlValidation:
 
     def test_a_url_without_a_host_is_rejected(self):
         with pytest.raises(ValidationError):
-            Profile.model_validate({"name": "x", "perception": {"m2t2": {"url": "not-a-url"}}})
+            Profile.model_validate(
+                {"name": "x", "planner": {"options": {"perception": {"m2t2": {"url": "not-a-url"}}}}}
+            )
 
     def test_a_good_url_passes(self):
         profile = Profile.model_validate({
-            "name": "x", "perception": {"m2t2": {"url": "http://10.0.0.4:8123"}}
+            "name": "x", "planner": {"options": {"perception": {"m2t2": {"url": "http://10.0.0.4:8123"}}}}
         })
-        assert profile.perception.m2t2.url == "http://10.0.0.4:8123"
+        assert options_of(profile).perception.m2t2.url == "http://10.0.0.4:8123"
 
 
 class TestProbeRobustness:
     """`doctor` is what you run WHEN something is wrong, so no probe may crash the run."""
 
     def test_an_unparseable_url_is_a_failed_check_not_an_exception(self):
-        check = probe.check_m2t2("http://localhost:${oc.env:TIPTOP_M2T2_PORT,8123}")
+        check = tiptop_probe.check_m2t2("http://localhost:${oc.env:TIPTOP_M2T2_PORT,8123}")
         assert check.state == probe.FAIL
         assert check.hint
         assert "${" in check.detail
 
     def test_a_nonsense_url_is_a_failed_check(self):
-        assert probe.check_m2t2("").state == probe.FAIL
-        assert probe.check_m2t2("://////").state == probe.FAIL
+        assert tiptop_probe.check_m2t2("").state == probe.FAIL
+        assert tiptop_probe.check_m2t2("://////").state == probe.FAIL
 
     def test_a_reachable_looking_url_still_probes(self):
         # Nothing is listening, so this warns rather than fails — the distinction being that
         # the URL is usable and the server merely is not up yet.
-        check = probe.check_m2t2("http://127.0.0.1:1")
+        check = tiptop_probe.check_m2t2("http://127.0.0.1:1")
         assert check.state == probe.WARN
 
 
@@ -114,7 +120,7 @@ class TestStoredProfilesSelfHeal:
         profile.profile_file().write_text(text)
 
         loaded = profiles.load(profile.name)
-        assert loaded.perception.m2t2.url == "http://localhost:8123"
+        assert options_of(loaded).perception.m2t2.url == "http://localhost:8123"
 
     def test_saving_writes_the_resolved_value_back(self, profile):
         from tandem.core import profiles

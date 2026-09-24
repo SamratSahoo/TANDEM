@@ -22,12 +22,12 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from tandem.core.runtime import Runtime
 from tandem.planners.base import BackendContext
 from tandem.planners.sidecar import SidecarPlanner
 from tandem.planners.tiptop.capabilities import CAPABILITIES
-from tandem.planners.tiptop.factory import INFO
+from tandem.planners.tiptop.factory import INFO, TiptopFactory
 from tandem.planners.tiptop.recipe import RECIPE
+from tandem.planners.tiptop.runtime import TiptopRuntime
 
 _log = logging.getLogger(__name__)
 
@@ -65,6 +65,7 @@ class TiptopBackend(SidecarPlanner):
 
     info = INFO
     CAPABILITIES = CAPABILITIES
+    OPTIONS = TiptopFactory.OPTIONS
     recipe = RECIPE
     name = "tiptop"
     SIDECAR = "sidecar.py"
@@ -81,7 +82,7 @@ class TiptopBackend(SidecarPlanner):
 
     def __init__(
         self,
-        runtime: Runtime,
+        runtime: TiptopRuntime,
         *,
         env: dict[str, str],
         output_dir: Path,
@@ -111,6 +112,30 @@ class TiptopBackend(SidecarPlanner):
         from tandem.planners.tiptop.factory import FACTORY
 
         return FACTORY.runtime(settings)
+
+    @classmethod
+    def validate_options(cls, options):
+        from tandem.planners.tiptop.factory import FACTORY
+
+        return FACTORY.validate_options(options)
+
+    @classmethod
+    def describe_options(cls, profile, *, settings=None):
+        from tandem.planners.tiptop.factory import FACTORY
+
+        return FACTORY.describe_options(profile, settings=settings)
+
+    @classmethod
+    def doctor_checks(cls, profile, *, settings=None, probe_hardware=True):
+        from tandem.planners.tiptop.factory import FACTORY
+
+        return FACTORY.doctor_checks(profile, settings=settings, probe_hardware=probe_hardware)
+
+    @classmethod
+    def replay(cls, rollout_dir, *, settings=None):
+        from tandem.planners.tiptop.factory import FACTORY
+
+        FACTORY.replay(rollout_dir, settings=settings)
 
     # ---- how TiPToP's sidecar is started -----------------------------------
 

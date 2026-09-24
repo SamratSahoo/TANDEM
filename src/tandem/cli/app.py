@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 
@@ -42,6 +43,29 @@ def root(
         theme.set_no_color(True)
     if debug:
         os.environ["TANDEM_DEBUG"] = "1"
+    _show_profile_notices()
+
+
+class _NoticeHandler(logging.Handler):
+    """A profile's notices (read in an older layout, and how to rewrite it) as a warning line on stderr.
+
+    stderr, so a `--json` on stdout stays parseable; a handler of tandem's own, so the line looks like
+    every other warning rather than a bare logging record.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        from rich.text import Text
+
+        line = Text()
+        line.append(f"  {theme.WARN} ", style="warn")
+        line.append(record.getMessage())
+        theme.err_console().print(line)
+
+
+def _show_profile_notices() -> None:
+    logger = logging.getLogger("tandem.core.profiles")
+    if not any(isinstance(handler, _NoticeHandler) for handler in logger.handlers):
+        logger.addHandler(_NoticeHandler(logging.WARNING))
 
 
 # Subcommands are imported here (not at module top) so `tandem --help` stays fast and a

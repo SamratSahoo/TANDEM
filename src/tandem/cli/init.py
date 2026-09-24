@@ -16,9 +16,10 @@ import typer
 from tandem import resources
 from tandem.cli import runtime as runtime_cli
 from tandem.cli import theme
-from tandem.core import importers, paths, probe, profiles, secrets
+from tandem.core import paths, probe, profiles, secrets
 from tandem.core import settings as settings_mod
 from tandem.core.errors import TandemError
+from tandem.planners import registry
 
 
 def init(
@@ -33,7 +34,8 @@ def init(
     import_from: Path = typer.Option(
         None,
         "--import-from",
-        help="Import robot, camera and TAMP settings from a hitl-tamp-vla checkout.",
+        help="Import the setup from the planner's own older configuration (for TiPToP: a hitl-tamp-vla "
+        "checkout).",
         exists=True,
         file_okay=False,
     ),
@@ -68,23 +70,8 @@ def init(
     theme.rule("checking this machine")
     checks = _preflight(viz_only=viz_only)
     _render_checks(checks)
-
-    blocking = [c for c in checks if c.state == probe.FAIL]
-    if blocking and not viz_only:
-        theme.blank()
-        for check in blocking:
-            theme.fail(check.name, check.detail)
-            if check.hint:
-                theme.console().print(f"    [faint]{check.hint}[/faint]")
-        theme.blank()
-        if interactive:
-            if not typer.confirm("  Continue anyway?", default=False):
-                raise typer.Abort()
-        else:
-            raise TandemError(
-                "Preflight found blocking problems: " + ", ".join(c.name for c in blocking),
-                hint="Fix them and re-run `tandem init`, or use --viz-only for a laptop setup.",
-            )
+    if not viz_only:
+        _stop_on_blocking(checks, interactive=interactive)
     theme.blank()
 
     # ---- 3. where data lives ------------------------------------------------
@@ -106,11 +93,12 @@ def init(
     if not viz_only:
         theme.rule("planner")
         planner = _choose_planner(profile_name, planner, interactive=interactive)
+        _planner_preflight(planner, interactive=interactive)
         theme.blank()
 
-    # ---- 5. the GPU runtime -------------------------------------------------
+    # ---- 5. the planner's runtime -------------------------------------------
     if not viz_only:
-        theme.rule("gpu runtime")
+        theme.rule("planner runtime")
         _build_runtime(profile_name, interactive=interactive, repair=repair, planner=planner)
         theme.blank()
 
@@ -122,8 +110,8 @@ def init(
     elif viz_only:
         theme.info("Not needed for visualization — skipping.")
     else:
-        theme.info("Perception calls Gemini once per rollout to turn the task string")
-        theme.info("into object bounding boxes and goal predicates.")
+        theme.info("Phase planning asks Gemini to split each task into steps and to check each human one,")
+        theme.info("and a planner may call it too (TiPToP's perception does, every rollout).")
         theme.info("Get a key at https://aistudio.google.com/apikey")
         if interactive:
             key = typer.prompt("  Gemini API key (blank to skip)", default="", hide_input=True).strip()
@@ -250,6 +238,7 @@ def _build_runtime(profile_name: str, *, interactive: bool, repair: bool, planne
 
 
 def _preflight(*, viz_only: bool) -> list[probe.Check]:
+    """What tandem itself needs of the machine. What the planner needs is asked once it is chosen."""
     cfg = settings_mod.load()
     checks = [probe.check_python(), probe.check_platform()]
     if viz_only:
@@ -257,15 +246,47 @@ def _preflight(*, viz_only: bool) -> list[probe.Check]:
         return checks
 
     checks += [
-        probe.check_nvidia_driver(),
-        probe.check_cuda_runtime(),
-        probe.check_nvcc(),
         probe.check_disk(cfg.resolved_runtime_dir()),
         probe.check_pixi(),
         probe.check_ffmpeg(),
-        probe.check_zed_sdk(),
     ]
     return checks
+
+
+def _planner_preflight(planner: str, *, interactive: bool) -> None:
+    """What the chosen planner needs of this machine -- a GPU, a camera SDK -- before its runtime is built.
+
+    The planner's own doctor checks, with no profile yet: they are the only ones that know. Stops on
+    a failure the same way the machine checks do, so twenty minutes are not spent building a runtime
+    that cannot run here.
+    """
+    checks = registry.doctor_checks(planner, None, settings=settings_mod.load(), probe_hardware=True)
+    if not checks:
+        return
+    theme.blank()
+    theme.info(f"what {registry.info(planner).title} needs of this machine")
+    _render_checks(checks)
+    _stop_on_blocking(checks, interactive=interactive)
+
+
+def _stop_on_blocking(checks: list[probe.Check], *, interactive: bool) -> None:
+    blocking = [c for c in checks if c.state == probe.FAIL]
+    if not blocking:
+        return
+    theme.blank()
+    for check in blocking:
+        theme.fail(check.name, check.detail)
+        if check.hint:
+            theme.console().print(f"    [faint]{check.hint}[/faint]")
+    theme.blank()
+    if interactive:
+        if not typer.confirm("  Continue anyway?", default=False):
+            raise typer.Abort()
+    else:
+        raise TandemError(
+            "Preflight found blocking problems: " + ", ".join(c.name for c in blocking),
+            hint="Fix them and re-run `tandem init`, or use --viz-only for a laptop setup.",
+        )
 
 
 def _render_checks(checks: list[probe.Check]) -> None:
@@ -287,6 +308,7 @@ def _create_profile(
     planner: str | None = None,
 ) -> None:
     from tandem.cli import planners as planners_cli
+    from tandem.cli import profile as profile_cli
 
     # Resolved before anything is written: a default naming a planner this machine no longer has
     # stops here, not in a profile that every later command refuses.
@@ -294,29 +316,35 @@ def _create_profile(
     calibration: dict = {}
     notes: list[str] = []
 
-    if import_from is None and interactive:
-        theme.info("A profile holds the robot, the cameras, the task and the TAMP settings.")
-        guess = _guess_monorepo()
+    # The planner's own importer, if it has older configuration to import from (TiPToP: a checkout of
+    # the hitl-tamp-vla monorepo it came from).
+    importer = registry.importer(planner)
+    if import_from is None and interactive and importer is not None:
+        theme.info("A profile holds the task, the cameras, the planner and the planner's settings.")
+        guess = importer.find(Path.cwd())
         if guess is not None:
             prompt = f"  Import settings from {guess}?"
             if typer.confirm(prompt, default=True):
                 import_from = guess
 
     if import_from is not None:
-        tamp_config = None
-        options = importers.list_tamp_configs(import_from)
+        if importer is None:
+            raise TandemError(
+                f"The {registry.info(planner).title} planner has nothing to import a profile from.",
+                hint="Run `tandem init` without --import-from, or with --planner naming the planner whose setup it is.",
+            )
+        config = None
+        options = importer.configs(import_from)
         if options and interactive:
-            theme.info(f"{len(options)} TAMP config(s) found in that checkout.")
+            theme.info(f"{len(options)} task config(s) found in {importer.source}.")
             for i, path in enumerate(options[:12], 1):
                 theme.console().print(f"    [accent]{i:>2}[/accent]  [faint]{path.stem}[/faint]")
             if len(options) > 12:
                 theme.console().print(f"    [faint]… and {len(options) - 12} more[/faint]")
             answer = typer.prompt("  Import one? (number, or blank for none)", default="").strip()
             if answer.isdigit() and 1 <= int(answer) <= len(options):
-                tamp_config = options[int(answer) - 1]
-        profile, calibration, notes = importers.build_profile(
-            name, root=import_from, tamp_config=tamp_config
-        )
+                config = options[int(answer) - 1]
+        profile, calibration, notes = importer.build(name, source=import_from, config=config)
         origin = f"imported from {import_from}"
     else:
         profile = profiles.load_file(resources.path("profile_template.yml"), name=name)
@@ -333,16 +361,18 @@ def _create_profile(
         profile.task.prompt = typer.prompt("  Task prompt", default=profile.task.prompt).strip()
 
     # The planner init set this machine up for, whether the rest came from the template or an import:
-    # a profile naming a different planner from the runtime just built would not collect.
-    profile.planner = profiles.PlannerSpec(backend=planner)
+    # a profile naming a different planner from the runtime just built would not collect. An import
+    # is already that planner's, options and all; the template's options are TiPToP's, and go when
+    # the planner is another.
+    if profile.planner.backend != planner:
+        profile.planner = profiles.PlannerSpec(backend=planner)
     path = profiles.save(profile)
     if calibration:
         profile.calibration_file().write_text(json.dumps(calibration, indent=2) + "\n")
 
     theme.ok(f"Created profile {name!r}", origin)
     theme.info(str(path))
-    for note in notes:
-        theme.info(note)
+    profile_cli.show_notes(notes)
 
     missing = profiles.missing_calibration(profile)
     if missing:
@@ -350,20 +380,6 @@ def _create_profile(
             f"No extrinsics for camera serial(s) {', '.join(missing)}",
             "collection will refuse to start until they exist",
         )
-
-
-def _guess_monorepo() -> Path | None:
-    """Look for a hitl-tamp-vla checkout next to the current directory.
-
-    Only a suggestion — it is always confirmed before anything is read.
-    """
-    here = Path.cwd().resolve()
-    for base in (here, *here.parents):
-        for name in ("hitl-tamp-vla", "tamp-vla"):
-            candidate = base / name
-            if candidate.is_dir() and importers.find_sources(candidate)["tiptop_config"]:
-                return candidate
-    return None
 
 
 def _setup_teleop(*, interactive: bool, repair: bool) -> None:

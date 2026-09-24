@@ -829,7 +829,7 @@ def test_the_merge_files_the_record_with_where_the_episode_went(tmp_path, monkey
     plan = walk()
     plan.set_outcome("excluded", "verification")
     episodes.merge_trajectory(
-        object(), "traj-1", "failure", plan, runtime_dir=None, vlm_dir=None, log=print, emit=lambda e: None
+        object(), "traj-1", "failure", plan, tools_dir=None, vlm_dir=None, log=print, emit=lambda e: None
     )
     record = json.loads((merged / "hitl.json").read_text())
     assert record["filed_under"] == "failure" and record["excluded"] is True

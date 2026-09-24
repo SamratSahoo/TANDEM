@@ -15,11 +15,11 @@ from rich.text import Text
 from tandem.cli import theme
 from tandem.cli.keys import KeyReader
 from tandem.core import profiles
-from tandem.core import runtime as runtime_mod
 from tandem.core import session as session_mod
 from tandem.core import settings as settings_mod
 from tandem.core.errors import SessionConflict, TandemError
 from tandem.core.session import State
+from tandem.planners import registry
 
 # The stages a rollout moves through, as the operator experiences them.
 PIPELINE = [
@@ -62,23 +62,26 @@ def collect(
         serve(profile_name=profile.name)
         return
 
-    runtime = runtime_mod.Runtime(cfg.resolved_runtime_dir())
+    backend = profile.planner.backend
     # Fail before printing a session header for a session that cannot start.
-    runtime.require_ready()
+    registry.require_runtime(backend, cfg)
+    view = registry.describe_options(backend, profile, settings=cfg)
 
     theme.blank()
     theme.heading(f"collect · {profile.name}", profile.description)
     theme.kv(
         [
             ("task", task or profile.goal_or_prompt()),
-            ("robot", f"{profile.robot.type} at {profile.robot.host}  ·  {profile.robot.time_dilation_factor:.0%} speed"),
+            ("planner", "  ·  ".join(filter(None, (registry.info(backend).title, view.summary)))),
             ("cameras", ", ".join(profile.cameras.configured())),
             ("execute", "no — planning only" if no_execute else "yes"),
             ("output", profile.trajectories_dir()),
         ]
     )
-    if profile.tamp:
-        theme.info(f"{len(profile.tamp)} TAMP override(s) active", "tandem profile show --tamp")
+    if view.receives:
+        theme.info(f"{len(view.receives)} planner setting(s) passed on", "tandem profile show --planner")
+    for warning in view.warnings:
+        theme.warn(warning)
     if profile.hitl.enabled:
         theme.info(
             "phase planning is on",
@@ -92,10 +95,9 @@ def collect(
     theme.blank()
 
     manager = session_mod.manager()
-    theme.busy("Warming up", "cuRobo, SAM2, cameras and the robot — this takes a minute")
+    theme.busy("Warming up", "the planner, the cameras and the robot — this takes a minute")
     session = manager.create(
         profile,
-        runtime,
         task=task,
         execute=not no_execute,
         record=not no_record,

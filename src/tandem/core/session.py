@@ -57,20 +57,22 @@ import json
 import threading
 import time
 import uuid
+import warnings
 from collections import deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 from tandem import executors
-from tandem.core import episodes, paths, render, secrets
+from tandem.core import episodes, paths, profiles, secrets
 from tandem.core import settings as settings_mod
 from tandem.core.errors import SessionConflict, TandemError
 from tandem.core.phase_loop import TELEOP, HumanPhase, PhaseLoop, TrialOutcome
 from tandem.core.profiles import Profile
-from tandem.core.runtime import Runtime
 from tandem.executors.base import CustodyError, ExecutorContext
+from tandem.planners import registry
 
 LOG_BUFFER = 4000
 # How long a caller should wait for `stop()` to finish. It has to cover the session thread
@@ -145,7 +147,7 @@ class Session:
     def __init__(
         self,
         profile: Profile,
-        runtime: Runtime,
+        runtime: Any = None,
         *,
         task: str | None = None,
         execute: bool = True,
@@ -155,7 +157,18 @@ class Session:
     ) -> None:
         self.id = session_id or uuid.uuid4().hex[:12]
         self.profile = profile
-        self.runtime = runtime
+        # The planner's runtime is its factory's to find, from the settings, so a session takes none.
+        # ``Session(profile, Runtime(...))`` was how a script started one before there was a registry,
+        # and it still works: the runtime's root is handed to the planner's factory as the one to use
+        # (``BackendContext.runtime_dir``), which is what that script meant by passing it.
+        if runtime is not None:
+            warnings.warn(
+                "Session(profile, runtime) is deprecated: a session builds its planner's runtime through "
+                "the registry. Leave the runtime out, or set runtime_dir in the settings.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        self._runtime_dir: Path | None = getattr(runtime, "root", None)
         # Two different strings, deliberately. `task` steers PLANNING (the goal), `instruction` is
         # the language label stored with the episode and exported as the LeRobot task. A profile
         # that sets `task.goal` says they must differ -- and the planner used to be handed both,
@@ -243,13 +256,18 @@ class Session:
         """Preflight, build the planner backend, and hand the session to its own thread.
 
         The planner's own preflight -- whether its runtime is built, whether its assets and
-        calibration are in place -- is the planner's, run by its factory and its ``require_ready``.
-        The session checks only what it needs itself whichever planner is named.
+        calibration are in place, whether it has the credentials its perception calls -- is the
+        planner's, run by its factory and its ``require_ready``. The session checks only what it
+        needs itself whichever planner is named.
         """
-        if not secrets.gemini_api_key():
+        # Phase planning is tandem's own use of Gemini: a model splits every task and checks every
+        # human step. A planner that calls Gemini itself (TiPToP's perception does) asks for the key
+        # when its factory builds it; one that does not, never needs one.
+        if self.hitl_enabled and not secrets.gemini_api_key():
             raise TandemError(
-                "No Gemini API key is set, and perception needs one every rollout.",
-                hint="Run `tandem config set-gemini-key`.",
+                "No Gemini API key is set, and phase planning (hitl.enabled) asks Gemini to split every "
+                "task into steps and to check every human one.",
+                hint="Run `tandem config set-gemini-key`, or turn hitl.enabled off.",
             )
 
         # The teleop legs record from these as well, so they are the session's to insist on.
@@ -302,7 +320,6 @@ class Session:
         up first -- a runtime, rendered config, environment variables -- is its factory's business,
         which is what lets a planner the session has never heard of be named in a profile.
         """
-        from tandem.planners import registry
         from tandem.planners.base import BackendContext
 
         spec = self.profile.planner
@@ -320,7 +337,9 @@ class Session:
                 session_id=self.id,
                 task=self.task,
                 events_file=self._files["events_file"],
-                runtime_dir=self.runtime.root,
+                # Normally left to the factory: it resolves its own runtime from the settings, as
+                # every command that asks the registry for this planner's runtime does.
+                runtime_dir=self._runtime_dir,
             ),
         )
 
@@ -591,7 +610,8 @@ class Session:
                 target=episodes.merge_trajectory,
                 args=(self.profile, trajectory_id, status, plan),
                 kwargs={
-                    "runtime_dir": self.runtime.root,
+                    # The planner runtime's own ffmpeg, which is the build that wrote the clips.
+                    "tools_dir": registry.tools_dir(self.profile.planner.backend, settings_mod.load()),
                     # This attempt's audit trail, taken now rather than when the merge finishes. A
                     # merge of several GB of video can outlast the start of the next task, which
                     # points `_vlm_dir` at that task's trail instead.
@@ -633,7 +653,7 @@ class Session:
     def _planning_config(self):
         if self._planning_cfg is None:
             self._planning_cfg = self.profile.hitl.to_planning_config(
-                cache_path=render.resolve_cache_path(self.profile)
+                cache_path=profiles.resolve_cache_path(self.profile)
             )
         return self._planning_cfg
 
@@ -1050,7 +1070,7 @@ class SessionManager:
         self._sessions: dict[str, Session] = {}
         self._lock = threading.RLock()
 
-    def create(self, profile: Profile, runtime: Runtime, **kwargs) -> Session:
+    def create(self, profile: Profile, **kwargs) -> Session:
         with self._lock:
             live = self.live_for(profile.name)
             if live is not None:
@@ -1058,7 +1078,7 @@ class SessionManager:
                     f"A session is already running for profile {profile.name!r} (state: {live.state.value}).",
                     hint="Stop it before starting another; two drivers cannot share the robot.",
                 )
-            session = Session(profile, runtime, **kwargs)
+            session = Session(profile, **kwargs)
             self._sessions[session.id] = session
         session.start()
         return session

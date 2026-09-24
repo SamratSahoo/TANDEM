@@ -1,4 +1,9 @@
-"""Profile routes."""
+"""Profile routes.
+
+The page shows every planner's settings the same way -- a summary, titled sections, what the planner
+will receive and what is wrong with it -- because each planner describes its own options
+(``registry.describe_options``). Nothing here knows any planner's schema.
+"""
 
 from __future__ import annotations
 
@@ -8,9 +13,10 @@ from fastapi import APIRouter, Body
 from pydantic import BaseModel
 
 from tandem.core import profiles as profiles_mod
-from tandem.core import render, trajectories
 from tandem.core import settings as settings_mod
+from tandem.core import trajectories
 from tandem.core.errors import ProfileError, TandemError
+from tandem.planners import registry
 
 router = APIRouter(tags=["profiles"])
 
@@ -32,13 +38,26 @@ def _card(name: str, active: str) -> dict:
         "description": profile.description,
         "prompt": profile.task.prompt,
         "goal": profile.task.goal,
-        "robot": profile.robot.type,
+        "planner": profile.planner.backend,
+        "planner_summary": _view(profile).summary,
         "target": profile.task.target_episodes,
         "counts": counts,
-        "tamp_count": len(profile.tamp),
         "cameras": list(profile.cameras.configured()),
         "dir": str(profile.dir()),
     }
+
+
+def _view(profile, cfg=None):
+    """The profile's planner options as its planner describes them; a bare view for one that will not load.
+
+    A card must render for a profile whose planner is broken: the card is where that is noticed.
+    """
+    from tandem.planners.base import OptionsView
+
+    try:
+        return registry.describe_options(profile.planner.backend, profile, settings=cfg)
+    except TandemError as exc:
+        return OptionsView(warnings=(exc.message,))
 
 
 @router.get("/profiles")
@@ -56,11 +75,12 @@ async def list_profiles() -> dict:
 async def get_profile(name: str) -> dict:
     cfg = settings_mod.load()
     profile = profiles_mod.load(name)
+    view = _view(profile, cfg)
     return {
         **_card(name, cfg.active_profile),
         "profile": profile.model_dump(mode="json"),
-        "tamp_overrides": render.render_tamp_overrides(profile, runtime_dir=cfg.resolved_runtime_dir()),
-        "warnings": render.check_assets(profile, runtime_dir=cfg.resolved_runtime_dir()),
+        "planner_view": view.to_dict(),
+        "warnings": list(view.warnings),
         "calibration": profiles_mod.calibration(profile),
         "missing_calibration": profiles_mod.missing_calibration(profile),
     }
@@ -77,17 +97,20 @@ async def update_profile(name: str, body: dict[str, Any] = Body(...)) -> dict:
         updated = profiles_mod.Profile.model_validate(payload)
     except Exception as exc:
         # A raw pydantic error would surface as a 500 and a wall of text. The editor needs a
-        # 400 with the message the user can act on — usually a mistyped TAMP key.
+        # 400 with the message the user can act on — usually a mistyped planner option.
         raise TandemError(
             "That profile is not valid:\n" + (profiles_mod.format_errors(exc).strip() or str(exc)),
             hint="Nothing was written; the profile on disk is unchanged.",
         ) from exc
     profiles_mod.save(updated)
     cfg = settings_mod.load()
+    updated = profiles_mod.load(name)  # as saved: the planner's options as it normalised them
+    view = _view(updated, cfg)
     return {
         **_card(name, cfg.active_profile),
         "profile": updated.model_dump(mode="json"),
-        "warnings": render.check_assets(updated, runtime_dir=cfg.resolved_runtime_dir()),
+        "planner_view": view.to_dict(),
+        "warnings": list(view.warnings),
         "previous_prompt": existing.task.prompt,
     }
 
@@ -124,8 +147,11 @@ async def create_profile(body: dict[str, Any] = Body(...)) -> dict:
 
         profile = profiles_mod.load_file(resources.path("profile_template.yml"), name=name)
         profile.description = ""
-        # The machine's default planner, as `tandem profile create` gives it.
-        profile.planner = profiles_mod.PlannerSpec(backend=planners_cli.planner_for_new_profile())
+        # The machine's default planner, as `tandem profile create` gives it -- keeping the template's
+        # options when the template already names that planner.
+        chosen = planners_cli.planner_for_new_profile()
+        if profile.planner.backend != chosen:
+            profile.planner = profiles_mod.PlannerSpec(backend=chosen)
         calibration = {}
 
     if body.get("prompt"):

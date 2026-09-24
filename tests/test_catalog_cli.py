@@ -251,8 +251,8 @@ def test_info_says_what_a_planner_is_needs_and_can_be_asked_for(active):
         "cooperative_stop": False,
         "skeleton_reuse": False,
     }
-    # TiPToP's factory is not a tandem.planners.Planner, so it does not say which options it reads.
-    assert payload["options"] is None
+    # The planner.options TiPToP reads, each with a line: what `tandem planners info` lists.
+    assert set(payload["options"]) == {"robot", "perception", "tamp"}
 
     shown = _run("planners", "info", "tiptop")
     assert shown.exit_code == 0, shown.output
@@ -297,7 +297,7 @@ def test_a_planner_that_will_not_load_is_refused_by_name(active, monkeypatch):
 
 def test_use_switches_the_profile_and_says_when_the_planner_is_not_installed(active, tmp_path):
     _stubs(tmp_path)
-    active.planner = profiles.PlannerSpec(backend="tiptop", options={"speed": 0.5})
+    active.planner = profiles.PlannerSpec(backend="tiptop", options={"tamp": {"num_particles": 64}})
     profiles.save(active)
 
     result = _run("planners", "use", "solver")
@@ -306,7 +306,7 @@ def test_use_switches_the_profile_and_says_when_the_planner_is_not_installed(act
     assert switched.planner.backend == "solver"
     # The old planner's own settings would be refused by the new one, so they go -- and it is said.
     assert switched.planner.options == {}
-    assert "Removed planner.options speed" in result.output
+    assert "Removed planner.options perception, robot, tamp" in result.output
     assert "not installed" in result.output and "tandem planners install solver" in result.output
     assert settings_mod.load(force=True).default_planner == "tiptop", "--default was not asked for"
 
@@ -542,8 +542,8 @@ def test_doctor_reports_every_planners_runtime_not_only_the_one_in_use(active, t
     _stubs(tmp_path)
     _declare_planners(monkeypatch, ("broken", "tandem_no_such_planner:FACTORY"))
     checks = {c.name: c for c in collect_checks(profile_name=active.name, probe_hardware=False)}
-    assert checks["gpu runtime"].state == "warn" and checks["gpu runtime"].detail.startswith("tiptop:")
-    assert "tandem planners install tiptop" in checks["gpu runtime"].hint
+    assert checks["planner runtime"].state == "warn" and checks["planner runtime"].detail.startswith("tiptop:")
+    assert "tandem planners install tiptop" in checks["planner runtime"].hint
     assert "planner tiptop" not in checks, "the planner in use has its own row already"
     assert checks["planner ready"].state == "ok"
     assert checks["planner old"].state == "warn"
@@ -560,7 +560,8 @@ def test_doctor_reports_every_planners_runtime_not_only_the_one_in_use(active, t
     profiles.save(active)
     checks = {c.name: c for c in collect_checks(profile_name=active.name, probe_hardware=False)}
     assert (
-        checks["gpu runtime"].state == "warn" and "tandem planners install old" in checks["gpu runtime"].hint
+        checks["planner runtime"].state == "warn"
+        and "tandem planners install old" in checks["planner runtime"].hint
     )
     assert "planner old" not in checks and checks["planner tiptop"].state == "skip"
 

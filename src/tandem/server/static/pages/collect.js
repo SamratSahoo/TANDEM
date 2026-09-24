@@ -42,11 +42,12 @@ export function renderCollect(host, state) {
 
 function notReady() {
   return h("div.card",
-    h("div.card-title", "The GPU runtime is not built"),
+    h("div.card-title", "The planner's runtime is not built"),
     h("div.card-hint",
-      "Collection needs the planner stack: torch, cuRobo's compiled CUDA kernels, cuTAMP and tiptop. " +
-      "Visualizing already-collected trajectories works without it."),
-    h("div.alert.info", h("span.mono", "tandem init"), " on the workstation — the first build takes 5–20 minutes."));
+      "Collection needs the runtime of the planner this profile uses (Settings shows which, and what it " +
+      "is missing). Visualizing already-collected trajectories works without it."),
+    h("div.alert.info", h("span.mono", "tandem planners install <planner>"),
+      " on the workstation (`tandem init` does too) — a GPU planner's first build can take 5–20 minutes."));
 }
 
 // ---- start -----------------------------------------------------------------
@@ -82,7 +83,7 @@ function startForm(shell, state) {
   return h("div.card",
     h("div.card-title", `Collect under ${state.profile}`),
     h("div.card-hint",
-      "The driver warms up once — cuRobo, SAM2, the cameras, the robot — and then loops rollouts " +
+      "The driver warms up once — the planner, the cameras, the robot — and then loops rollouts " +
       "against that warm state. Warmup takes about a minute; after that each rollout starts immediately."),
     h("div.field", h("label", "Task"), taskInput,
       h("div.desc", "Also the language label stored with every episode.")),

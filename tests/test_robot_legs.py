@@ -28,7 +28,7 @@ from unittest import mock
 import pytest
 from fake_backend import FakeBackend
 from fake_executor import FakeExecutor, use_fake_executor
-from helpers import FakeRuntime, use_fake_backend, wait_for
+from helpers import use_fake_backend, wait_for
 
 from tandem.core import secrets
 from tandem.core.episodes import LegDirs
@@ -632,7 +632,7 @@ def session_for(profile, tmp_path, monkeypatch):
         camera = Camera(plan, {OPEN: True} if answers is None else answers)
         monkeypatch.setattr(llm, "gemini_client", lambda: camera)
         backends = use_fake_backend(monkeypatch, backend_type=Backend, **(backend_kwargs or {}))
-        session = Session(profile, FakeRuntime(tmp_path / "runtime"), task="put the toy in the box")
+        session = Session(profile, task="put the toy in the box")
         session.start()
         assert wait_for(lambda: session.state is State.AWAITING_TASK), f"stuck in {session.state}"
         made.append(session)

@@ -85,5 +85,7 @@ class {{class_name}}(SidecarPlanner):
     # (tandem.planners.sidecar.DEFAULT_TIMEOUTS), e.g. {"warm": 600.0}.
     TIMEOUTS = {}
     # TODO: the planner.options keys it reads from a profile, each with one line saying what it does.
-    # Hand them to the sidecar by overriding warm_args(). Any other key in a profile is refused.
+    # Hand them to the sidecar by overriding warm_args(). Any other key is refused when a profile naming
+    # the planner loads; override validate_options(options) for types or structure, and
+    # doctor_checks(profile, *, settings, probe_hardware) for what `tandem doctor` should check.
     OPTIONS = {}

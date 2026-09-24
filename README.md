@@ -205,7 +205,11 @@ tandem init --import-from ~/hitl-tamp-vla
 ```
 
 Robot config, camera serials, extrinsics (including the per-workspace layers) and any
-`cfg/tamp/*.yml` come across as a profile.
+`cfg/tamp/*.yml` come across as a profile, its `hitl:` block included. What tandem cannot do
+is refused rather than swapped for something it can: a config whose human phases a learned
+policy carries out (`policy_type: diffusion` or `act`, the HITL-TAMP baseline) is not
+imported, and the refusal names the same task's config for a person. Settings only
+LJ1356's tiptop fork reads (`placement_*`) are left out with a warning.
 
 ---
 
@@ -265,8 +269,9 @@ actually stores — so what you see is what training sees.
 
 ## Profiles
 
-A **profile** is one collection setup and everything collected under it: the robot, the
-cameras, the task, the TAMP settings, and the trajectories.
+A **profile** is one collection setup and everything collected under it: the task, the
+cameras, the planner and its own settings (for TiPToP: the robot, perception and TAMP
+settings), and the trajectories.
 
 ```
 ~/tandem-data/profiles/fold-cloth/
@@ -287,24 +292,46 @@ tandem profile edit fold-cloth        # $EDITOR, validated on save
 Switching profiles re-points collection, inspection and export in one move. Two robots, two
 tasks, or two TAMP regimes you want to compare — each is a profile.
 
-### TAMP settings
+To collect the way the paper did, start from its preset:
 
-The `tamp:` block goes straight to the planner, using **tiptop's own key names**, so anything
-documented upstream works verbatim and an existing `cfg/tamp/*.yml` can be pasted in
-unchanged.
+```bash
+tandem profile create bread-box --from default --preset paper --prompt "put the bread in the box"
+```
+
+It turns phase planning on with the paper's models, checks and retries, and for TiPToP sets
+the TAMP and DATAFARM overrides of the paper's v3 task configs (the VAE manifold cost,
+`blend_mode: vae`). It keeps the rig's robot, cameras and perception. `tandem profile presets`
+lists every preset. A planner can ship its own presets: see `presets_dir` in
+`tandem/core/presets.py`.
+
+### Planner settings
+
+Everything only the planner reads lives in its own block, `planner.options`, and the planner
+checks it when the profile loads. `tandem planners info <name>` lists what a planner reads. For
+TiPToP that is `robot`, `perception` and `tamp`. The `tamp` block goes straight to cuTAMP and
+cuRobo, using **tiptop's own key names**, so anything documented upstream works verbatim and
+an existing `cfg/tamp/*.yml` can be pasted in unchanged.
 
 ```yaml
-tamp:
-  num_particles: 256              # cuTAMP coverage per skeleton
-  opt_steps_per_skeleton: 250
-  traj_length_norm: inf           # charge moves the infinity-norm, not Euclidean
-  grasp_pose_change_weight: 0.1   # prefer grasps that reorient the wrist less
-  vae_manifold_weight: 25000      # pull trajectories toward the DROID motion manifold
-  joint_density_weight: 5000
-  blend_trajectory: true          # one continuous stroke per operation
-  blend_ops: [Pick, Place, GoToInitial]
-  blend_boundary_speed: 0.3       # never fully stop at gripper events
+planner:
+  backend: tiptop
+  options:
+    robot: {host: 172.16.0.2, time_dilation_factor: 0.2}   # and the rest of the arm
+    tamp:
+      num_particles: 256              # cuTAMP coverage per skeleton
+      opt_steps_per_skeleton: 250
+      traj_length_norm: inf           # charge moves the infinity-norm, not Euclidean
+      grasp_pose_change_weight: 0.1   # prefer grasps that reorient the wrist less
+      vae_manifold_weight: 25000      # pull trajectories toward the DROID motion manifold
+      joint_density_weight: 5000
+      blend_trajectory: true          # one continuous stroke per operation
+      blend_ops: [Pick, Place, GoToInitial]
+      blend_boundary_speed: 0.3       # never fully stop at gripper events
 ```
+
+Profiles written before profile version 2 had `robot:`, `perception:` and `tamp:` at the top
+level. They still load, with a one-line notice, and are written in the new layout the next time
+they are saved; `tandem profile migrate` rewrites them all at once.
 
 **Unknown keys are rejected at load time, with a suggestion.** This is deliberate. In the
 system tandem is extracted from, a config shipped `blend_ops: [Pick, MoveFree. MoveHolding]`
@@ -323,8 +350,8 @@ hitl:
 ```
 
 ```console
-$ tandem profile show fold-cloth --tamp
-◆ planner overrides  passed as --curobo-overrides
+$ tandem profile show fold-cloth --planner
+◆ what tiptop receives  the cuRobo cost overrides, passed as --curobo-overrides (paths made absolute)
 {
   "blend_ops": ["Pick", "Place", "GoToInitial"],
   "blend_trajectory": true,
@@ -446,7 +473,7 @@ build fingerprint means an unchanged, already-compiled kernel is skipped.
 <details>
 <summary><b>My TAMP setting seems to do nothing</b></summary>
 
-Run `tandem profile show <name> --tamp`. That is exactly the JSON the planner receives — if
+Run `tandem profile show <name> --planner`. That is exactly the JSON the planner receives — if
 your key is not in it, it never applied. Unknown keys are rejected at load time, so a typo
 shows up as an error rather than silence.
 </details>

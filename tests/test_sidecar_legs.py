@@ -350,7 +350,7 @@ def test_the_fake_backend_refuses_a_goal_outside_its_movables_as_the_sidecar_doe
 
 class _FakeSidecarRuntime:
     """Just enough of a Runtime for TiptopBackend.warm to launch the fake sidecar in place of the real
-    one. Unlike helpers.FakeRuntime, launching something is the point here."""
+    one. A session test's planner never launches anything; here, launching something is the point."""
 
     def __init__(self, tmp_path: Path) -> None:
         self.tiptop_dir = tmp_path

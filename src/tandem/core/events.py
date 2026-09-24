@@ -1,7 +1,9 @@
 """The events file the collection driver reports its progress through.
 
-tiptop appends one JSON object per line to ``$TIPTOP_EVENTS_FILE``. That file — not
-screen-scraping the driver's stdin prompts — is how we know what state the session is in.
+The session appends one JSON object per line to its events file, and so do the processes it
+drives: a planner's sidecar (TiPToP's finds it through ``$TIPTOP_EVENTS_FILE``) and the teleop
+driver. That file — not screen-scraping the driver's stdin prompts — is how we know what state
+the session is in.
 It is a deliberately dumb channel, which is why it survives the driver being preempted,
 re-warmed, or handed off to a teleop process mid-task.
 

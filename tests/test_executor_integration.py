@@ -32,7 +32,7 @@ import numpy as np
 import pytest
 from fake_backend import FakeBackend
 from fake_executor import FakeExecutor, use_fake_executor, write_leg
-from helpers import FakeGemini, FakeRuntime, use_fake_backend, wait_for
+from helpers import FakeGemini, use_fake_backend, wait_for
 
 from tandem.core import episodes, secrets
 from tandem.core import merge as merge_mod
@@ -574,7 +574,7 @@ def test_the_merged_episode_maps_every_stretch_back_to_its_phase(rig, profile, f
         "t" * 16,
         "success",
         outcome.plan,
-        runtime_dir=None,
+        tools_dir=None,
         vlm_dir=None,
         log=lambda text: None,
         emit=lambda message: None,
@@ -623,7 +623,7 @@ def session_for(profile, tmp_path, monkeypatch):
         monkeypatch.setattr(llm, "gemini_client", lambda: client)
         backends = use_fake_backend(monkeypatch)
         executors = use_fake_executor(monkeypatch, **{"wait": True, **(executor_kwargs or {})})
-        session = Session(profile, FakeRuntime(tmp_path / "runtime"), task=TASK, record=record)
+        session = Session(profile, task=TASK, record=record)
         session.start()
         assert wait_for(lambda: session.state is State.AWAITING_TASK), f"stuck in {session.state}"
         made.append(session)
@@ -712,7 +712,7 @@ def test_teleop_that_this_machine_lacks_is_not_offered(profile, tmp_path, monkey
     monkeypatch.setattr(settings_mod, "load", lambda: cfg)
     monkeypatch.setattr(secrets, "gemini_api_key", lambda: "test-key")
     use_fake_backend(monkeypatch)
-    session = Session(profile, FakeRuntime(tmp_path / "runtime"), task=TASK)
+    session = Session(profile, task=TASK)
     session.start()
     try:
         assert wait_for(lambda: session.state is State.AWAITING_TASK)
@@ -736,7 +736,7 @@ def test_an_executor_the_profile_names_that_cannot_load_stops_the_session_before
     profile.hitl.human_executor = "broken"
     monkeypatch.setattr(secrets, "gemini_api_key", lambda: "test-key")
     backends = use_fake_backend(monkeypatch)
-    session = Session(profile, FakeRuntime(tmp_path / "runtime"), task=TASK)
+    session = Session(profile, task=TASK)
     with pytest.raises(TandemError, match="could not be loaded"):
         session.start()
     assert not backends, "a planner was built for a session that could never carry out a human phase"
@@ -832,7 +832,7 @@ def test_each_teleop_handoff_follows_its_own_events_file(profile, tmp_path, monk
         if message.get("type") == "teleop_event" and message.get("event") == "rollout_start":
             started.append(message)
 
-    session = Session(profile, FakeRuntime(tmp_path / "runtime"), task=TASK)
+    session = Session(profile, task=TASK)
     session.subscribe(on_message)
     session.start()
     try:

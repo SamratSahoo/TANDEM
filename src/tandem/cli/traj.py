@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import subprocess
 import sys
 
 import typer
@@ -169,28 +168,20 @@ def remove(
     theme.ok(f"Deleted {traj.id}")
 
 
-@app.command("open", help="Replay a trajectory's plan in Rerun (3D).")
+@app.command("open", help="Replay a trajectory in its planner's own viewer.")
 def open_(
     traj_id: str = typer.Argument(..., help="Timestamp id, or a unique prefix."),
     profile_name: str = typer.Option(None, "--profile", "-p", help="Profile name."),
 ) -> None:
-    """Runs tiptop's viz-tiptop-run inside the built runtime — it needs cuRobo and cuTAMP to
-    load the robot model and the saved TAMP environment."""
-    from tandem.core import runtime as runtime_mod
+    """The viewer is the planner's (the profile's planner): TiPToP's replays the saved plan in Rerun,
+    inside its runtime, since it needs cuRobo and cuTAMP to load the robot model and the TAMP scene."""
+    from tandem.planners import registry
 
     profile = profiles.load(profile_name)
     traj = trajectories.find(profile, traj_id)
-    if not traj.has_plan:
-        raise TandemError(
-            f"{traj.id} has no {trajectories.PLAN_FILE}, so there is no plan to replay.",
-            hint="Only rollouts whose planning succeeded record one.",
-        )
-
     cfg = settings_mod.load()
-    runtime = runtime_mod.Runtime(cfg.resolved_runtime_dir())
-    runtime.require_ready()
-    theme.busy("Opening Rerun", str(traj.path))
-    subprocess.call(runtime.command(["viz-tiptop-run", str(traj.path)]), cwd=str(runtime.tiptop_dir))
+    theme.busy(f"Opening {traj.id} with {profile.planner.backend}", str(traj.path))
+    registry.replay(profile.planner.backend, traj.path, settings=cfg)
 
 
 @app.command("path", help="Print a trajectory's directory.")
@@ -213,6 +204,7 @@ def merge(
     """Normally automatic — a session merges as soon as you label the trajectory. Use this to
     retry after a failure; the merge never partially writes, so the legs are always intact."""
     from tandem.core import merge as merge_mod
+    from tandem.planners import registry
 
     profile = profiles.load(profile_name)
     cfg = settings_mod.load()
@@ -225,7 +217,7 @@ def merge(
     for target in targets:
         try:
             result = merge_mod.merge(
-                profile, target, status=status, runtime_dir=cfg.resolved_runtime_dir()
+                profile, target, status=status, tools_dir=registry.tools_dir(profile.planner.backend, cfg)
             )
         except merge_mod.MergeError as exc:
             raise TandemError(

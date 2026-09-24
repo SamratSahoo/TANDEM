@@ -2,17 +2,17 @@
 
 A bump of the planner changes three things on tandem's side, and each can go wrong without an error:
 
-- the ``tamp:`` keys a profile may set (core/tamp_keys.py). A key tiptop reads that tandem rejects
+- the ``tamp:`` keys a profile may set (planners/tiptop/tamp_keys.py). A key tiptop reads that tandem rejects
   makes a real config fail to import; a key tandem accepts that tiptop no longer reads -- or reads
   only in its own interactive loop, which tandem does not run -- is a setting that does nothing.
-- where the perception knobs land in the tiptop.yml tandem renders (core/render.py).
+- where the perception knobs land in the tiptop.yml tandem renders (planners/tiptop/render.py).
 - the TAMP config the sidecar builds at warm-up (planners/tiptop/sidecar.py). A knob tiptop's own
   entrypoint threads into ``build_tamp_config`` and the sidecar does not is validated, passed on,
   and then quietly ignored by every plan.
 
 The checks that need the planner's own source read it where tests/planner_sources.py finds it: CI's
 planner-sources job fetches the pinned trees, and a workstation with a built runtime uses that.
-The rest run anywhere, including against four of the monorepo's cfg/tamp files kept as fixtures
+The rest run anywhere, including against the monorepo's cfg/tamp files kept as fixtures
 (tests/fixtures/cfg_tamp, copied verbatim from hitl-tamp-vla 90671e1).
 """
 
@@ -26,9 +26,9 @@ import pytest
 from planner_sources import planner_sources
 from ruamel.yaml import YAML
 
-from tandem.core import render, tamp_keys
-from tandem.core.profiles import validate_tamp
+from tandem.planners.tiptop import render, tamp_keys
 from tandem.planners.tiptop.backend import sidecar_path
+from tandem.planners.tiptop.options import options_of, validate_tamp
 
 FIXTURES = Path(__file__).parent / "fixtures" / "cfg_tamp"
 _yaml = YAML(typ="safe")
@@ -477,17 +477,18 @@ def test_the_new_knobs_accept_their_meaningful_edge_values():
 
 
 def test_perception_knobs_set_in_tamp_land_where_tiptop_reads_them(profile, tmp_path):
-    profile.tamp = validate_tamp(
+    profile.planner.options["tamp"] = validate_tamp(
         {"m2t2_num_runs": 60, "grasp_threshold": 0.02, "voxel_downsample_size": 0.005}
     )
+    options = options_of(profile)
     rendered = render.render_tiptop_config(profile)
     m2t2 = rendered["perception"]["m2t2"]
     assert m2t2["num_runs"] == 60 and m2t2["grasp_threshold"] == 0.02
-    assert m2t2["url"] == profile.perception.m2t2.url, "the rest of the block is untouched"
+    assert m2t2["url"] == options.perception.m2t2.url, "the rest of the block is untouched"
     # The tamp value wins over the profile's perception block, as tiptop's own override does.
-    assert profile.perception.voxel_downsample_size == 0.0075
+    assert options.perception.voxel_downsample_size == 0.0075
     assert rendered["perception"]["voxel_downsample_size"] == 0.005
-    assert rendered["perception"]["contact_threshold_m"] == profile.perception.contact_threshold_m
+    assert rendered["perception"]["contact_threshold_m"] == options.perception.contact_threshold_m
 
     # Through the file tiptop actually loads, with the int still an int.
     written = _yaml.load(render.write_tiptop_config(profile, tmp_path / "tiptop.yml").read_text())
@@ -499,7 +500,7 @@ def test_perception_knobs_set_in_tamp_land_where_tiptop_reads_them(profile, tmp_
 
 
 def test_unset_perception_knobs_leave_tiptops_own_defaults_in_force(profile):
-    profile.tamp = {}
+    profile.planner.options["tamp"] = {}
     m2t2 = render.render_tiptop_config(profile)["perception"]["m2t2"]
     assert "num_runs" not in m2t2 and "grasp_threshold" not in m2t2
 
@@ -524,7 +525,7 @@ def test_unset_perception_knobs_leave_tiptops_own_defaults_in_force(profile):
     ],
 )
 def test_a_knob_read_only_behind_another_says_when_it_does_nothing(profile, tamp, warning):
-    profile.tamp = validate_tamp(tamp)
+    profile.planner.options["tamp"] = validate_tamp(tamp)
     problems = render.check_assets(profile)
     assert any(warning in p for p in problems), problems
     assert not any(p.startswith("no camera extrinsics") for p in problems)
@@ -532,7 +533,9 @@ def test_a_knob_read_only_behind_another_says_when_it_does_nothing(profile, tamp
 
 def test_the_monorepo_v3_settings_raise_none_of_those_warnings(profile):
     raw = _fixture_overrides("4_bread_box_v3.yml")
-    profile.tamp = validate_tamp({k: v for k, v in raw.items() if not k.startswith("placement_")})
+    profile.planner.options["tamp"] = validate_tamp(
+        {k: v for k, v in raw.items() if not k.startswith("placement_")}
+    )
     problems = [p for p in render.check_assets(profile) if "vae_path does not exist" not in p]
     assert problems == []
 

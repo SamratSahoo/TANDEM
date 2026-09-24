@@ -22,7 +22,7 @@ from unittest import mock
 import pytest
 from fake_backend import FakeBackend
 from fake_executor import FakeExecutor, use_fake_executor
-from helpers import FakeRuntime, use_fake_backend, wait_for
+from helpers import use_fake_backend, wait_for
 
 from tandem.core import events as events_mod
 from tandem.core import secrets
@@ -563,7 +563,7 @@ def session_for(profile, tmp_path, monkeypatch):
         camera = Camera(plan, answers)
         monkeypatch.setattr(llm, "gemini_client", lambda: camera)
         backends = use_fake_backend(monkeypatch)
-        session = Session(profile, FakeRuntime(tmp_path / "runtime"), task="put the toy in the box")
+        session = Session(profile, task="put the toy in the box")
         states: list[str] = []
         session.subscribe(
             lambda message: states.append(message["state"]) if message.get("type") == "state" else None
@@ -588,9 +588,9 @@ def merges(monkeypatch):
     real = merge_mod.merge
     calls: list[tuple[str, str | None]] = []
 
-    def spy(profile, trajectory_id, *, status=None, runtime_dir=None):
+    def spy(profile, trajectory_id, *, status=None, tools_dir=None):
         calls.append((trajectory_id, status))
-        return real(profile, trajectory_id, status=status, runtime_dir=runtime_dir)
+        return real(profile, trajectory_id, status=status, tools_dir=tools_dir)
 
     monkeypatch.setattr(merge_mod, "merge", spy)
     return calls

@@ -97,7 +97,7 @@ def merge_trajectory(
     status: str | None,
     plan: PhasePlan | None = None,
     *,
-    runtime_dir: Path | None,
+    tools_dir: Path | None,
     vlm_dir: Path | None,
     log: Callable[[str], None],
     emit: Callable[[dict], None],
@@ -116,7 +116,7 @@ def merge_trajectory(
 
     episode_dir = promote_primary_leg(profile, trajectory_id, status, log=log)
     try:
-        result = merge_mod.merge(profile, trajectory_id, status=status, runtime_dir=runtime_dir)
+        result = merge_mod.merge(profile, trajectory_id, status=status, tools_dir=tools_dir)
     except Exception as exc:
         log(f"could not merge trajectory {trajectory_id}: {exc}")
         log(f"the legs are intact; retry with: tandem traj merge {trajectory_id}")

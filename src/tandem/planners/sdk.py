@@ -40,8 +40,17 @@ What the base class supplies, and why each default is the one it is:
 - **It is its own factory.** ``info``, ``capabilities()``, ``create(ctx)`` and ``runtime(settings)``
   are class-level, so the class itself satisfies ``BackendFactory`` and the registry uses it as one
   (it does NOT instantiate it to get a factory: an instance is a backend, built per session).
-  ``create(ctx)`` refuses a ``planner.options`` key the class does not declare in ``OPTIONS`` and then
-  calls ``cls(ctx)``; override it when construction needs more than the context.
+  ``create(ctx)`` checks the context's ``planner.options`` (``validate_options``) and then calls
+  ``cls(ctx)`` with them as checked; override it when construction needs more than the context.
+- **Its options are its own.** ``OPTIONS`` names the ``planner.options`` keys it reads, one line each,
+  and the default ``validate_options`` refuses any other -- when a profile naming the planner loads,
+  not when a session starts. A planner whose options have structure (types, ranges, nested blocks)
+  overrides ``validate_options`` to check and normalise them; TiPToP's is a pydantic model.
+- **What else tandem asks it has a default too.** ``describe_options`` lists its options as they are
+  (`tandem profile show`, the web editor); ``doctor_checks`` adds nothing to `tandem doctor` beyond
+  its runtime, which doctor checks for every planner; ``replay`` says it has no viewer; ``importer``
+  and ``presets_dir`` are None. Override one when the planner has something to say: a server it
+  calls, a GPU it needs, the settings an experiment was run with.
 - **The declarations are checked when the class is defined**, not when a session first reads them.
   A moved argument that points at a surface, a wire name for a predicate that does not exist, a
   prompt slot misspelt -- each is a planner that would load, list and start, and then plan the wrong
@@ -81,6 +90,7 @@ from tandem.planners.base import (
     ExecuteResult,
     GoalAtom,
     LegSpec,
+    OptionsView,
     PlannerInfo,
     PlanResult,
     SceneView,
@@ -428,11 +438,17 @@ class Planner(abc.ABC):
     #: steps. None for a pure-Python planner. ``info.sources`` is filled in from it when left empty.
     recipe: ClassVar[RuntimeRecipe | None] = None
     #: The ``planner.options`` keys it reads, each with one line saying what it does. Anything else
-    #: in a profile's options is refused by ``create`` rather than ignored: an option that silently
-    #: does nothing is a setting the operator believes is in force and is not.
+    #: in a profile's options is refused (``validate_options``) rather than ignored: an option that
+    #: silently does nothing is a setting the operator believes is in force and is not.
     OPTIONS: ClassVar[Mapping[str, str]] = {}
     #: The backend's name, as ``TampBackend`` has it. Defaults to ``info.name``.
     name: ClassVar[str] = ""
+    #: Builds a profile from this planner's own older configuration (``base.ProfileImporter``), for
+    #: `tandem profile create --import-from`. None: there is nothing to import from.
+    importer: ClassVar[Any] = None
+    #: A directory of presets for this planner's ``planner.options`` (``<name>.yml``, laid out as
+    #: ``tandem.core.presets`` says), for `tandem profile create --preset NAME`. None: it ships none.
+    presets_dir: ClassVar[Path | None] = None
 
     # Set per class by __init_subclass__: whether this class is a base rather than a planner.
     _planner_base: ClassVar[bool] = True
@@ -472,9 +488,23 @@ class Planner(abc.ABC):
 
     @classmethod
     def create(cls, ctx: BackendContext) -> Planner:
-        """The backend a session drives, not yet warmed. Refuses options the class does not read."""
-        cls.check_options(ctx.options)
-        return cls(ctx)
+        """The backend a session drives, not yet warmed, built with its options as ``validate_options`` left them."""
+        return cls(replace(ctx, options=cls.validate_options(ctx.options)))
+
+    @classmethod
+    def validate_options(cls, options: Mapping[str, Any] | None) -> dict[str, Any]:
+        """``planner.options`` as this planner reads them: every key checked, defaults filled in.
+
+        Called when a profile naming the planner loads -- so a mistake is found when the profile is
+        edited, not when a session starts -- and again by ``create``. What it returns is what the
+        profile stores and what ``self.options`` is. The default refuses any key ``OPTIONS`` does not
+        name and returns the rest unchanged. Override it for options with structure or types (a
+        pydantic model is the natural tool) and raise ``TandemError``, or ``ValueError`` -- a pydantic
+        ``ValidationError`` is one -- naming what is wrong. It must accept its own output unchanged:
+        a saved profile is validated again when it is read back.
+        """
+        cls.check_options(options)
+        return dict(options or {})
 
     @classmethod
     def runtime(cls, settings: Any = None) -> BackendRuntime | None:
@@ -491,6 +521,31 @@ class Planner(abc.ABC):
         from tandem.planners.runtime import default_root
 
         return default_root(cls.info.name)
+
+    @classmethod
+    def describe_options(cls, profile: Any, *, settings: Any = None) -> OptionsView:
+        """A profile's options as a person reads them. Default: each one, as it is set."""
+        options = dict(getattr(getattr(profile, "planner", None), "options", None) or {})
+        return OptionsView.generic(options, cls.OPTIONS)
+
+    @classmethod
+    def doctor_checks(cls, profile: Any, *, settings: Any = None, probe_hardware: bool = True) -> list:
+        """Rows for `tandem doctor`, as ``tandem.core.probe.Check``: what this planner needs of the machine.
+
+        ``profile`` is None for `tandem init`'s preflight, before a profile exists: check the machine
+        only. ``probe_hardware`` False means touch nothing on the network or the bus (`--no-hardware`).
+        A FAIL is something that stops a session; a WARN something that will cost one later. Default:
+        nothing -- doctor already reports the planner's runtime, as it does for every planner.
+        """
+        return []
+
+    @classmethod
+    def replay(cls, rollout_dir: Path, *, settings: Any = None) -> None:
+        """Open a leg this planner recorded in its own viewer. Unsupported unless implemented."""
+        raise UnsupportedVerb(
+            f"The {cls.info.title} planner has no viewer to replay a trajectory in.",
+            hint="`tandem ui` shows every trajectory's cameras and robot state, whichever planner recorded it.",
+        )
 
     @classmethod
     def check_options(cls, options: Mapping[str, Any] | None) -> None:

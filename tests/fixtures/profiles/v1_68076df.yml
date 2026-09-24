@@ -1,0 +1,119 @@
+# ─────────────────────────────────────────────────────────────────────────────────────────
+#  tandem profile
+#
+#  A profile is one collection setup — the robot, the cameras, the task, the TAMP settings —
+#  together with every trajectory collected under it. Trajectories live beside this file in
+#  trajectories/{eval,success,failure}/<timestamp>/.
+#
+#  Edit with `tandem profile edit <name>`; it re-validates on save and refuses to write a
+#  file that would fail at session start.
+# ─────────────────────────────────────────────────────────────────────────────────────────
+version: 1
+name: default
+description: Franka FR3 + Robotiq 2F-85
+
+task:
+  # The language label stored with every episode — what a policy trained on this data reads.
+  prompt: Place the toys on the plate with no collisions
+  # The goal handed to the planner, when it has to differ from the label above (e.g. the
+  # demonstration does something the on()/holding() goal language cannot express). Leave
+  # null and the two are the same thing.
+  goal: null
+  target_episodes: 20
+
+robot:
+  type: fr3_robotiq           # fr3_robotiq | ur5 | franka | panda_robotiq
+  dof: 7
+  host: 172.16.0.2            # the NUC running the bamboo-polymetis shim
+  port: 5555                  # control
+  gripper_port: 5559
+  # The shim's --state-port. Encoders are read here while the control thread is parked in a
+  # blocking move; without it, capture aborts rather than falling back to plan positions.
+  state_port: 5557
+  # BE CAUTIOUS. 0.2 is 20% speed. Raise it only once you trust the setup.
+  time_dilation_factor: 0.2
+  q_home: [0.0, -0.628, 0.0, -2.513, 0.0, 1.885, 0.0]
+  q_capture: [-0.034, 0.09, 0.08, -1.319, -0.003, 1.253, 0.03]
+
+cameras:
+  # Which camera perception reads.
+  #   external  a static third-person camera. Its pose comes straight from calibration, so
+  #             the arm stays at q_home instead of driving into the shot.
+  #   hand      the wrist camera. Its pose is only known through the arm, so the arm first
+  #             drives to q_capture and the pose is recomputed by forward kinematics.
+  # Either way both cameras are opened and recorded.
+  perception: external
+  hand:
+    serial: '14846828'
+    type: zed
+    resolution: HD720
+    # 15, not 30 — three ZEDs at HD720@30 exceed the USB bandwidth budget and fail to open.
+    # The export resamples to 15 Hz anyway, so nothing is lost.
+    fps: 15
+  external:
+    serial: '32439448'
+    type: zed
+    resolution: HD720
+    fps: 15
+  # A second exterior camera, recorded as DROID exterior_2. Leave it out for a deliberate
+  # two-camera rig: when it IS listed but fails to open, collection aborts before any
+  # rollout rather than quietly record an episode with a camera missing.
+  # external_2:
+  #   serial: '31425515'
+  #   type: zed
+  #   resolution: HD720
+  #   fps: 15
+
+perception:
+  gemini:
+    model: gemini-robotics-er-1.6-preview
+    temperature: null
+  m2t2:
+    url: http://localhost:8123
+    apply_bounds: true
+  sam_mode: local
+  # Frames grabbed back-to-back at the capture pose and per-pixel median-fused to suppress
+  # depth noise. 1 disables smoothing.
+  depth_smoothing_frames: 5
+  # Padding on the robot's collision spheres before they are projected out of a third-person
+  # point cloud. Raise it if a rim of arm survives in the cloud.
+  robot_mask_margin_m: 0.02
+  depth_trunc_m: 5.0
+  voxel_downsample_size: 0.0075
+  contact_threshold_m: 0.01
+  mask_erosion_pixels: 3
+
+# ─────────────────────────────────────────────────────────────────────────────────────────
+#  TAMP settings
+#
+#  These are passed straight through to the planner. The key names are tiptop's own, so
+#  anything documented upstream works here verbatim and an existing cfg/tamp/*.yml can be
+#  pasted in unchanged. Unknown keys are rejected at load time — a silently ignored override
+#  is the one failure mode that looks like success.
+#
+#  Run `tandem profile show <name> --tamp` to see exactly what the planner will receive.
+# ─────────────────────────────────────────────────────────────────────────────────────────
+tamp:
+  # Solver effort. More particles cover the grasp/placement space better per skeleton; more
+  # steps optimize each skeleton harder. Both cost GPU memory and planning time.
+  num_particles: 256
+  opt_steps_per_skeleton: 250
+
+  # Charge each move the infinity-norm ||q1 - q2||_inf (max joint displacement) instead of
+  # the default Euclidean distance. Must be the string "inf" — this round-trips through JSON,
+  # which has no Infinity literal. tandem accepts `inf`, `.inf` or `infinity` and normalises.
+  traj_length_norm: inf
+
+  # Prefer grasps that reorient the wrist less: weight on the geodesic angle between each
+  # grasp's EE orientation and the arm's initial one. Absent or 0 disables it.
+  grasp_pose_change_weight: 0.1
+
+# recording: whether camera video is captured during execution, and at what rate.
+recording:
+  enabled: true
+  fps: 15
+
+# Where `tandem export lerobot` pushes. Leave hf_repo blank until you need it.
+export:
+  hf_repo: ''
+  private: false

@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from helpers import FakeRuntime, use_fake_backend, wait_for
+from helpers import use_fake_backend, wait_for
 
 from tandem.core import secrets
 from tandem.core.errors import SessionConflict
@@ -28,8 +28,7 @@ def backends(monkeypatch):
 @pytest.fixture
 def live_session(profile, tmp_path, monkeypatch, backends):
     monkeypatch.setattr(secrets, "gemini_api_key", lambda: "test-key")
-    runtime = FakeRuntime(tmp_path / "runtime")
-    session = Session(profile, runtime, task="pick up the block")
+    session = Session(profile, task="pick up the block")
     session.start()
     assert wait_for(lambda: session.state is State.AWAITING_TASK), f"stuck in {session.state}"
     yield session
@@ -108,7 +107,7 @@ def test_the_leg_is_stamped_with_the_trajectory_tandem_minted(live_session, back
 
 def test_max_episodes_stops_the_session(profile, tmp_path, monkeypatch, backends):
     monkeypatch.setattr(secrets, "gemini_api_key", lambda: "test-key")
-    session = Session(profile, FakeRuntime(tmp_path / "runtime"), task="one", max_episodes=1)
+    session = Session(profile, task="one", max_episodes=1)
     session.start()
     assert wait_for(lambda: session.state is State.AWAITING_TASK)
     session.next_task()
@@ -169,7 +168,7 @@ def test_the_planner_is_always_closed_even_when_the_session_fails(profile, tmp_p
             raise RuntimeError("the camera fell off")
 
     built = use_fake_backend(monkeypatch, backend_type=Exploding)
-    session = Session(profile, FakeRuntime(tmp_path / "runtime"), task="x")
+    session = Session(profile, task="x")
     session.start()
     assert wait_for(lambda: session.state is State.AWAITING_TASK)
     session.next_task()
@@ -193,13 +192,12 @@ def test_manager_refuses_a_second_session_for_a_profile(profile, tmp_path, monke
     from tandem.core.session import SessionManager
 
     monkeypatch.setattr(secrets, "gemini_api_key", lambda: "test-key")
-    runtime = FakeRuntime(tmp_path / "runtime")
     manager = SessionManager()
-    first = manager.create(profile, runtime, task="one")
+    first = manager.create(profile, task="one")
     try:
         assert wait_for(lambda: first.state is State.AWAITING_TASK)
         with pytest.raises(SessionConflict, match="already running"):
-            manager.create(profile, runtime, task="two")
+            manager.create(profile, task="two")
     finally:
         manager.shutdown()
 

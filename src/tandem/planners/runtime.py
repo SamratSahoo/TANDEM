@@ -11,7 +11,7 @@ own -- runs inside a runtime, and this module builds one from a ``RuntimeRecipe`
 - small files the planner package ships itself and the runtime needs at a fixed place.
 
 Nothing here knows any particular planner. TiPToP's recipe is ``tandem/planners/tiptop/recipe.py``;
-another planner declares its own the same way, and ``tandem runtime build`` installs it unchanged.
+another planner declares its own the same way, and ``tandem planners install NAME`` installs it unchanged.
 
 **Sources are fetched at install, not shipped in the wheel.** ``git fetch --depth 1 <url> <commit>``
 into a scratch repository, then ``git archive`` of exactly that commit, so no VCS state and no build
@@ -20,7 +20,7 @@ the same commit over HTTPS instead. Either way the commit is checked: git names 
 fetched, and ``git archive`` stamps the commit into the tarball it makes -- GitHub's archive included.
 
 **An offline machine installs from a directory instead.** ``TANDEM_PLANNER_SOURCES``, or
-``tandem runtime build --sources DIR``, names a directory holding one checkout or export per source,
+``tandem planners install NAME --sources DIR``, names a directory holding one checkout or export per source,
 named as the recipe names them. A checkout is used as an object store: the pinned commit is exported
 out of it, whatever its working tree holds. An export made by ``tools/bundle.py`` carries a marker
 naming its commit, which has to be the pinned one. A bare directory with neither is taken on trust
@@ -804,9 +804,15 @@ class RecipeRuntime:
             prefix = self.env_prefix
             raise RuntimeNotReady(
                 f"No interpreter at {prefix / 'bin' / 'python' if prefix else self.root}.",
-                hint="Run `tandem runtime build`.",
+                hint=f"Run `tandem planners install {self.recipe.planner}`.",
             )
         return path
+
+    @property
+    def bin_dir(self) -> Path | None:
+        """The built environment's bin directory -- its own ffmpeg, say -- or None before it is built."""
+        python = self._env_python()
+        return python.parent if python is not None else None
 
     def _env_python(self) -> Path | None:
         """The environment's interpreter, in its home -- or where a runtime built before the environment
