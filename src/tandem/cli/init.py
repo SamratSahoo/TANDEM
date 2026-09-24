@@ -1,23 +1,30 @@
 """`tandem init` — the onboarding wizard.
 
+It sets the machine up -- the planner and its runtime, the Gemini key, the rig (the robot's address,
+the arm, the cameras), teleop -- and adds the paper's five tasks as profiles. Everything a profile holds
+is a task; everything asked about this machine goes to the rig, which every profile shares.
+
 Idempotent and resumable: every step checks its own postcondition first and says
 "already done" rather than redoing work. Interrupting it and re-running is safe — cuRobo's
 build fingerprint means even the expensive kernel compile is skipped when nothing changed.
+Without a terminal (or with --yes) it asks nothing: --robot-host, --robot-type and --camera say
+what it would have asked.
 """
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any
 
 import typer
 
-from tandem import resources
 from tandem.cli import runtime as runtime_cli
 from tandem.cli import theme
 from tandem.core import layout, paths, probe, profiles, secrets
+from tandem.core import rig as rig_mod
 from tandem.core import settings as settings_mod
-from tandem.core.errors import TandemError, one_line
+from tandem.core.errors import ProfileError, TandemError, one_line
 from tandem.planners import registry
 
 
@@ -31,24 +38,31 @@ def init(
     repair: bool = typer.Option(
         False,
         "--repair",
-        help="Redo steps that are already done: rebuild the planner's runtime, and ask again for the key "
-        "and the teleop settings. An existing profile is never touched by it.",
+        help="Redo steps that are already done: rebuild the planner's runtime, and ask again for the key, "
+        "the robot and cameras, and the teleop settings. No profile is ever touched by it.",
     ),
-    profile_name: str = typer.Option("default", "--profile", help="Name for the profile to create."),
     planner: str = typer.Option(
         None,
         "--planner",
-        help="The planner the profile plans with, and whose runtime is built (see `tandem planners list`). "
-        "Default: the profile's own, or for a new one the machine's default (tiptop).",
+        help="The planner to set this machine up for, and the one new profiles get (see `tandem planners "
+        "list`). Default: the machine's default (tiptop).",
     ),
-    preset: str = typer.Option(
+    profile_name: str = typer.Option(
+        None, "--profile", help="Make this profile the active one (default: keep it, else cover-bread-rolls)."
+    ),
+    robot_host: str = typer.Option(
+        None, "--robot-host", help="The robot computer's address (the NUC), such as 172.16.0.2."
+    ),
+    robot_type: str = typer.Option(None, "--robot-type", help="The arm, such as fr3_robotiq or panda_robotiq."),
+    cameras: list[str] = typer.Option(
         None,
-        "--preset",
-        help="Lay a named preset over the profile init creates, such as `paper` (the paper's collection "
-        "settings). `tandem profile presets` lists them. An existing profile is left as it is.",
+        "--camera",
+        help="A camera's serial by role: hand=SERIAL, external=SERIAL or external_2=SERIAL. Repeatable.",
     ),
 ) -> None:
     interactive = theme.is_tty() and not yes
+    # Checked before anything is asked or built: a typo in a flag is said now, not after a twenty-minute build.
+    rig_flags = _rig_flags(robot_host=robot_host, robot_type=robot_type, cameras=cameras or [])
     theme.banner("setup")
 
     cfg = settings_mod.load()
@@ -103,20 +117,30 @@ def init(
             )
         theme.blank()
 
+    # After the data root is settled and old profiles are moved, before twenty minutes go into a build.
+    if profile_name is not None:
+        _check_profile_to_activate(profile_name)
+
     # ---- 4. the planner -----------------------------------------------------
-    # Chosen before anything is built: the runtime step builds THIS planner's runtime, and the profile
-    # step creates the profile with it. A laptop builds nothing, so it is only shown the choice it
-    # made on the command line, if any.
+    # Chosen before anything is built: the runtime step builds THIS planner's runtime, and the rig step
+    # adds its machine settings. A laptop builds nothing; a planner named on its command line is still
+    # made the one its new profiles get.
     if not viz_only:
         theme.rule("planner")
-        planner = _choose_planner(profile_name, planner, interactive=interactive)
+        planner = _choose_planner(planner, interactive=interactive)
         _planner_preflight(planner, interactive=interactive, repair=repair)
         theme.blank()
+    if planner is not None:
+        from tandem.cli import planners as planners_cli
+
+        # The planner this machine is for, so the one its new profiles get. No existing profile is
+        # switched: that is `tandem planners use`, and a profile's planner is its own.
+        planners_cli.set_default_planner(planner)
 
     # ---- 5. the planner's runtime -------------------------------------------
     if not viz_only:
         theme.rule("planner runtime")
-        _build_runtime(profile_name, interactive=interactive, repair=repair, planner=planner)
+        _build_runtime(planner, interactive=interactive, repair=repair)
         theme.blank()
 
     # ---- 6. the Gemini key --------------------------------------------------
@@ -141,75 +165,56 @@ def init(
             theme.warn("No key set", "run `tandem config set-gemini-key`")
     theme.blank()
 
-    # ---- 7. the first profile -----------------------------------------------
-    theme.rule("profile")
-    # An existing profile is kept, --repair or not: it is somebody's collection setup (phase planning on,
-    # a preset's settings, the rig's cameras), and rebuilding it from the template to repair a runtime
-    # would lose all of it without a word. It is only pointed at the planner init was asked to set up.
-    if profiles.exists(profile_name):
-        theme.ok(f"Profile {profile_name!r} already exists", str(profiles.path_of(profile_name)))
-        if planner is not None:
-            _switch_planner(profile_name, planner)
-        if preset:
-            theme.warn(
-                f"--preset {preset} was not applied to the existing profile {profile_name!r}",
-                f"`tandem profile create NEW --from {profile_name} --preset {preset}` makes a copy with it",
-            )
-    else:
-        _create_profile(
-            profile_name,
-            interactive=interactive,
-            viz_only=viz_only,
-            planner=planner,
-            preset=preset,
+    # ---- 7. the rig: this machine's robot and cameras -----------------------
+    if not viz_only:
+        theme.rule("robot and cameras")
+        _setup_rig(planner, rig_flags, interactive=interactive, repair=repair)
+        theme.blank()
+    elif rig_flags:
+        theme.warn(
+            "--robot-host, --robot-type and --camera were not applied",
+            "a visualization-only machine has no robot; `tandem rig set` sets them on one that does",
         )
-    cfg = settings_mod.load()
-    cfg.active_profile = profile_name
-    settings_mod.save(cfg)
+
+    # ---- 8. the paper's five tasks, and the active profile ------------------
+    theme.rule("profiles")
+    active = _setup_profiles(profile_name)
+    if planner is not None and not viz_only:
+        _say_when_the_planners_differ(active, planner)
     theme.blank()
 
-    # ---- 8. teleop hand-off (optional) --------------------------------------
+    # ---- 9. teleop hand-off (optional) --------------------------------------
     if not viz_only:
         theme.rule("teleop hand-off  (optional)")
         _setup_teleop(interactive=interactive, repair=repair)
         theme.blank()
 
-    # ---- 9. done ------------------------------------------------------------
-    _summary(viz_only=viz_only, profile_name=profile_name)
+    # ---- 10. done -----------------------------------------------------------
+    _summary(viz_only=viz_only, profile_name=active, planner=planner)
 
 
 # --------------------------------------------------------------------------- steps
 
 
-def _choose_planner(profile_name: str, requested: str | None, *, interactive: bool) -> str:
+def _choose_planner(requested: str | None, *, interactive: bool) -> str:
     """Which planner this machine is set up for: the catalog shown, one chosen, and checked.
 
-    ``--planner`` wins. Otherwise a profile that already exists keeps the planner it names -- init is
-    re-run on a working machine, and must not quietly swap its planner -- and a new one gets the
-    machine's default, or, at a terminal with more than one planner to choose from, the one picked.
-    The choice is checked against the registry here, before twenty minutes go into a runtime.
+    ``--planner`` wins; otherwise the machine's default, which at a terminal with more than one planner
+    to choose from is offered as the answer to a question. Whichever it is becomes the default, so a
+    re-run sets the same planner up again and new profiles plan with it. The choice is checked against
+    the registry here, before twenty minutes go into a runtime.
     """
     from tandem.cli import planners as planners_cli
-    from tandem.planners import registry
 
-    payload = planners_cli.catalog_payload(profile_name=profile_name)
+    payload = planners_cli.catalog_payload()
     planners_cli.render_catalog(payload["planners"])
     for row in payload["planners"]:
         if row["status"] == planners_cli.BROKEN:
             theme.fail(f"{row['name']}: {row['detail']}")
 
-    # Read as written: a profile naming a planner this machine does not have is exactly the one --planner
-    # is used to repair. Without --planner, that planner is what is checked below, and refused by name.
-    existing = (
-        profiles.load(profile_name, require_installed=False).planner.backend
-        if profiles.exists(profile_name)
-        else None
-    )
     usable = [row["name"] for row in payload["planners"] if row["ok"]]
     if requested:
         choice = requested
-    elif existing:
-        choice = existing
     elif interactive and len(usable) > 1:
         default = payload["default_planner"] if payload["default_planner"] in usable else usable[0]
         choice = typer.prompt("  Planner", default=default).strip()
@@ -217,34 +222,18 @@ def _choose_planner(profile_name: str, requested: str | None, *, interactive: bo
         choice = payload["default_planner"]
 
     info = registry.info(choice)  # unknown or broken: the registry's own error, with the nearest name
-    detail = f"profile {profile_name!r} plans with it" if existing == choice else choice
-    theme.ok(f"Planner: {info.title}", detail)
-    if existing and existing != choice:
-        theme.info(f"Profile {profile_name!r} plans with {existing} now; it will be switched to {choice}.")
+    theme.ok(f"Planner: {info.title}", "new profiles plan with it")
     return choice
 
 
-def _switch_planner(profile_name: str, planner: str) -> None:
-    """Point an existing profile at the planner init was asked to set up, saying what changed."""
-    from tandem.cli import planners as planners_cli
-
-    result = planners_cli.use_planner(planner, profile_name=profile_name)
-    if not result["changed"]:
-        return
-    theme.ok(f"Profile {profile_name!r} now plans with {result['display_name']}", f"was {result['previous']}")
-    planners_cli.describe_switch(result)
-
-
-def _build_runtime(profile_name: str, *, interactive: bool, repair: bool, planner: str | None = None) -> None:
-    """Build ``planner``'s runtime -- by default the one the profile uses, or a new profile would get.
+def _build_runtime(planner: str, *, interactive: bool, repair: bool) -> None:
+    """Build ``planner``'s runtime.
 
     The consent flow for pixi and the build itself are `tandem planners install`'s (``cli/runtime``),
     so the wizard and the command cannot drift apart. `init` is "accept every default" when it cannot
     ask, so without a terminal it installs pixi rather than failing.
     """
-    from tandem.planners import registry
-
-    planner, runtime = runtime_cli.planner_runtime(planner=planner, profile_name=profile_name)
+    planner, runtime = runtime_cli.planner_runtime(planner=planner)
     title = registry.info(planner).title
     if runtime is None:
         theme.ok(f"{title} is pure Python", "there is no runtime to build")
@@ -264,7 +253,6 @@ def _build_runtime(profile_name: str, *, interactive: bool, repair: bool, planne
         theme.warn("Skipped", f"run `tandem planners install {planner}` when you are ready")
     else:
         runtime_cli.run_build(runtime, force=repair, planner=planner)
-
 
 
 def _preflight(*, viz_only: bool) -> list[probe.Check]:
@@ -355,54 +343,233 @@ def _render_checks(checks: list[probe.Check]) -> None:
     theme.console().print(table)
 
 
-def _create_profile(
-    name: str,
-    *,
-    interactive: bool,
-    viz_only: bool = False,
-    planner: str | None = None,
-    preset: str | None = None,
-) -> None:
-    from tandem.cli import planners as planners_cli
-    from tandem.cli import profile as profile_cli
-    from tandem.core import presets
+# --------------------------------------------------------------------------- the rig
 
-    # Resolved before anything is written: a default naming a planner this machine no longer has
-    # stops here, not in a profile that every later command refuses.
-    planner = planners_cli.planner_for_new_profile(planner)
 
-    profile = profiles.load_file(resources.path("profile_template.yml"), name=name)
-    origin = "from the built-in template"
-    if viz_only:
-        # On a laptop a profile is just a folder of trajectories collected elsewhere.
-        profile.description = profile.description or "trajectories collected elsewhere"
+def _rig_flags(*, robot_host: str | None, robot_type: str | None, cameras: list[str]) -> dict[str, Any]:
+    """``--robot-host``, ``--robot-type`` and ``--camera ROLE=SERIAL`` as rig changes, each checked as typed."""
+    import difflib
 
-    typed = None
-    if interactive:
-        typed = typer.prompt("  Task prompt", default=profile.task.prompt).strip()
-        profile.task.prompt = typed
+    changes: dict[str, Any] = {}
+    if robot_host is not None:
+        changes["robot.host"] = _checked_rig_value("robot.host", robot_host)
+    if robot_type is not None:
+        changes["robot.type"] = _checked_rig_value("robot.type", robot_type)
+    for given in cameras:
+        role, sep, serial = given.partition("=")
+        role, serial = role.strip(), serial.strip()
+        if not sep or not serial:
+            raise TandemError(
+                f"--camera {given!r} is not ROLE=SERIAL.",
+                hint="For example --camera hand=14846828 --camera external=32439448.",
+            )
+        if role not in rig_mod.ROLES:
+            close = difflib.get_close_matches(role, rig_mod.ROLES, n=1, cutoff=0.5)
+            raise TandemError(
+                f"--camera {given!r}: {role!r} is not a camera role"
+                + (f" (did you mean {close[0]!r}?)." if close else "."),
+                hint=f"The roles are {', '.join(rig_mod.ROLES)}.",
+            )
+        changes[f"cameras.{role}.serial"] = _checked_rig_value(f"cameras.{role}.serial", serial)
+    return changes
 
-    # The planner init set this machine up for: a profile naming a different planner from the runtime just
-    # built would not collect. The template's options are TiPToP's, and go when the planner is another.
-    if profile.planner.backend != planner:
-        profile.planner = profiles.planner_spec(planner, profile=name)
-    # After the planner is settled, as `tandem profile create --preset` does: a preset is looked up for
-    # the profile's planner. The prompt typed above is this profile's own, and wins over the preset.
-    laid = None
-    if preset:
-        before = profile
-        profile = presets.apply(profile, preset)
-        changes = presets.differences(before.model_dump(mode="python"), profile.model_dump(mode="python"))
-        laid = (presets.layers(preset, profile.planner.backend), changes)
-        if typed:
-            profile.task.prompt = typed
-    path = profiles.save(profile)
 
-    theme.ok(f"Created profile {name!r}", origin)
-    theme.info(str(path))
-    if laid is not None:
-        profile_cli.show_preset(profile, *laid)
-    profile_cli.warn_planner_profile_checks(profile)
+def _checked_rig_value(key: str, value: str) -> str:
+    """``value`` for the rig's ``key``, or a TandemError saying what is wrong with it -- before it is written."""
+    from pydantic import ValidationError
+
+    field = key.rsplit(".", 1)[-1]
+    model = rig_mod.RobotSpec if key.startswith("robot.") else rig_mod.CameraSpec
+    try:
+        model.model_validate({field: value} if model is rig_mod.RobotSpec else {"serial": value})
+    except ValidationError as exc:
+        problem = "; ".join(str(err["msg"]).removeprefix("Value error, ") for err in exc.errors())
+        raise TandemError(f"{key}: {problem}") from None
+    return value.strip()
+
+
+def _setup_rig(planner: str, flags: dict[str, Any], *, interactive: bool, repair: bool) -> None:
+    """This machine's rig: the robot's address and arm, the cameras by role, and the planner's machine settings.
+
+    Asked at a terminal when there is no rig yet (and again with --repair), each question defaulting to
+    what the rig says now; the flags are applied either way, and are the defaults of the questions. One
+    write, validated whole. A rig already there is otherwise left as it is and shown: `tandem rig set`
+    changes one setting at any time.
+    """
+    from tandem.cli import rig as rig_cli
+
+    existed = rig_mod.exists()
+    rig = rig_mod.load()  # a rig.yml that does not validate stops here, naming the line and `tandem rig edit`
+    asked = interactive and (not existed or repair)
+    changes = dict(flags)
+    if asked:
+        changes.update(_ask_rig(rig, flags))
+    block = _planner_rig_defaults(planner, rig)
+    if block is not None:
+        changes[f"planners.{planner}"] = block
+    changes = {key: value for key, value in changes.items() if _differs(rig, key, value)}
+    if changes or not existed:
+        rig = rig_mod.update(changes)
+    rig_mod.ensure_calibration_file(rig)  # a planner's calibration script writes into it
+
+    theme.ok(
+        f"Rig: {rig.summary()}",
+        str(rig.file()) if asked or not existed else f"{rig.file()} · `tandem rig set KEY VALUE` changes a setting",
+    )
+    configured = rig.cameras.configured()
+    if configured:
+        missing = rig.missing_calibration()
+        theme.info(
+            "cameras: " + ", ".join(f"{role} {cam.serial}" for role, cam in configured.items()),
+            f"{len(configured) - len(missing)} of {len(configured)} with extrinsics in {rig.calibration_file()}",
+        )
+    else:
+        theme.warn(
+            "No cameras yet: this machine cannot collect until it has them",
+            "`tandem rig set cameras.hand.serial SERIAL` and `tandem rig set cameras.external.serial SERIAL`",
+        )
+    # What the planner says will stop it collecting on this rig -- extrinsics it reads that are missing, an arm
+    # it does not drive -- in its own words, with its own fix.
+    rig_cli.warn_planner_rig_checks()
+
+
+def _ask_rig(rig: rig_mod.Rig, flags: dict[str, Any]) -> dict[str, Any]:
+    """The rig's questions, each defaulting to what a flag gave, else to what the rig says now."""
+    changes: dict[str, Any] = {}
+    changes["robot.host"] = _ask("Robot address (the NUC)", "robot.host", flags.get("robot.host", rig.robot.host))
+    changes["robot.type"] = _ask("Arm type", "robot.type", flags.get("robot.type", rig.robot.type))
+    labels = {"hand": "Wrist camera serial", "external": "External camera serial", "external_2": "Second external camera serial"}
+    for role in rig_mod.ROLES:
+        cam = getattr(rig.cameras, role)
+        current = flags.get(f"cameras.{role}.serial", cam.serial if cam is not None else NONE)
+        serial = _ask(f"{labels[role]} ('{NONE}' if there is none)", f"cameras.{role}.serial", current, blank=True)
+        if serial == NONE:
+            changes[f"cameras.{role}"] = None
+        else:
+            changes[f"cameras.{role}.serial"] = serial
+    perception = rig.cameras.perception
+    while True:
+        answer = typer.prompt("  Which camera does perception read? [external/hand]", default=perception).strip()
+        if answer in ("external", "hand"):
+            break
+        theme.warn(f"{answer!r} is neither external nor hand")
+    changes["cameras.perception"] = answer
+    return changes
+
+
+#: What a camera question takes for "this machine has no such camera".
+NONE = "none"
+
+
+def _ask(label: str, key: str, default: str, *, blank: bool = False) -> str:
+    """One rig question, asked again until the answer is a value the rig takes."""
+    while True:
+        answer = typer.prompt(f"  {label}", default=default).strip()
+        if blank and answer.lower() in (NONE, ""):
+            return NONE
+        try:
+            return _checked_rig_value(key, answer)
+        except TandemError as exc:
+            theme.warn(exc.message)
+
+
+def _planner_rig_defaults(planner: str, rig: rig_mod.Rig) -> dict[str, Any] | None:
+    """The planner's machine settings with every default filled in, for a rig that has none of them yet.
+
+    Written into rig.yml so the settings a person may need to change -- a grasp server's address, the
+    robot shim's ports -- are there to read and edit. None when the rig has them already, or the planner
+    declares none. A planner that refuses to start from nothing (an address only its user can know) is
+    said to need them.
+    """
+    if planner in rig.planners:
+        return None
+    try:
+        declared = registry.rig_options_declared(planner)
+    except TandemError:
+        return None
+    if not declared:
+        return None
+    try:
+        return registry.validate_rig_options(planner, {})
+    except (TandemError, ValueError) as exc:
+        message = exc.message if isinstance(exc, TandemError) else one_line(str(exc))
+        theme.warn(
+            f"{registry.info(planner).title} needs machine settings that have no default: {message}",
+            f"`tandem rig set planners.{planner}.KEY VALUE`; `tandem planners info {planner}` lists them",
+        )
+        return None
+
+
+def _differs(rig: rig_mod.Rig, key: str, value: Any) -> bool:
+    """Whether setting ``key`` to ``value`` changes the rig: an unchanged answer leaves the file alone."""
+    node: Any = rig.model_dump(mode="python")
+    for part in key.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return value is not None
+        node = node[part]
+    return node != value
+
+
+# --------------------------------------------------------------------------- profiles
+
+
+def _setup_profiles(requested: str | None) -> str:
+    """Add the paper's five tasks that are missing, and settle the active profile. Returns its name.
+
+    `--profile` if given (it must exist), else the active profile when it exists, else the first of the
+    paper's. None of them is ever overwritten: once copied, a profile is its owner's.
+    """
+    written = profiles.seed_builtins()
+    if written:
+        theme.ok(
+            f"Added the paper's {'five tasks' if len(written) == len(profiles.BUILTIN) else ', '.join(written)}",
+            str(profiles.profiles_root()),
+        )
+    else:
+        theme.ok("The paper's five tasks are here", str(profiles.profiles_root()))
+
+    cfg = settings_mod.load()
+    if requested is not None:
+        _check_profile_to_activate(requested)
+        active = requested
+    elif profiles.exists(cfg.active_profile):
+        active = cfg.active_profile
+    else:
+        active = profiles.BUILTIN[0]
+    if cfg.active_profile != active:
+        cfg.active_profile = active
+        settings_mod.save(cfg)
+    theme.ok(f"Active profile: {active}", "`tandem profile use NAME` switches")
+    return active
+
+
+def _check_profile_to_activate(name: str) -> None:
+    """--profile names a profile that exists, or one of the paper's (which the profiles step adds)."""
+    if profiles.exists(name) or name in profiles.BUILTIN:
+        return
+    import difflib
+
+    known = sorted({*profiles.list_names(), *profiles.BUILTIN})
+    close = difflib.get_close_matches(name, known, n=1, cutoff=0.6)
+    raise ProfileError(
+        f"--profile {name!r}: there is no such profile to make active.",
+        hint=(f"Did you mean {close[0]!r}? " if close else "")
+        + f'`tandem profile create {name} --prompt "..."` makes it; `tandem profile list` shows the rest.',
+    )
+
+
+def _say_when_the_planners_differ(active: str, planner: str) -> None:
+    """A machine set up for one planner, whose active profile plans with another, is told how to line them up."""
+    try:
+        backend = profiles.load(active, require_installed=False).planner.backend
+    except TandemError:
+        return
+    if backend != planner:
+        theme.info(
+            f"Profile {active!r} plans with {backend}, and this machine is set up for {planner}",
+            f'`tandem profile create NAME --prompt "..." --use` makes a profile that plans with {planner}; '
+            f"`tandem planners use {planner}` switches this one",
+        )
 
 
 def _setup_teleop(*, interactive: bool, repair: bool) -> None:
@@ -440,27 +607,32 @@ def _setup_teleop(*, interactive: bool, repair: bool) -> None:
     theme.ok("Teleop hand-off enabled", cfg.teleop.droid_dir)
 
 
-def _summary(*, viz_only: bool, profile_name: str) -> None:
+def _summary(*, viz_only: bool, profile_name: str, planner: str | None) -> None:
     cfg = settings_mod.load()
     theme.rule("ready")
     try:
-        planner, runtime = runtime_cli.planner_runtime(profile_name=profile_name)
+        planner, runtime = runtime_cli.planner_runtime(planner=planner, profile_name=profile_name)
         where = runtime.status().path if runtime is not None else "none needed (pure Python)"
     except TandemError as exc:
         planner, where = "unknown", one_line(exc.message)
+    if rig_mod.exists():
+        rig_row = f"{paths.rig_file()}"
+    else:
+        rig_row = "none (visualization only)" if viz_only else "not written"
     theme.kv(
         [
             ("profile", profile_name),
             ("planner", planner),
             ("data root", cfg.resolved_data_root()),
-            ("rig", paths.rig_file() if not viz_only else "none (visualization only)"),
+            ("rig", rig_row),
             ("runtime", "not installed (visualization only)" if viz_only else where),
             ("config", paths.config_file()),
         ]
     )
     steps = [("tandem doctor", "confirm everything is wired up")]
     if not viz_only:
-        steps.append(("tandem collect", "run a collection session in the terminal"))
+        steps.append(("tandem collect", f"collect with {profile_name}"))
+        steps.append(('tandem profile create NAME --prompt "..."', "a task of your own, with the paper's settings"))
     steps.append(("tandem ui", "browse and visualize trajectories in the browser"))
     theme.next_steps(steps)
     theme.blank()

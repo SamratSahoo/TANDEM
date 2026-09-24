@@ -814,10 +814,10 @@ def test_runtime_build_installs_the_active_profiles_planner(
     from tandem.cli import init as init_cli
 
     monkeypatch.setenv("TANDEM_PLANNER_SOURCES", str(sources))
-    init_cli._build_runtime(profile.name, interactive=False, repair=False)
+    init_cli._build_runtime("toy", interactive=False, repair=False)
     assert RecipeRuntime(toy(upstream, shipped), tmp_path / "toy-runtime").status().installed
     runs = len(fake_pixi())
-    init_cli._build_runtime(profile.name, interactive=False, repair=False)
+    init_cli._build_runtime("toy", interactive=False, repair=False)
     assert len(fake_pixi()) == runs, "an installed runtime is not rebuilt by a second `tandem init`"
 
 

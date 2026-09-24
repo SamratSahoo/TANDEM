@@ -84,9 +84,9 @@ def no_pixi(monkeypatch):
 def test_init_yes_sets_up_a_pure_python_planner_with_no_pixi_and_little_disk(no_pixi, monkeypatch):
     registry.register_backend("toy", ToyPlanner)
     monkeypatch.setattr(shutil, "disk_usage", lambda _p: SimpleNamespace(total=6e9, used=1e9, free=5e9))
-    result = _run("init", "--yes", "--planner", "toy", "--profile", "bins")
+    result = _run("init", "--yes", "--planner", "toy")
     assert result.exit_code == 0, result.output
-    assert profiles.load("bins").planner.backend == "toy"
+    assert settings_mod.load(force=True).default_planner == "toy"
     assert no_pixi["installed"] == 0, "a pure-Python planner needs no pixi"
     assert "blocking problems" not in result.output and "pure Python" in result.output
 
@@ -119,7 +119,7 @@ def test_a_planner_whose_runtime_does_not_fit_still_stops_init(no_pixi, tmp_path
 
 def test_init_says_nothing_about_extrinsics_to_a_planner_that_never_reads_them(no_pixi):
     registry.register_backend("toy", ToyPlanner)
-    result = _run("init", "--yes", "--planner", "toy", "--profile", "shelf1")
+    result = _run("init", "--yes", "--planner", "toy")
     assert result.exit_code == 0, result.output
     assert "extrinsics" not in result.output and "refuse to start" not in result.output
 
@@ -128,7 +128,7 @@ def test_init_says_nothing_about_extrinsics_to_a_planner_that_never_reads_them(n
 
 
 def test_init_repair_leaves_an_existing_profile_as_it_was(isolated_env):
-    assert _run("profile", "create", "p1", "--preset", "paper", "--prompt", "fold it").exit_code == 0
+    assert _run("profile", "create", "p1", "--prompt", "fold it").exit_code == 0
     before = profiles.load("p1")
     result = _run("init", "--viz-only", "--yes", "--repair", "--profile", "p1")
     assert result.exit_code == 0, result.output
@@ -138,14 +138,7 @@ def test_init_repair_leaves_an_existing_profile_as_it_was(isolated_env):
     assert "Created profile" not in result.output
 
 
-# --- presets, wherever a profile is created ---------------------------------------------------------------
-
-
-def test_init_lays_a_preset_over_the_profile_it_creates(isolated_env):
-    result = _run("init", "--viz-only", "--yes", "--preset", "paper", "--profile", "fresh")
-    assert result.exit_code == 0, result.output
-    assert profiles.load("fresh").hitl.enabled
-    assert "Preset 'paper'" in result.output
+# --- presets, in the web (until its create takes a prompt) ---------------------------------------------
 
 
 def test_the_web_creates_a_profile_with_a_preset_and_lists_them(profile):

@@ -595,20 +595,21 @@ def test_init_sets_the_machine_up_for_the_planner_asked_for(tmp_path, monkeypatc
     assert result.exit_code == 0, result.output
     assert "Planner: fake solver" in result.output and "tiptop" in result.output, "the catalog is shown"
     assert runtimes["solver"].calls == [("install", None, False)], "the chosen planner's runtime is built"
-    assert profiles.load("default").planner.backend == "solver"
-    assert settings_mod.load(force=True).default_planner == "tiptop", "init chose for this profile only"
+    assert settings_mod.load(force=True).default_planner == "solver", "new profiles plan with it"
+    # The paper's five are TiPToP's, and stay so: init switches no profile's planner, and says how to line up.
+    assert profiles.load("cover-bread-rolls").planner.backend == "tiptop"
+    assert "plans with tiptop, and this machine is set up for solver" in " ".join(result.output.split())
 
-    # Re-run with no planner named: the profile keeps its own, whose runtime is already built.
+    # Re-run with no planner named: the machine's, whose runtime is already built.
     again = _run("init", "--yes")
     assert again.exit_code == 0, again.output
     assert "Runtime is already built" in again.output and len(runtimes["solver"].calls) == 1
-    assert profiles.load("default").planner.backend == "solver"
 
-    # Re-run naming another: the existing profile is switched, and that runtime built.
+    # Re-run naming another: its runtime is built and it is the default now. Still no profile is switched.
     switched = _run("init", "--yes", "--planner", "other")
     assert switched.exit_code == 0, switched.output
-    assert profiles.load("default").planner.backend == "other"
-    assert "now plans with fake other" in switched.output
+    assert settings_mod.load(force=True).default_planner == "other"
+    assert profiles.load("cover-bread-rolls").planner.backend == "tiptop"
 
     unknown = _run("init", "--yes", "--planner", "solverr")
     assert unknown.exit_code == 1 and unknown.exception.hint.startswith("Did you mean 'solver'?")
@@ -618,7 +619,7 @@ def test_a_laptop_init_names_the_planner_without_building_it(tmp_path):
     runtimes = _stubs(tmp_path)
     result = _run("init", "--viz-only", "--yes", "--planner", "solver")
     assert result.exit_code == 0, result.output
-    assert profiles.load("default").planner.backend == "solver"
+    assert settings_mod.load(force=True).default_planner == "solver"
     assert runtimes["solver"].calls == []
 
 
@@ -633,12 +634,12 @@ def test_init_asks_which_planner_only_when_there_is_a_choice(tmp_path, monkeypat
 
     monkeypatch.setattr(init_cli.typer, "prompt", prompt)
     # TiPToP alone is no choice: it is shown, and taken.
-    assert init_cli._choose_planner("default", None, interactive=True) == "tiptop"
+    assert init_cli._choose_planner(None, interactive=True) == "tiptop"
     assert asked == []
 
     _stubs(tmp_path)
-    assert init_cli._choose_planner("default", None, interactive=True) == "solver"
+    assert init_cli._choose_planner(None, interactive=True) == "solver"
     assert asked == ["tiptop"], "the machine's default is what is offered"
     # Without a terminal the default is taken, as `--yes` promises.
-    assert init_cli._choose_planner("default", None, interactive=False) == "tiptop"
+    assert init_cli._choose_planner(None, interactive=False) == "tiptop"
     assert len(asked) == 1
