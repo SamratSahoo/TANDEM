@@ -777,6 +777,10 @@ class BackendFactory(Protocol):
       what `tandem doctor` (and, with ``profile=None``, `tandem init`'s preflight) should check for this
       planner -- a GPU, a server it calls, its hardware. Default: nothing beyond its runtime, which
       doctor checks for every planner.
+    - ``runtime_env(*, rig, settings=None) -> Mapping[str, str]``: what a command run in the planner's
+      runtime (`tandem runtime run`, `runtime shell`) needs in its environment to find this machine --
+      a config written from the rig that its own scripts read the robot's address and cameras from.
+      Default: nothing.
     - ``replay(rollout_dir, *, settings=None) -> None``: open a recorded leg in the planner's own
       viewer (`tandem traj open`). Default: refused, saying the planner has none.
     - ``presets_dir``: a directory of ``<name>.yml`` presets for this planner's ``planner.options``

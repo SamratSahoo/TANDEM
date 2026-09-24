@@ -79,8 +79,9 @@ TIPTOP = Source(
         ".github",
     ),
     patches=(
-        # $TIPTOP_CALIBRATION: a profile owns its extrinsics instead of the shared runtime. The patch
-        # says why at length; upstreaming it would leave this recipe with nothing to patch here.
+        # $TIPTOP_CALIBRATION: the extrinsics live outside the shared runtime, in the rig's calibration.json
+        # (the patch's own prose, from when a profile held them, says "profile"; it is left byte for byte,
+        # because the runtime records every patch's digest). Upstreaming it would leave nothing to patch.
         PATCHES / "0001-tiptop-config-from-env.patch",
         # There used to be a second one, making pyrealsense2 an extra. It is gone on purpose: tiptop's
         # pixi.lock records tiptop's own requires-dist, so editing that list makes the lock stale, and

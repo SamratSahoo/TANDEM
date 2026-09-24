@@ -349,7 +349,8 @@ def not_plain_data(value: Any, path: str = "options") -> list[str]:
 # --------------------------------------------------------------------------- the optional hooks
 #
 # What tandem asks a planner beyond building its backend: how to show its options, what `tandem doctor`
-# should check for it, how to replay a leg it recorded, which presets it ships. Each is asked through
+# should check for it, what a command in its runtime needs of the rig, how to replay a leg it recorded,
+# which presets it ships. Each is asked through
 # here, by name, so no command has to know which planner it is talking to -- and each has a default for
 # a factory that does not answer it (see BackendFactory).
 
@@ -412,6 +413,24 @@ def doctor_checks(name: str, profile: Any, *, settings: Any = None, probe_hardwa
             )
         ]
     return checks
+
+
+def runtime_env(name: str, *, rig: Any, settings: Any = None) -> dict[str, str]:
+    """What the planner ``name`` puts in the environment of a command run in its runtime: its config for
+    ``rig``, where its own scripts read the robot and the cameras from. ``{}`` for a planner with nothing to
+    add. Anything but strings to strings is the planner's bug, and said to be, rather than handed to exec.
+    """
+    planner = factory(name)
+    hook = getattr(planner, "runtime_env", None)
+    if not callable(hook):
+        return {}
+    env = hook(rig=rig, settings=settings)
+    if not isinstance(env, Mapping) or not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items()):
+        raise TandemError(
+            f"The {planner.info.title} planner's runtime_env returned {env!r}, not a mapping of strings to strings.",
+            hint="That is a bug in the planner; `tandem runtime run --raw` runs the command without it.",
+        )
+    return dict(env)
 
 
 def replay(name: str, rollout_dir: Any, *, settings: Any = None) -> None:

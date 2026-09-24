@@ -34,6 +34,12 @@ _PLANNER = typer.Option(None, "--planner", help="A planner's name, instead of th
 _PROFILE = typer.Option(
     None, "--profile", "-p", help="Use this profile's planner instead of the active one's."
 )
+_RAW = typer.Option(
+    False,
+    "--raw",
+    help="Leave the planner's own config as it ships (TiPToP: its stock tiptop.yml and calibration file) "
+    "instead of pointing it at this machine's rig.",
+)
 
 
 # --------------------------------------------------------------------------- which runtime
@@ -373,12 +379,13 @@ def optional_steps_to_run(rt) -> list[str]:
     return rt.optional_to_run() if isinstance(rt, RecipeRuntime) else []
 
 
-@app.command("shell", help="Open a shell inside the runtime environment.")
-def shell(planner: str = _PLANNER, profile_name: str = _PROFILE) -> None:
-    _, rt = _recipe_runtime(planner, profile_name)
+@app.command("shell", help="Open a shell inside the runtime environment, pointed at this machine's rig.")
+def shell(planner: str = _PLANNER, profile_name: str = _PROFILE, raw: bool = _RAW) -> None:
+    name, rt = _recipe_runtime(planner, profile_name)
     rt.require_ready()
+    env = command_env(name, raw=raw)
     theme.info(f"Entering the runtime at {rt.root}. Type `exit` to leave.")
-    subprocess.call(rt.shell_command(), cwd=str(rt.workdir))
+    subprocess.call(rt.shell_command(), cwd=str(rt.workdir), env=env)
 
 
 @app.command("python", help="Print the runtime's Python interpreter path.")
@@ -387,15 +394,52 @@ def python_(planner: str = _PLANNER, profile_name: str = _PROFILE) -> None:
     typer.echo(str(rt.python()))
 
 
-@app.command("run", help="Run a command inside the runtime environment.")
+@app.command(
+    "run",
+    help="Run a command inside the runtime environment, e.g. `tandem runtime run cutamp-demo --motion_plan`. "
+    "It reaches this machine's robot and cameras (the rig), unless --raw. tandem's own options go before "
+    "the command; everything after it is the command's.",
+    # Everything from the command on is the command's, options included: `cutamp-demo --motion_plan` is not
+    # an option of tandem's. (`--` before the command still works, and is no longer needed.)
+    context_settings={"allow_interspersed_args": False, "ignore_unknown_options": True},
+)
 def run(
-    args: list[str] = typer.Argument(..., help="Command and arguments, e.g. cutamp-demo --motion_plan"),
+    args: list[str] = typer.Argument(
+        ..., metavar="COMMAND [ARGS]...", help="The command and its arguments, e.g. cutamp-demo --motion_plan."
+    ),
     planner: str = _PLANNER,
     profile_name: str = _PROFILE,
+    raw: bool = _RAW,
 ) -> None:
-    _, rt = _recipe_runtime(planner, profile_name)
+    name, rt = _recipe_runtime(planner, profile_name)
     rt.require_ready()
-    raise typer.Exit(subprocess.call(rt.command(list(args)), cwd=str(rt.workdir)))
+    env = command_env(name, raw=raw)
+    raise typer.Exit(subprocess.call(rt.command(list(args)), cwd=str(rt.workdir), env=env))
+
+
+def command_env(planner: str, *, raw: bool) -> dict[str, str]:
+    """The environment of a command run in ``planner``'s runtime: this one, and what the planner needs to find
+    this machine's rig (``registry.runtime_env``) -- nothing added with ``raw``.
+
+    Said on stderr, in one line, so a person knows which robot the command will reach, and the command's
+    own output stays clean for a pipe.
+    """
+    env = dict(os.environ)
+    if raw:
+        return env
+    from tandem.core import rig as rig_mod
+    from tandem.planners import registry
+
+    rig = rig_mod.load()
+    added = registry.runtime_env(planner, rig=rig, settings=settings_mod.load())
+    if added:
+        theme.err_console().print(
+            f"[faint]· with this machine's rig: {escape(rig.summary())} ({escape(str(rig.file()))}); "
+            "--raw runs it with the planner's own config[/faint]",
+            highlight=False,
+        )
+    env.update(added)
+    return env
 
 
 @app.command("clean", help="Delete the runtime directory.")

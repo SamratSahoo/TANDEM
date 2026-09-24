@@ -57,9 +57,10 @@ What the base class supplies, and why each default is the one it is:
   pydantic models.
 - **What else tandem asks it has a default too.** ``describe_options`` lists its options as they are
   (`tandem profile show`, the web editor); ``doctor_checks`` adds nothing to `tandem doctor` beyond
-  its runtime, which doctor checks for every planner; ``replay`` says it has no viewer;
-  ``presets_dir`` is None. Override one when the planner has something to say: a server it calls, a
-  GPU it needs, the settings an experiment was run with.
+  its runtime, which doctor checks for every planner; ``runtime_env`` gives a command run in its
+  runtime nothing of the rig; ``replay`` says it has no viewer; ``presets_dir`` is None. Override one
+  when the planner has something to say: a server it calls, a GPU it needs, a config its own scripts
+  read the robot's address from, the settings an experiment was run with.
 - **The declarations are checked when the class is defined**, not when a session first reads them.
   A moved argument that points at a surface, a wire name for a predicate that does not exist, a
   prompt slot misspelt -- each is a planner that would load, list and start, and then plan the wrong
@@ -579,6 +580,18 @@ class Planner(abc.ABC):
         nothing -- doctor already reports the planner's runtime, as it does for every planner.
         """
         return []
+
+    @classmethod
+    def runtime_env(cls, *, rig: Any, settings: Any = None) -> dict[str, str]:
+        """The environment a command run in this planner's runtime needs to find this machine: `tandem
+        runtime run` and `tandem runtime shell` add it to their own (``--raw`` does not).
+
+        A planner whose own scripts read the robot's address or the cameras from a config file points them
+        at one written from ``rig`` (``tandem.core.rig.Rig``: robot.host and type, the cameras, the
+        calibration file), so a calibration script reaches this machine's robot and writes this machine's
+        extrinsics. Strings to strings. Default: nothing.
+        """
+        return {}
 
     @classmethod
     def replay(cls, rollout_dir: Path, *, settings: Any = None) -> None:

@@ -7,8 +7,9 @@ a twenty-second warm-up does. The session only hands over a ``BackendContext`` a
 
 So is everything else tandem asks of TiPToP by name: its settings checked and shown -- the task's
 ``planner.options`` (``OPTIONS``: tamp) and this machine's ``planners.tiptop`` in rig.yml
-(``RIG_OPTIONS``: robot, perception; ``options.py``, ``doctor.py``) -- its rows in `tandem doctor`, a
-leg replayed in tiptop's own viewer, and the presets it ships (``presets/``).
+(``RIG_OPTIONS``: robot, perception; ``options.py``, ``doctor.py``) -- its rows in `tandem doctor`, the
+rig's tiptop.yml for a command run in its runtime (`tandem runtime run calibrate-wrist-cam`), a leg
+replayed in tiptop's own viewer, and the presets it ships (``presets/``).
 
 This module is imported to list planners and to read TiPToP's capabilities, both of which happen on a
 laptop. So it imports the declarations -- capabilities, runtime recipe -- and the protocol types and
@@ -139,6 +140,39 @@ class TiptopFactory:
         settings = _settings(settings)
         ready = self.runtime(settings).status().installed
         return doctor.doctor_checks(profile, settings=settings, runtime_ready=ready, probe_hardware=probe_hardware)
+
+    def runtime_env(self, *, rig: Any, settings: Any = None) -> dict[str, str]:
+        """This machine's rig, where tiptop's own scripts read it (`tandem runtime run`, `runtime shell`).
+
+        tiptop's scripts -- calibrate-wrist-cam, viz-calibration, anything reading ``tiptop_cfg()`` -- take
+        the robot's address, the arm and the camera serials from $TIPTOP_CONFIG, and read and write the
+        extrinsics at $TIPTOP_CALIBRATION (patch 0001). Pointed at a tiptop.yml rendered from the rig and at
+        the rig's calibration.json, `tandem runtime run calibrate-wrist-cam` reaches the NUC at rig.yml's
+        robot.host and writes the wrist camera's extrinsics where a session reads them. Unset, they would
+        use tiptop's stock tiptop.yml (172.16.0.2, its authors' serials) and the runtime's own calibration
+        file, which is what ``--raw`` gives.
+        """
+        from tandem.core import paths
+        from tandem.core import rig as rig_mod
+        from tandem.planners.tiptop import render
+
+        options = _resolve(rig, rig_mod.planner_options(rig, "tiptop"), {})
+        config = render.write_tiptop_config(rig, paths.state_dir() / "rig" / "tiptop.yml", options)
+        env = {
+            "TIPTOP_CONFIG": str(config),
+            # Created when missing: tiptop's calibration scripts write into it.
+            "TIPTOP_CALIBRATION": str(rig_mod.ensure_calibration_file(rig)),
+            "TIPTOP_STATE_PORT": str(options.robot.state_port),
+        }
+        cameras = rig.cameras.configured()
+        for role, var in (
+            ("hand", "TIPTOP_HAND_CAMERA_ID"),
+            ("external", "TIPTOP_EXTERNAL_CAMERA_ID"),
+            ("external_2", "TIPTOP_EXTERNAL_2_CAMERA_ID"),
+        ):
+            if role in cameras:
+                env[var] = cameras[role].serial
+        return env
 
     def replay(self, rollout_dir: Path, *, settings: Any = None) -> None:
         """Replay a leg's saved plan in Rerun, with tiptop's viz-tiptop-run: it needs cuRobo and cuTAMP to
