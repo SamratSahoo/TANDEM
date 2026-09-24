@@ -206,10 +206,25 @@ class BuildStep:
     todo: str = "not built"
     # The problem status reports while it has not run.
     problem: str = ""
+    # A step the runtime works without: something only some machines can have, such as a camera SDK's
+    # Python bindings. It is skipped while any of ``requires`` is missing, a failure of it is said and does
+    # not fail the install, and while it has not run status carries a note rather than a problem -- the
+    # runtime is ready either way. It is done when its ``produces`` match, so an install after its
+    # requirement appears runs it, and one after it has run skips it.
+    optional: bool = False
+    # Absolute paths on this machine the step needs in order to run at all: an SDK's installer, say.
+    requires: tuple[str, ...] = ()
+    # What status and an install say while one of ``requires`` is missing: what will not work without the
+    # step, and the exact way to get it.
+    missing: str = ""
 
     @property
     def title(self) -> str:
         return self.label or self.name
+
+    def unmet(self) -> list[str]:
+        """The paths of ``requires`` this machine does not have."""
+        return [path for path in self.requires if not Path(path).exists()]
 
 
 @dataclass(frozen=True)
@@ -311,6 +326,16 @@ def _validate(recipe: RuntimeRecipe) -> None:
         for pattern in step.produces:
             if not _is_inside(pattern):
                 raise bad(f"step {step.name!r}: {pattern!r} is not a path inside the runtime")
+        if step.optional and not step.produces:
+            # Nothing else says whether it ran: a build that finished does not mean an optional step did.
+            raise bad(f"optional step {step.name!r} declares no produces, so nothing can tell whether it ran")
+        for path in step.requires:
+            if not PurePosixPath(path).is_absolute():
+                raise bad(f"step {step.name!r} requires {path!r}, which is not an absolute path on the machine")
+        if step.requires and not (step.optional and step.missing):
+            raise bad(
+                f"step {step.name!r} requires paths, so it must be optional and say what is `missing` without them"
+            )
 
     for asset in recipe.assets:
         if not _is_inside(asset.dest):
@@ -385,8 +410,11 @@ class RecipeStatus:
     built_at: str | None = None
     # What keeps the runtime from running. Empty exactly when it is ready.
     problems: tuple[str, ...] = ()
-    # Worth knowing, not worth refusing a session over: a tree taken on trust, say.
+    # Worth knowing, not worth refusing a session over: a tree taken on trust, say, or an optional step
+    # this machine cannot run yet.
     notes: tuple[str, ...] = ()
+    # The names of the recipe's optional steps (``BuildStep.optional``), whatever their state.
+    optional: tuple[str, ...] = ()
 
     @property
     def ready(self) -> bool:
@@ -398,7 +426,8 @@ class RecipeStatus:
 
     @property
     def steps_done(self) -> bool:
-        return all(done for _, done in self.steps)
+        """Whether every step the runtime needs has run. An optional one never decides it."""
+        return all(done for name, done in self.steps if name not in self.optional)
 
 
 # --------------------------------------------------------------------------- the runtime
@@ -507,6 +536,10 @@ class RecipeRuntime:
         for step in recipe.steps:
             done = all(any(self.root.glob(pattern)) for pattern in step.produces)
             steps.append((step.name, done))
+            if step.optional:
+                if not done:
+                    notes.append(self._optional_note(step))
+                continue
             # Only once the sources are there: "the kernels have not been compiled" says nothing
             # useful about a runtime with nothing to compile yet.
             if sources_present and not done:
@@ -556,7 +589,24 @@ class RecipeRuntime:
             built_at=built.get("at"),
             problems=tuple(problems),
             notes=tuple(notes),
+            optional=tuple(step.name for step in recipe.steps if step.optional),
         )
+
+    def _optional_note(self, step: BuildStep) -> str:
+        """What status says about an optional step that has not run: why not, and what does it."""
+        if step.unmet():
+            return f"{step.title} {step.todo}: {step.missing}"
+        return f"{step.title} {step.todo}: `tandem planners install {self.recipe.planner}` installs it"
+
+    def optional_to_run(self, st: RecipeStatus | None = None) -> list[str]:
+        """The optional steps an install would run now: not done, and everything they require is here."""
+        st = st or self.inspect()
+        done = dict(st.steps)
+        return [
+            step.title
+            for step in self.recipe.steps
+            if step.optional and st.exists and not done.get(step.name) and not step.unmet()
+        ]
 
     def status(self) -> RuntimeStatus:
         st = self.inspect()
@@ -566,6 +616,7 @@ class RecipeRuntime:
             pins=self._installed_pins(),
             detail=self.describe(st),
             problems=st.problems,
+            notes=st.notes,
         )
 
     def describe(self, st: RecipeStatus | None = None) -> str:
@@ -702,6 +753,9 @@ class RecipeRuntime:
                 return
             for step in self.recipe.steps:
                 announce(step.name, stages[step.name])
+                if step.optional:
+                    self._run_optional(step, force=force, say=say)
+                    continue
                 with self._build_stage(step.name, f"pixi run {step.task}"):
                     self.run_step(step, log=say)
             self.record_built()
@@ -712,6 +766,23 @@ class RecipeRuntime:
                 "The build finished but the runtime still looks incomplete: " + "; ".join(st.problems),
                 hint="Run the install again; every finished step is skipped.",
             )
+
+    def _run_optional(self, step: BuildStep, *, force: bool, say: Log) -> None:
+        """An optional step: run when this machine can and it has not run yet. Never fails the install.
+
+        Not a build stage: a step the runtime works without must not mark the build unfinished when it
+        fails. What happened is said in the log; what it means afterwards is said by status's notes.
+        """
+        if not force and all(any(self.root.glob(pattern)) for pattern in step.produces):
+            say(f"{step.title}: already {step.done}")
+            return
+        if step.unmet():
+            say(f"{step.title}: skipped: {step.missing}")
+            return
+        try:
+            self.run_step(step, log=say)
+        except TandemError as exc:
+            say(f"{step.title} failed: {exc.message} The runtime works without it.")
 
     @contextmanager
     def _build_stage(self, key: str, command: str) -> Iterator[None]:

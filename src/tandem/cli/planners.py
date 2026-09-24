@@ -559,6 +559,8 @@ def info(
         theme.kv([("path", runtime.get("path")), ("state", runtime.get("detail"))])
         for problem in runtime.get("problems") or []:
             theme.warn(problem)
+        for note in runtime.get("notes") or []:
+            theme.warn(note)
 
     steps = []
     if payload["install_command"]:
@@ -602,9 +604,11 @@ def install(
         return
 
     status = rt.status()
-    if status.installed and not status.mismatched(factory.info.sources) and not force:
+    pending = runtime_cli.optional_steps_to_run(rt)
+    if status.installed and not status.mismatched(factory.info.sources) and not force and not pending:
         # Idempotent without spending anything: no fetch, no pixi solve, no kernel build.
         theme.ok(f"{title} is already installed", str(status.path or ""))
+        runtime_cli.say_notes(status)
         _suggest_use(name)
         return
 
@@ -613,8 +617,12 @@ def install(
         runtime_cli.ensure_pixi(title, ask=interactive, allowed=yes)
     theme.heading(f"installing {title}", escape(str(status.path or "")))
     recipe = getattr(rt, "recipe", None)
-    for note in getattr(recipe, "notes", ()) or ():
-        theme.info(note)
+    if status.installed and not status.mismatched(factory.info.sources) and not force:
+        # Built already: only what this machine could not do before -- the rest is skipped.
+        theme.info(f"It is built; now installing {', '.join(pending)}.")
+    else:
+        for note in getattr(recipe, "notes", ()) or ():
+            theme.info(note)
     if interactive and not typer.confirm(f"  Install {title} now?", default=True):
         raise typer.Abort()
     runtime_cli.run_build(rt, force=force, sources_dir=sources, planner=name)

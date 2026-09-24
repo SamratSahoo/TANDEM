@@ -565,3 +565,17 @@ def test_no_patch_touches_what_tiptops_pixi_lock_was_solved_from():
     assert touched and not (touched & {"pyproject.toml", "pixi.toml", "pixi.lock"}), touched
     # And nothing ships that the recipe does not apply: a stray patch is package data doing nothing.
     assert sorted(PATCHES.glob("*.patch")) == sorted(patches)
+
+
+def test_the_pinned_tiptop_defines_install_zed_as_the_zed_sdks_own_installer():
+    """The recipe's optional ZED step runs tiptop's `install-zed` task where the SDK's installer is
+    (tests/test_runtime_optional_steps.py). Checked against the tiptop it pins: a bump that renamed the
+    task, or moved what it runs, would leave every workstation's cameras without their Python API."""
+    from tandem.planners.tiptop.recipe import RECIPE, ZED_PYTHON_API
+
+    root = planner_sources("tiptop/pixi.toml", "tiptop/install/install-zed.sh")
+    (zed,) = [step for step in RECIPE.steps if step.optional]
+    manifest = (root / "tiptop" / "pixi.toml").read_text()
+    assert f'{zed.task} = "bash install/install-zed.sh"' in manifest
+    script = (root / "tiptop" / "install" / "install-zed.sh").read_text()
+    assert f'ZED_INSTALLER="{ZED_PYTHON_API}"' in script and 'python "$ZED_INSTALLER"' in script

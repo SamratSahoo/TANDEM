@@ -855,6 +855,7 @@ def test_the_web_ui_and_doctor_read_the_same_runtime_the_terminal_does(profile):
         ["sources", "missing"],
         ["pixi env", "not built"],
         ["cuRobo kernels", "not compiled"],
+        ["ZED Python API", "not installed"],
         ["built", "—"],
     ]
     assert [s["name"] for s in payload["sources"]] == ["tiptop", "cuTAMP", "curobo"]

@@ -227,11 +227,13 @@ def _choose_planner(requested: str | None, *, interactive: bool) -> str:
 
 
 def _build_runtime(planner: str, *, interactive: bool, repair: bool) -> None:
-    """Build ``planner``'s runtime.
+    """Build ``planner``'s runtime, with the optional steps its recipe can take on this machine.
 
     The consent flow for pixi and the build itself are `tandem planners install`'s (``cli/runtime``),
     so the wizard and the command cannot drift apart. `init` is "accept every default" when it cannot
-    ask, so without a terminal it installs pixi rather than failing.
+    ask, so without a terminal it installs pixi rather than failing. A runtime that is built but has an
+    optional step it can take now -- the ZED Python API, once the ZED SDK is installed -- is built again,
+    which does that step and skips everything already done.
     """
     planner, runtime = runtime_cli.planner_runtime(planner=planner)
     title = registry.info(planner).title
@@ -239,16 +241,21 @@ def _build_runtime(planner: str, *, interactive: bool, repair: bool) -> None:
         theme.ok(f"{title} is pure Python", "there is no runtime to build")
         return
     status = runtime.status()
+    pending = runtime_cli.optional_steps_to_run(runtime)
 
-    if status.installed and not repair:
+    if status.installed and not repair and not pending:
         theme.ok("Runtime is already built", str(status.path))
+        runtime_cli.say_notes(status)
         return
 
     if runtime_cli.needs_pixi(runtime):
         runtime_cli.ensure_pixi(title, ask=interactive, allowed=True)
 
-    for note in getattr(getattr(runtime, "recipe", None), "notes", ()) or ():
-        theme.info(note)
+    if status.installed and not repair:
+        theme.ok("Runtime is already built", f"{status.path}; now installing {', '.join(pending)}")
+    else:
+        for note in getattr(getattr(runtime, "recipe", None), "notes", ()) or ():
+            theme.info(note)
     if interactive and not typer.confirm("  Build it now?", default=True):
         theme.warn("Skipped", f"run `tandem planners install {planner}` when you are ready")
     else:

@@ -624,6 +624,9 @@ class RuntimeStatus:
     # One line of what is and is not there, for a listing.
     detail: str = ""
     problems: tuple[str, ...] = ()
+    # Worth knowing and no reason to refuse a session: an optional part this machine cannot have yet (the
+    # ZED Python API without the ZED SDK), a source taken on trust. Each says what to do about it.
+    notes: tuple[str, ...] = ()
 
     def mismatched(self, wanted: Sequence[SourcePin]) -> tuple[str, ...]:
         """Names of the pinned sources this runtime was NOT built at.
@@ -652,6 +655,7 @@ class RuntimeStatus:
             "version": self.version,
             "detail": self.detail,
             "problems": list(self.problems),
+            "notes": list(self.notes),
         }
 
 

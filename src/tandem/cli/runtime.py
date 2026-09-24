@@ -348,11 +348,29 @@ def run_build(
     st = rt.status()
     if st.installed or env_only:
         theme.ok("Runtime built", str(st.path or ""))
+        say_notes(st)
     else:
         raise TandemError(
             "The build finished but the runtime still looks incomplete: " + "; ".join(st.problems),
             hint=f"The full log is at {log_path}.",
         )
+
+
+def say_notes(status) -> None:
+    """What a runtime that works would still like done -- an optional part this machine cannot have yet, with
+    the fix -- said where the person who installs it reads: the install's own output."""
+    for note in getattr(status, "notes", ()) or ():
+        theme.warn(note)
+
+
+def optional_steps_to_run(rt) -> list[str]:
+    """The optional build steps an install of ``rt`` would run now (a camera SDK installed since, say).
+
+    A runtime that is otherwise built is built again for these, which runs them and skips the rest.
+    """
+    from tandem.planners.runtime import RecipeRuntime
+
+    return rt.optional_to_run() if isinstance(rt, RecipeRuntime) else []
 
 
 @app.command("shell", help="Open a shell inside the runtime environment.")

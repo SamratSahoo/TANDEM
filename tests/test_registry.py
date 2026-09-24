@@ -589,7 +589,12 @@ def test_a_half_built_tiptop_runtime_reports_its_pins_and_what_is_missing(tmp_pa
 
     status = rt.status()
     assert not status.installed
-    assert status.detail == "sources present · pixi env not built · cuRobo kernels not compiled"
+    assert status.detail == (
+        "sources present · pixi env not built · cuRobo kernels not compiled · ZED Python API not installed"
+    )
+    # The ZED Python API is optional: a note, never one of the problems that keep the runtime from running.
+    assert not any("ZED" in problem for problem in status.problems)
+    assert [note for note in status.notes if note.startswith("ZED Python API not installed: ")]
     assert status.pins == SOURCES
     assert status.mismatched(SOURCES) == ()
 

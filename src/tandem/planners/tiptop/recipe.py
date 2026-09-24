@@ -1,4 +1,5 @@
-"""TiPToP's runtime, as a recipe: three pinned trees, one patch, two checkpoints, one pixi environment.
+"""TiPToP's runtime, as a recipe: three pinned trees, one patch, two checkpoints, one pixi environment, and
+the ZED Python API where the ZED SDK is installed.
 
 Read by ``tandem.planners.runtime``, which does the fetching, patching and building; everything here
 is a fact about TiPToP. A bump is an edit of the commits below -- nothing ships in the wheel any more,
@@ -38,6 +39,8 @@ _HERE = Path(__file__).resolve().parent
 PATCHES = _HERE / "patches"
 #: Files the runtime needs that no public repository has, shipped as package data.
 ASSETS = _HERE / "assets"
+#: The ZED SDK's installer for its Python API, where the SDK puts it (tiptop's install/install-zed.sh runs it).
+ZED_PYTHON_API = "/usr/local/zed/get_python_api.py"
 
 # None of the three carries phase-planning logic. That logic is tandem's own (src/tandem/planning), and
 # tandem drives the planner through src/tandem/planners without changing it -- which is the whole
@@ -184,9 +187,29 @@ RECIPE = RuntimeRecipe(
             todo="not compiled",
             problem="cuRobo's CUDA kernels have not been compiled",
         ),
+        # The ZED cameras' Python bindings (pyzed), which tiptop opens the cameras through. They come with
+        # the ZED SDK, not from PyPI: tiptop's install-zed task runs the SDK's own get_python_api.py in this
+        # environment. Optional, because the SDK is a system install tandem cannot make, and everything
+        # else here (planning, replay, the viewer) works without it. Without the SDK the install still
+        # succeeds and says what is missing; once it is installed, the next install does this step.
+        BuildStep(
+            name="zed",
+            task="install-zed",
+            optional=True,
+            requires=(ZED_PYTHON_API,),
+            produces=("env/envs/default/lib/python3*/site-packages/pyzed",),
+            description="installing the ZED Python API (pyzed) from the ZED SDK",
+            label="ZED Python API",
+            done="installed",
+            todo="not installed",
+            missing=f"the ZED SDK is not installed (no {ZED_PYTHON_API}), so ZED cameras will not open. "
+            "Install it from https://www.stereolabs.com/developers/release, then run `tandem planners install "
+            "tiptop`.",
+        ),
     ),
     notes=(
-        "Building the planner stack: torch, cuRobo (CUDA kernels), cuTAMP, tiptop.",
+        "Building the planner stack: torch, cuRobo (CUDA kernels), cuTAMP, tiptop, and the ZED Python API when "
+        "the ZED SDK is installed.",
         "The first build fetches about 60 MB of sources, solves a CUDA environment, and compiles 5 CUDA "
         "extensions: 5–20 minutes.",
     ),

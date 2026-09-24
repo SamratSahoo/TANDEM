@@ -57,6 +57,7 @@ def collect_checks(*, profile_name: str | None = None, probe_hardware: bool = Tr
         )
     checks.append(probe.check_ffmpeg())
     checks.append(runtime_check)
+    checks.extend(_optional_step_checks(active, cfg))
     checks.extend(_other_planner_checks(active, cfg))
     # This machine's rig: tandem's own robot and cameras. What a planner needs of it is the planner's rows.
     checks.extend(rig_checks())
@@ -221,6 +222,41 @@ def _runtime_check(profile_name: str | None, cfg) -> tuple[probe.Check, bool, Pa
         root,
         planner,
     )
+
+
+def _optional_step_checks(active: str | None, cfg) -> list[probe.Check]:
+    """One row per optional part of the planner's runtime (TiPToP's: the ZED Python API): there, or what does
+    not work without it and how to get it. A warning at worst: the runtime works without it, and the part
+    of it that needs one (a camera, say) has its own row where it is checked."""
+    if active is None:
+        return []
+    from tandem.planners import registry
+    from tandem.planners.runtime import RecipeRuntime
+
+    try:
+        rt = registry.runtime(active, cfg)
+    except Exception:  # the runtime row says what is wrong with it
+        return []
+    if not isinstance(rt, RecipeRuntime):
+        return []
+    st = rt.inspect()
+    if not st.exists:
+        return []  # nothing is built yet, and the runtime row says to build it
+    done = dict(st.steps)
+    rows = []
+    for step in (step for step in rt.recipe.steps if step.optional):
+        name = step.title.lower()
+        if done.get(step.name):
+            rows.append(probe.Check(name, probe.OK, step.done, group="runtime"))
+        elif step.unmet():
+            rows.append(probe.Check(name, probe.WARN, step.todo, step.missing, group="runtime"))
+        else:
+            rows.append(
+                probe.Check(
+                    name, probe.WARN, step.todo, f"`tandem planners install {active}` installs it.", group="runtime"
+                )
+            )
+    return rows
 
 
 def _other_planner_checks(active: str | None, cfg) -> list[probe.Check]:
