@@ -42,7 +42,7 @@ from helpers import isolate_registry, wait_for
 from ruamel.yaml import YAML
 from toy_planner import TOY_CAPABILITIES, ToyPlanner, ToySidecarPlanner
 
-from tandem.core import episodes, profiles, secrets
+from tandem.core import episodes, profiles, secrets, trajectories
 from tandem.core import merge as merge_mod
 from tandem.core.episodes import LegDirs
 from tandem.core.phase_loop import PhaseLoop
@@ -291,18 +291,37 @@ class Sink:
         return [payload for event, payload in self.events if event == name]
 
 
+class Stopped(Exception):
+    """The operator's stop, raised at the next step boundary as the session's own is."""
+
+
 class Operator:
     """The person at the prompts: hands every human phase to the executor. A loop that never ends
-    fails the test at the 40th step boundary instead of hanging the suite."""
+    fails the test at the 40th step boundary instead of hanging the suite.
+
+    ``stop_legs`` is a stop the operator asks for while a robot leg runs: the leg's ``should_stop``
+    turns true, and the next step boundary unwinds the attempt (`Stopped`)."""
 
     def __init__(self) -> None:
         self.boundaries = 0
         self.shown: list = []
+        self.stop_legs = False
+        self.asked_to_stop = False
 
     def check_preempt(self) -> None:
         self.boundaries += 1
         if self.boundaries > 40:
             raise AssertionError("the loop went round 40 times without ending the trial")
+        if self.asked_to_stop:
+            raise Stopped()
+
+    def leg_should_stop(self):
+        def should_stop() -> bool:
+            if self.stop_legs:
+                self.asked_to_stop = True
+            return self.stop_legs
+
+        return should_stop
 
     def take_handoff_request(self) -> bool:
         return False
@@ -401,8 +420,9 @@ def trial(profile, tmp_path, monkeypatch):
     isolate_registry(monkeypatch)
     built: list = []
 
-    def make(answers=DONE, *, hosting="in-process", plan=None, replan=None, caps=None, **cfg):
+    def make(answers=DONE, *, hosting="in-process", plan=None, replan=None, caps=None, planner_cls=None, **cfg):
         name, cls, scene = HOSTINGS[hosting]
+        cls = planner_cls or cls
         registry.register_backend(name, cls)
         planner = registry.create(
             name,
@@ -449,6 +469,21 @@ def trial(profile, tmp_path, monkeypatch):
     yield make
     for planner in built:
         planner.close()
+
+
+def merged_under(profile, status: str) -> bool:
+    """Whether the trial's merged episode is filed under ``status`` yet.
+
+    Its hitl.json is not enough to go by: the record is written into the leg the trial is filed under
+    before the merge starts, so that a merge that never finishes still leaves it.
+    """
+    for directory in profile.status_dir(status).glob("*"):
+        try:
+            if (directory / "hitl.json").is_file() and trajectories.read_meta(directory).get("video_aligned"):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def merged_episode(profile, status: str) -> tuple[Path, dict, dict]:
@@ -757,6 +792,80 @@ def test_replan_feeds_the_toys_failure_back_and_the_new_plan_is_carried_out(tria
     assert whereabouts(r.planner)[scene.third] == "blue_bin"
 
 
+def test_a_replanned_trial_keeps_every_plan_and_says_which_plan_each_leg_carried_out(trial, profile, fake_video):
+    """The record used to be the last plan alone: the person's step, checked and passed under the
+    first plan, vanished from hitl.json, and two segments claimed phase 0 for different subgoals."""
+    scene = HOSTINGS["in-process"][2]
+    rest = proposal(robot(f"put the {scene.third} in the blue bin", scene.third, "blue_bin"))
+    r = trial(plan=scene.plan(**INTO_THE_FLOOR), replan=rest, on_robot_phase_failure="replan")
+    outcome = r.run()
+    assert (outcome.outcome, outcome.plan.finished) == (None, True)
+    episodes.merge_trajectory(
+        profile,
+        TRAJECTORY,
+        "success",
+        outcome.plan,
+        tools_dir=None,
+        vlm_dir=None,
+        log=lambda text: None,
+        emit=lambda message: None,
+        superseded=outcome.superseded_plans,
+        leg_generations=outcome.leg_generations,
+    )
+    _, meta, record = merged_episode(profile, "success")
+
+    (first,) = record["superseded_plans"]
+    assert record["plan_generation"] == 1 and first["plan_generation"] == 0
+    assert "floor is not a bin" in first["superseded_because"]
+    assert len(first["phases"]) == 4
+    assert first["provenance"]["human_operators"]["signatures"] == ["Close(x0: container)"]
+    assert first["phases"][2]["task_plan"] == [f"Drop({scene.second}, blue_bin)"]
+    checked = {v["atom"]: v for v in first["verifications"]}
+    assert set(checked) == {"LidClosed(red_bin)", "LidOpen(red_bin)"}
+    assert all(v["phase"] == 1 and v["satisfied"] for v in checked.values())
+
+    # Every stretch names its phase as (plan, index), and that phase is the one it carried out.
+    segments = meta["segments"]
+    assert [(s["plan_generation"], s["phase_index"]) for s in segments] == [(0, 0), (0, 1), (0, 2), (1, 0)]
+    plans = {0: first, 1: record}
+    for segment in segments:
+        phase = plans[segment["plan_generation"]]["phases"][segment["phase_index"]]
+        assert segment["phase_description"] == phase["description"]
+    assert "n_phases" not in meta, "two plans' lengths, read as one"
+
+
+class SlowToySidecar(ToySidecarPlanner):
+    """The toy next door, slow enough that a stop reaches it before a drop is done."""
+
+    def launch_command(self) -> list[str]:
+        return [*super().launch_command(), "--step", "0.2"]
+
+
+@pytest.mark.parametrize("hosting", sorted(HOSTINGS))
+def test_a_stop_reaches_the_toy_part_way_through_a_leg_and_the_plan_does_not_advance(trial, hosting):
+    """The toy declares cooperative stop, and the loop never passed it a should_stop: a preempt waited
+    for the whole leg. Now the stop reaches it -- across the process boundary as a stop file, for the
+    sidecar -- and the leg it cut short neither advances the plan nor counts as a failed execution."""
+    r = trial(hosting=hosting, planner_cls=SlowToySidecar if hosting == "sidecar" else None)
+    if hosting == "in-process":
+        r.planner.world.step_seconds = 0.2
+    r.operator.stop_legs = True
+
+    with pytest.raises(Stopped):
+        r.run()
+    (executed,) = of(r.calls, "execute")
+    assert callable(executed.kwargs["should_stop"])
+    assert whereabouts(r.planner)[r.scene.first] == "floor", "the drop the stop was meant to cut short ran"
+    assert r.loop.outcome.plan.index == 0
+    assert r.loop.outcome.failure_stage is None
+
+
+def test_a_planner_that_does_not_declare_cooperative_stop_is_not_handed_one(trial):
+    r = trial(caps=replace(TOY_CAPABILITIES, supports_cooperative_stop=False))
+    r.run()
+    assert all("should_stop" not in call.kwargs for call in of(r.calls, "execute"))
+
+
 # --- through a session, on a profile that names the toy -------------------------------------------------
 
 
@@ -834,7 +943,7 @@ def test_a_session_on_the_toy_runs_the_trial_and_files_the_demonstration(toy_ses
     assert scene.placed(whereabouts(session._backend)) == scene.instructed
 
     session.label(True)
-    assert wait_for(lambda: any(profile.status_dir("success").glob("*/hitl.json"))), "nothing was filed"
+    assert wait_for(lambda: merged_under(profile, "success")), "nothing was filed"
     _, meta, record = merged_episode(profile, "success")
     assert [(s["phase_index"], s["source"]) for s in meta["segments"]] == [
         (0, "tamp"),
@@ -868,7 +977,7 @@ def test_a_persons_step_that_never_verifies_is_excluded_without_a_label(toy_sess
     assert session.labeled_count == 0
     assert len(t.person.calls) == 2
 
-    assert wait_for(lambda: any(profile.status_dir("failure").glob("*/hitl.json"))), "nothing was filed"
+    assert wait_for(lambda: merged_under(profile, "failure")), "nothing was filed"
     _, meta, record = merged_episode(profile, "failure")
     ended = (record["outcome"], record["excluded"], record["failure_stage"], record["filed_under"])
     assert ended == ("excluded", True, "verification", "failure")

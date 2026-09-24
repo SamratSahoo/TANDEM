@@ -133,8 +133,15 @@ class TeleopExecutor:
                 hint="Build the LegSpec with HumanPhaseRequest.leg_spec so the two cannot disagree.",
             )
 
-        self._killed.clear()
+        # `_killed` is NOT cleared here. A forced stop can land before the leg starts -- the arm takes
+        # seconds to release -- and clearing it on entry threw that kill away: the driver was launched,
+        # opened the robot and the cameras, and the leg came back "done". It is cleared when the leg
+        # ends instead (the `finally` below), so each kill ends exactly the leg it was aimed at.
         log = self.ctx.on_log
+        if self._killed.is_set():
+            self._killed.clear()
+            log("tandem", "a forced stop arrived before the teleop driver started; it is not started")
+            return HumanPhaseResult("aborted")
         if request is not None and request.stamped:
             log("tandem", f"handing phase {request.phase_index + 1} of {request.n_phases} to a person: "
                           f"{request.description}")
@@ -142,6 +149,11 @@ class TeleopExecutor:
         child = self._start(host, leg)
         with self._lock:
             self._child = child
+            # Checked again under the lock `kill` takes: one that landed while the driver was being
+            # launched found no child to end, so it is ended here instead of driving the arm.
+            killed_while_starting = self._killed.is_set()
+        if killed_while_starting and child is not None:
+            child.kill()
 
         try:
             noticed_exit = False
@@ -174,12 +186,15 @@ class TeleopExecutor:
         finally:
             with self._lock:
                 self._child = None
+                killed = self._killed.is_set()
+                self._killed.clear()
 
-        if self._killed.is_set():
-            return HumanPhaseResult("aborted", n_frames=host.n_frames, leg_dir=host.leg_dir)
+        dirs = tuple(Path(directory) for directory, _ in host.saved)
+        if killed:
+            return HumanPhaseResult("aborted", n_frames=host.n_frames, leg_dir=host.leg_dir, leg_dirs=dirs)
         if host.n_frames:
             log("tandem", f"the teleop leg is part of this episode ({host.n_frames} frames)")
-        return HumanPhaseResult("done", n_frames=host.n_frames, leg_dir=host.leg_dir)
+        return HumanPhaseResult("done", n_frames=host.n_frames, leg_dir=host.leg_dir, leg_dirs=dirs)
 
     def kill(self) -> None:
         self._killed.set()

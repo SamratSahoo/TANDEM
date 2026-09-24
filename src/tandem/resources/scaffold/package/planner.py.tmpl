@@ -190,6 +190,7 @@ class {{class_name}}(Planner):
         return ExecuteResult(ok=True, n_frames=0, rollout_dir=str(save_dir))
 
     # TODO: capture_frame(camera=...) returns the path of an image from that camera. tandem checks a
-    # person's work on a human phase from it, so until it exists, those checks cannot run (the
-    # conformance kit skips its test). warm(), close(), home(), release_hardware() and
-    # reacquire_hardware() default to doing nothing: override them once the planner holds hardware.
+    # person's work on a human phase from it, so until it exists, a session with those checks on
+    # refuses to start (and the conformance kit skips its test). warm(), close(), home(),
+    # release_hardware() and reacquire_hardware() default to doing nothing: override them once the
+    # planner holds hardware.

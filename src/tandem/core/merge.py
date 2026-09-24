@@ -12,7 +12,10 @@ and the teleop driver are separate processes and would have to agree on one.
 
 The merge never partially writes. It builds in a scratch directory beside
 ``eval/success/failure`` and moves it into place, so a failure leaves the legs untouched on
-disk and re-running once the cause is fixed is safe.
+disk and re-running once the cause is fixed is safe. Everything that can be refused -- the status,
+a destination already taken -- is refused before a leg moves; every copy is made before a leg
+moves; and if anything fails once the legs are parked under the scratch directory, each is moved
+back where it was before the scratch directory is removed.
 
 Each leg is one phase φ_k of a phase-planned task (or a stretch of one, for conjoined robot
 phases). A leg that says which — ``phase_index`` in its ``_meta.json`` — keeps saying so in the
@@ -21,16 +24,25 @@ merged ``segments[]``, which is what lets τ = ((τ_1, φ_1), …) be read back 
 
 from __future__ import annotations
 
+import difflib
 import json
 import shutil
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from tandem.core.profiles import STATUSES, Profile
-from tandem.core.trajectories import CAMERA_FILES, META_FILE, STATE_FILE
+from tandem.core.trajectories import (
+    CAMERA_FILES,
+    META_FILE,
+    STATE_FILE,
+    read_hitl,
+    refile_record,
+    settled_outcome,
+)
 
 # Per-frame arrays that concatenate along axis 0. Anything else in the npz is refused rather
 # than silently dropped — an unexpected array is a schema change, and quietly losing it would
@@ -409,8 +421,32 @@ def merge(
     *,
     status: str | None = None,
     tools_dir: Path | None = None,
+    leg_stamps: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Join every leg of ``trajectory_id`` into the first TAMP leg's directory."""
+    """Join every leg of ``trajectory_id`` into the first TAMP leg's directory.
+
+    ``status`` is where the merged trajectory is filed (default: where its primary leg already is).
+    ``leg_stamps`` adds keys to a leg's stretch of ``segments[]``, by leg directory name: the session
+    passes each leg's ``plan_generation``, which the recorders do not stamp.
+    """
+    if status is not None and status not in STATUSES:
+        # Before anything is looked at, let alone moved: `status_dir` refuses it too, but only once
+        # the legs were parked, and the clean-up after that refusal deleted them.
+        close = difflib.get_close_matches(str(status), STATUSES, n=1)
+        raise MergeError(
+            f"Unknown status {status!r}; a trajectory is filed under one of {', '.join(STATUSES)}."
+            + (f" Did you mean {close[0]!r}?" if close else "")
+        )
+    stranded = _work_dir(profile, trajectory_id) / "segments"
+    if stranded.is_dir() and any(stranded.iterdir()):
+        # A merge that failed after parking the legs and could not put them back. They are the only
+        # copy of the trial's raw legs, invisible to find_legs down there, and removing the scratch
+        # directory -- which every merge used to do first -- would delete them.
+        raise MergeError(
+            f"{stranded.parent} holds raw legs of trajectory {trajectory_id} from a merge that did not "
+            f"finish. Move each directory in {stranded} back into eval/, success/ or failure/, named "
+            "without its NN_source_ prefix, delete the empty scratch directory, and merge again."
+        )
     legs = find_legs(profile, trajectory_id)
     if not legs:
         raise MergeError(f"No legs found for trajectory {trajectory_id}.")
@@ -445,6 +481,17 @@ def merge(
             f"{primary['dir']} already has a segments/ directory, so trajectory {trajectory_id} "
             "looks merged already. Refusing to merge twice."
         )
+    # Where the merged trajectory will go, settled while every leg is still in place. A destination
+    # something else already holds is refused now: moved onto later, it would have put this merge
+    # INSIDE it rather than failing.
+    dest_status = status or primary["status"]
+    dest = profile.status_dir(dest_status) / primary["dir"].name
+    if dest.exists() and dest != primary["dir"]:
+        raise MergeError(
+            f"{dest} already exists, so trajectory {trajectory_id} cannot be merged there.",
+        )
+    if dest_status == "success":
+        _refuse_settled_as_success(primary, trajectory_id)
 
     # Only cameras every leg recorded can be joined. A camera some legs lack cannot simply be
     # dropped from those legs: the merged clip would be shorter than the others and every
@@ -469,7 +516,7 @@ def merge(
     # Build in a scratch directory that is a SIBLING of eval/success/failure, not inside one:
     # every directory inside a status dir is listed as a trajectory, and a half-built merge
     # must never show up as one.
-    work = profile.trajectories_dir() / f".merge-{trajectory_id}"
+    work = _work_dir(profile, trajectory_id)
     if work.exists():
         shutil.rmtree(work)
     work.mkdir(parents=True)
@@ -511,17 +558,22 @@ def merge(
             for key in ("config_id", *PHASE_KEYS):
                 if leg["meta"].get(key) is not None:
                     segment[key] = leg["meta"][key]
+            # Which plan that phase belongs to, from whoever ran the trial (`leg_stamps`). A replan
+            # numbers its phases from 0 again, so after one, phase_index alone is ambiguous.
+            segment.update((leg_stamps or {}).get(leg["dir"].name, {}))
             segments.append(segment)
             cumulative += n_cam
 
         meta = dict(primary["meta"])
         # The primary leg's phase fields describe that ONE leg; left at the top they would label
         # the whole trajectory as phase k. They live on in segments[]. n_phases is the plan's,
-        # so it stays at the top when every leg that states it agrees.
+        # so it stays at the top when every leg that states it agrees -- and was stated by ONE
+        # plan: after a replan, the legs' n_phases are two different plans' lengths.
         for key in PHASE_KEYS:
             meta.pop(key, None)
         stated = {leg["meta"]["n_phases"] for leg in legs if leg["meta"].get("n_phases") is not None}
-        if len(stated) == 1:
+        plans = {s.get("plan_generation") for s in segments if s.get("phase_index") is not None}
+        if len(stated) == 1 and len(plans) <= 1:
             meta["n_phases"] = stated.pop()
         # The merged action array exists exactly when some leg carried one, and was then resolved
         # into one convention for every frame (see OPTIONAL_STATE_KEYS). Say so unconditionally
@@ -557,40 +609,49 @@ def merge(
             raise MergeError("The merged frame count disagrees with the concatenated arrays.")
         (work / META_FILE).write_text(json.dumps(meta, indent=2))
 
-        # Commit. Park every raw leg under the merged directory, keeping the sorted order in
-        # the name so the hand-off sequence stays readable on disk.
+        # The primary leg's non-state artifacts (the backend's plan, perception output, the phase
+        # record, …) are surfaced at the top so the merged directory reads like the rollout it grew
+        # from — `tandem traj replay` looks for the plan there. Copied from the leg where it still
+        # is, BEFORE any leg moves, so a copy that fails (a full disk) fails with every leg in place.
+        # Logs stay with the leg that produced them: the primary's is still being written when this
+        # runs, so a copy would be truncated. Any `*.log`, whatever the planner calls its own.
+        replaced = {STATE_FILE, META_FILE, *CAMERA_FILES}
+        for item in sorted(primary["dir"].iterdir()):
+            if item.name in replaced or item.suffix == ".log" or (work / item.name).exists():
+                continue
+            if item.is_dir():
+                shutil.copytree(item, work / item.name)
+            else:
+                shutil.copy2(item, work / item.name)
         shutil.rmtree(scratch)
         segments_dir = work / "segments"
         segments_dir.mkdir()
-        primary_parked = None
+        dest.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        # Nothing has moved yet: the legs are exactly where they were.
+        shutil.rmtree(work, ignore_errors=True)
+        raise
+
+    # Commit: park every raw leg under the merged directory, keeping the sorted order in the name so
+    # the hand-off sequence stays readable on disk, then move the whole into place. The only steps
+    # left that touch a leg are renames, and each is recorded so it can be undone.
+    parked_legs: list[tuple[Path, Path]] = []
+    try:
         for i, leg in enumerate(legs):
             parked = segments_dir / f"{i:02d}_{leg['source']}_{leg['dir'].name}"
             shutil.move(str(leg["dir"]), str(parked))
-            if leg is primary:
-                primary_parked = parked
-
-        # The primary leg's non-state artifacts (the backend's plan, perception output, …) moved
-        # down with it. Surface them at the top so the merged directory reads like the rollout it
-        # grew from — `tandem traj replay` looks for the plan there. Logs stay with the leg that
-        # produced them: the primary's is still being written when this runs, so a copy would be
-        # truncated. Any `*.log`, whatever the planner that recorded the leg calls its own.
-        replaced = {STATE_FILE, META_FILE, *CAMERA_FILES}
-        if primary_parked is not None:
-            for item in sorted(primary_parked.iterdir()):
-                if item.name in replaced or item.suffix == ".log" or (work / item.name).exists():
-                    continue
-                if item.is_dir():
-                    shutil.copytree(item, work / item.name)
-                else:
-                    shutil.copy2(item, work / item.name)
-
-        dest_status = status or primary["status"]
-        dest = profile.status_dir(dest_status) / primary["dir"].name
-        dest.parent.mkdir(parents=True, exist_ok=True)
+            parked_legs.append((leg["dir"], parked))
         shutil.move(str(work), str(dest))
-    except Exception:
-        shutil.rmtree(work, ignore_errors=True)
+    except Exception as exc:
+        _unpark(parked_legs, work, trajectory_id, exc)
         raise
+
+    # A merge filed under a status of its own is a relabel by another name, and the record it carried
+    # up from the primary leg must say where the trial now is -- a trial the session stopped before
+    # anybody labeled it (filed_under: null) is filed exactly this way.
+    record = read_hitl(dest)
+    if status is not None and record and record.get("filed_under") != status:
+        refile_record(dest, record, status, settled=settled_outcome(record))
 
     return {
         "merged": True,
@@ -607,3 +668,58 @@ def merge(
         "legs_skipped": skipped,
         "segments": segments,
     }
+
+
+def _work_dir(profile: Profile, trajectory_id: str) -> Path:
+    """Where a merge of ``trajectory_id`` is built: a sibling of the status directories, never in one.
+
+    Every directory inside a status dir is listed as a trajectory, and a half-built merge must never
+    show up as one.
+    """
+    return profile.trajectories_dir() / f".merge-{trajectory_id}"
+
+
+def _unpark(parked_legs: list[tuple[Path, Path]], work: Path, trajectory_id: str, error: Exception) -> None:
+    """Put every leg a failed commit parked back where it was, then remove the scratch directory.
+
+    The scratch directory is removed only once every leg is out of it: removing it with a leg still
+    inside deletes that leg, which is the raw data the merge exists to keep. A leg that cannot be
+    moved back leaves the directory in place, and the error says where the legs are.
+    """
+    stranded: list[str] = []
+    for original, parked in reversed(parked_legs):
+        if original.exists() or not parked.exists():
+            continue
+        try:
+            original.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(parked), str(original))
+        except OSError as exc:
+            stranded.append(f"{parked} ({exc})")
+    if stranded:
+        raise MergeError(
+            f"merging trajectory {trajectory_id} failed ({type(error).__name__}: {error}), and "
+            f"{len(stranded)} of its legs could not be moved back: {'; '.join(stranded)}. They are intact "
+            f"under {work / 'segments'}; move them back into eval/ by hand before merging again."
+        ) from error
+    shutil.rmtree(work, ignore_errors=True)
+
+
+def _refuse_settled_as_success(primary: dict, trajectory_id: str) -> None:
+    """Refuse to file as a success a trial whose record says the phase loop settled it otherwise.
+
+    ``tandem traj merge --status success`` is a relabel by another name: an excluded trial -- or one
+    the loop ended part-way -- merged there would be exported as a demonstration the method rejected.
+    ``tandem traj relabel --force`` is the one deliberate way to overrule that, and it says so in the
+    record.
+    """
+    record = read_hitl(primary["dir"])
+    settled = settled_outcome(record)
+    if settled is None:
+        return
+    stage = record.get("failure_stage")
+    raise MergeError(
+        f"trajectory {trajectory_id} ended {settled}" + (f" at {stage}" if stage else "")
+        + f" ({record.get('outcome_reason') or 'see its hitl.json'}), so it cannot be filed as a success. "
+        "Merge it without --status, then use `tandem traj relabel <id> success --force` to overrule "
+        "that on purpose."
+    )

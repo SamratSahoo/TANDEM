@@ -33,6 +33,8 @@ class HumanExecutor(Protocol):            # tandem.executors.HumanExecutor
     def run(self, request: HumanPhaseRequest | None, leg: LegSpec, *,
             save_root: Path, should_stop: Callable[[], bool]) -> HumanPhaseResult: ...
     def kill(self) -> None: ...
+    # optional:
+    def close(self) -> None: ...
 ```
 
 **`run`** carries out one phase and records it. It returns once whatever drove the arm has let go
@@ -55,7 +57,15 @@ of the robot and the cameras.
   wait on anything without polling it. It is cheap and never blocks.
 
 **`kill`** ends the leg in flight at once. It is called from another thread by a forced stop. `run`
-then returns `aborted` as soon as it can. It is a no-op when nothing is running.
+then returns `aborted` as soon as it can. It is a no-op when nothing is running. A kill can land
+just before `run` is entered (the arm takes seconds to release), so do not clear the kill flag when
+`run` starts: clear it when `run` returns. A forced stop that arrives before the loop calls `run`
+at all never starts the leg.
+
+**`close`** is optional. Define it when building the executor starts something that outlives a leg
+(a policy server, a device it opened). It is called exactly once, when the session ends, on every
+way it ends (a failure and a forced stop included), after the arm is parked and the planner closed.
+It must not raise; one that does is logged.
 
 **Raise `CustodyError`** from `run` when the arm cannot be given back: a process that will not die
 still holds the cameras. The session then ends and says so, rather than reaching for hardware
@@ -133,15 +143,22 @@ class PolicyExecutor:
     def run(self, request, leg, *, save_root, should_stop):
         if request is None:          # an arm lent with no phase: a person's to take, not a policy's
             return HumanPhaseResult("aborted")
-        self._killed = False
-        leg_dir, n_frames, stopped = self._run_policy(request, leg, Path(save_root), should_stop)
-        if self._killed:
-            return HumanPhaseResult("aborted", n_frames=n_frames, leg_dir=leg_dir)
-        status = "ended_by_operator" if stopped else "done"
-        return HumanPhaseResult(status, n_frames=n_frames, leg_dir=leg_dir)
+        try:
+            if self._killed:         # killed before the leg started: never start it
+                return HumanPhaseResult("aborted")
+            leg_dir, n_frames, stopped = self._run_policy(request, leg, Path(save_root), should_stop)
+            if self._killed:
+                return HumanPhaseResult("aborted", n_frames=n_frames, leg_dir=leg_dir)
+            status = "ended_by_operator" if stopped else "done"
+            return HumanPhaseResult(status, n_frames=n_frames, leg_dir=leg_dir)
+        finally:
+            self._killed = False     # cleared as the leg ends, never as it starts
 
     def kill(self):
         self._killed = True
+
+    def close(self):
+        """Stop the policy server this executor started, once, when the session ends."""
 
     def _run_policy(self, request, leg, save_root, should_stop):
         """Yours: open the robot and cameras; run the policy on request.instructions (and
@@ -248,8 +265,4 @@ behaviours are deliberate:
 
 ## Known gaps
 
-- `HumanExecutor` has no `close()`, so an executor is never told the session is over. One that
-  holds a process or a model across legs must clean up on its own (at `kill`, or at exit).
-- A forced stop in the moment between the hand-off starting and `run` being entered is not a kill:
-  `run` clears its kill flag on entry. `should_stop` still ends the leg.
 - `ExecutorContext.options` is always empty (above).

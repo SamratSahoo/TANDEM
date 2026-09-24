@@ -160,12 +160,16 @@ class HumanPhaseResult:
       any executor runs.
 
     `n_frames` counts every frame the leg wrote, over every recording the hand-off made. `leg_dir` is
-    the last directory a recording went into, or None when nothing was recorded.
+    the last directory a recording went into, or None when nothing was recorded. `leg_dirs` is every
+    one of them, in order, when the executor knows them (a teleop driver starts a new recording
+    whenever one ends short of quitting); empty means `leg_dir` is the only one. The loop notes each
+    against the plan the phase belongs to, so a merged episode can say which plan's phase it was.
     """
 
     status: Literal["done", "aborted", "ended_by_operator"]
     n_frames: int = 0
     leg_dir: Path | None = None
+    leg_dirs: tuple[Path, ...] = ()
 
     def __post_init__(self) -> None:
         if self.status not in STATUSES:
@@ -175,6 +179,7 @@ class HumanPhaseResult:
         object.__setattr__(self, "n_frames", int(self.n_frames))
         if self.leg_dir is not None:
             object.__setattr__(self, "leg_dir", Path(self.leg_dir))
+        object.__setattr__(self, "leg_dirs", tuple(Path(d) for d in self.leg_dirs))
 
     @property
     def recorded(self) -> bool:
@@ -235,6 +240,12 @@ class HumanExecutor(Protocol):
     `name` is the registered name. `segment_source` is what its legs are (one of `SEGMENT_SOURCES`), and
     it must be written into each leg's ``_meta.json``. `display_name` and `summary` are what a person
     choosing an executor is shown.
+
+    An executor may also define ``close() -> None``: release whatever building it started (a policy
+    server, a device it opened). It is optional, and not in this protocol's members, so an executor
+    that holds nothing between legs need not write one. When defined, it is called exactly once, when
+    the session ends -- on every way it ends, a failure or a forced stop included -- after the arm is
+    parked and the planner closed (``PhaseLoop.close``). It must not raise; one that does is logged.
     """
 
     name: str
@@ -489,12 +500,14 @@ def create(name: str, ctx: ExecutorContext) -> HumanExecutor:
     missing = [member for member in _EXECUTOR_MEMBERS if not hasattr(executor, member)]
     missing += [m for m in ("run", "kill") if m not in missing and not callable(getattr(executor, m))]
     if missing:
+        _discard(executor)
         raise TandemError(
             f"The human executor {name!r} ({origin}) built a {type(executor).__name__}, which has no "
             f"{', '.join(missing)}.",
             hint="An executor implements tandem.executors.HumanExecutor.",
         )
     if executor.segment_source != factory.segment_source:
+        _discard(executor)
         raise TandemError(
             f"The human executor {name!r} ({origin}) declares its legs as {factory.segment_source!r} but "
             f"built one that records them as {executor.segment_source!r}.",
@@ -502,6 +515,22 @@ def create(name: str, ctx: ExecutorContext) -> HumanExecutor:
             "the legs are.",
         )
     return executor
+
+
+def _discard(executor: Any) -> None:
+    """Close an executor that was built and then refused, before the refusal is raised.
+
+    Building it may already have started a process or opened a device, and nothing will hold it once
+    `create` raises: the loop never keeps it, so its own ``close`` would never be reached.
+    """
+    close = getattr(executor, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:
+            # Not raised in place of the refusal that follows: that says what is actually wrong with
+            # the executor, and a second error from tidying up after it would only hide it.
+            pass
 
 
 # ---- resolution ---------------------------------------------------------------

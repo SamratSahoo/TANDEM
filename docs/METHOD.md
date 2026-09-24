@@ -30,7 +30,7 @@ without changing any of it ([ADDING_A_PLANNER.md](ADDING_A_PLANNER.md)).
 | Human execution, π_ωΔ | `executors/` (`TeleopExecutor` ships), called from `phase_loop._lend_arm` | The loop releases the robot and cameras before the executor runs and takes them back after. |
 | Re-perception after every phase | `phase_loop._perceive` before every robot leg; a fresh `capture_frame` for every check | See §7 for consecutive robot phases. |
 | Verification of a human phase | `grounding.verify_effects`: add effects must hold, delete effects must not | Preconditions can be checked first (`check_human_preconditions`). |
-| A failed trial is terminated and excluded | `phase_loop._verification_failed` → `session._file_excluded` → `episodes.write_phase_record` | Filed under `failure/` with `excluded: true`. No label prompt. |
+| A failed trial is terminated and excluded | `phase_loop._verification_failed` → `session._file_without_label` → `episodes.write_phase_record` | Filed under `failure/` with `excluded: true`. No label prompt. |
 | τ = ((τ₁, φ₁), …, (τ_N, φ_N)) | `core/merge.py` joins the legs; each leg's `phase_index` becomes `segments[k].phase_index`. `hitl.json` holds the φ_k. | One episode per trial. |
 | DATAFARM alignment | TiPToP's `planner.options.tamp` (the VAE manifold cost, `blend_mode: vae`), set by the `paper` preset | A planner option, not part of the method's core. |
 | Failure taxonomy (Fig. 4) | `plan.OUTCOMES`, `plan.FAILURE_STAGES` | Stages: `invention`, `tamp_planning`, `tamp_execution`, `human_policy`, plus `verification`. |
@@ -90,7 +90,7 @@ no robot. With no object labels given, a vision model names the objects first
 ```
 plan = None;  first = True
 until the trial is over:
-    check for a preempt
+    check for a preempt, or the session stopping     # either ends the attempt here, as aborted
     if plan is finished: stop
 
     if plan and the next phase is a person's:
@@ -111,10 +111,14 @@ until the trial is over:
     first = False
 
 take_turn:
+    the current phase is a person's → human_phase(phase)   # a pending hand-off request is its answer
     the operator asked for the arm → lend it to teleop with no phase attached; nothing advances
-    the current phase is a person's → human_phase(phase)
     otherwise                     → robot_leg(scene)
 ```
+
+A planner verb (`perceive`, `plan`, `execute`) or a human executor that raises ends the trial at its
+stage (`tamp_planning`, `tamp_execution`, `human_policy`) before the error goes on up, so the record
+never reads as a trial that ran.
 
 **A robot leg** (`_run_robot_phase`):
 
@@ -137,7 +141,9 @@ if not result.ok:  on_robot_phase_failure
 record result.task_plan against every phase in run
 execution = backend.execute(result.plan_handle,
                             LegSpec(trajectory_id, instruction, phase_index, n_phases,
-                                    phase_description, record), save_dir=leg_dir)
+                                    phase_description, record), save_dir=leg_dir,
+                            should_stop=preempt or stop requested   if caps.supports_cooperative_stop)
+if execution.stopped_early:  end: aborted (the operator's stop)     # never advances
 if not execution.ok:  end: failure at "tamp_execution"      # never advances
 [check_tamp_effects] put the run's add effects to the camera; recorded, never enforced
 plan.advance()   # past every phase in run
@@ -153,7 +159,9 @@ for attempt in 1 .. 1 + verify_retries:
     wait for the operator's answer:
         abort  → end: aborted
         teleop → release the arm; human_executor.run(request, leg); count the leg; take the arm back
+                   (a forced stop before the leg starts → it never starts, status "aborted")
                    status "aborted"                        → end: failure at "human_policy"
+                   the session is stopping                 → end: aborted, unchecked
                    nothing recorded, while recording        → refused unless allow_unrecorded_human_phase;
                                                               ask again (no retry spent)
         done   → the step was done by hand; while recording, refused the same way
@@ -165,6 +173,8 @@ for attempt in 1 .. 1 + verify_retries:
     no effect a camera can settle (HandEmpty, Holding)     → accept, no frame, recorded as unchecked
     check = verify_effects(a fresh frame from verification_camera)
         the check could not run (camera or model error)    → accept, recorded as unchecked
+        the planner has no capture_frame at all            → end at "verification" (the session
+                                                              refuses such a planner at start)
         passed, or verify_enforced off                     → record the verdicts; advance
         failed with a retry left                           → tell the operator what is still missing
         failed with none left                              → record the failing verdicts;
@@ -174,17 +184,24 @@ for attempt in 1 .. 1 + verify_retries:
 
 **After the loop** (`core/session.py` `_run_task`), on every way out, a preempt included:
 
-- **Legs on disk, and the trial excluded:** filed under `failure/` with no label prompt
-  (`trial_excluded`). It is not counted towards `--episodes`.
-- **Legs on disk, otherwise:** the operator labels it success or failure (`awaiting_label`, then
-  `labeled`).
+- **Legs on disk, and the loop ended the trial itself:** filed under `failure/` with no label prompt,
+  since there is nothing left for a label to decide. Excluded (`trial_excluded`), and aborted --
+  the operator gave up, preempted, or stopped the session (`trial_filed`) -- are not counted towards
+  `--episodes`; a failure at `tamp_planning`, `tamp_execution` or `human_policy` (`trial_filed`) is,
+  as a failure label was. The one exception is a check left to the label on purpose
+  (`on_verification_failure: label`), which is labeled.
+- **Legs on disk, otherwise** (the plan ran to the end): the operator labels it success or failure
+  (`awaiting_label`, then `labeled`). A session stopped at that prompt leaves the legs unmerged in
+  `eval/`, with `hitl.json` written into the primary leg (`trial_unlabeled`); `tandem traj merge
+  <trajectory id> --status success|failure` files it later.
 - **Nothing recorded:** nothing is filed (`rollout_discarded`). A trial that failed at `invention`
   has no legs, so its only trace is the events file, plus the model's inputs and replies in the
   session's scratch directory.
 
-Filing merges the legs into one episode and writes `hitl.json` and `vlm/` beside it
-(`episodes.merge_trajectory`). This runs in the background, because a merge of several GB of video
-must not hold up the next task.
+Filing writes `hitl.json` and `vlm/` into the leg the trial is filed under, then merges the legs into
+one episode and writes them again beside it (`episodes.merge_trajectory`). The merge runs in the
+background, because a merge of several GB of video must not hold up the next task; a session that
+is ending waits for it (bounded), and the record written first survives a merge that never finishes.
 
 ### How a trial ends
 
@@ -194,12 +211,21 @@ resolves what `hitl.json` says:
 | `outcome` | set by | label asked |
 |---|---|---|
 | `excluded` | the loop: a check that stops the trial failed, with `on_verification_failure: exclude` | **no**; filed under `failure/` |
-| `aborted` | the loop: the operator abandoned a human phase. Kept whatever the label says. | yes, when legs were recorded |
-| `success` / `failure` | the operator's label, for every other trial | yes |
+| `aborted` | the loop: the operator abandoned a human phase, preempted the attempt, or stopped the session, with the plan unfinished | **no**; filed under `failure/` |
+| `failure` at `tamp_planning`, `tamp_execution`, `human_policy`, `invention` | the loop: the plan did not finish (Fig. 4) | **no**; filed under `failure/` |
+| `failure` at `verification` | the loop, with `on_verification_failure: label` | yes: the label decides, and may overrule the check |
+| `success` / `failure` | the operator's label, for a trial whose plan ran to the end | yes |
 
-The operator's label counts even for a trial the loop ended early. `failure_stage` is always the
-loop's, so a trial ended at `tamp_execution` and then labeled success reads
-`"outcome": "success", "failure_stage": "tamp_execution"`.
+An unfinished plan is never a success. `failure_stage` is always the loop's. A trial the loop
+settled keeps its outcome whatever directory it is later moved to: `tandem traj relabel <id>
+success` refuses it without `--force`, a forced one is recorded under `overruled`, and
+`tandem export lerobot` skips a settled record it finds under `success/`.
+
+After a `replan`, `hitl.json` is written from the last plan, and every plan it replaced is kept as
+`superseded_plans` (its phases, planner records and verdicts, `plan_generation`, and
+`superseded_because`). The merged `segments[]` then carry `plan_generation` beside `phase_index`,
+and `leg_plan_generations` maps each leg directory to its plan, so every recorded leg's phase and
+verdicts can still be found.
 
 ---
 
@@ -301,12 +327,14 @@ The primary leg's `_meta.json` (the first planner leg) with these keys set:
 - `n_frames`, `fps`, `total_video_frames`.
 - `record_start` / `record_stop`: from the first and last leg.
 - `cameras`: dataset key → clip file name.
-- `n_phases`: kept only when every leg that states it agrees.
+- `n_phases`: kept only when every leg that states it agrees, and all of them carried out phases of
+  one plan.
 - `segments[]`: one per leg, with `source` (`tamp`, `teleop` or `policy`), `timestamp`,
   `n_frames`, `n_video_frames`, `video_start` / `video_stop` (seconds into the merged clip) and
   `record_start` / `record_stop`. A leg that recorded its phase also has `phase_index`, `n_phases`
-  and `phase_description`. The phase keys are per segment: they are removed from the top level
-  because they describe one leg.
+  and `phase_description`, and after a `replan`, `plan_generation`: which plan that phase index
+  belongs to (0 for the first; absent means the trial had one plan). The phase keys are per segment:
+  they are removed from the top level because they describe one leg.
 - `cameras_dropped`, `proportional_fallback_legs`, `frames_trimmed`, `legs_skipped`: what the
   merge had to work around.
 - `action_convention` and `action_notes`: only when some leg carried `action_joint_velocity`, which
@@ -330,8 +358,12 @@ and there is a plan.
 | `outcome` | `success`, `failure`, `excluded` or `aborted` (§3). |
 | `failure_stage` | `invention`, `tamp_planning`, `tamp_execution`, `verification`, `human_policy` or `null`. Always the loop's word, whatever the label said. |
 | `excluded` | `true` exactly when `outcome` is `excluded`. |
-| `filed_under` | `success` or `failure`: where the episode was filed. |
+| `filed_under` | `success` or `failure`: where the episode was filed. `null` for a trial the session stopped before it was labeled. A relabel rewrites it. |
 | `outcome_reason` | Present when the loop ended the trial: what was wrong, in words. |
+| `overruled` | Present when `tandem traj relabel --force` filed a trial the loop settled under `success/`: `{outcome, excluded, failure_stage, by}` as the loop had them. |
+| `plan_generation` | Which plan this record is: 0, or one more for each `replan`. |
+| `superseded_plans[]` | Every plan a `replan` replaced, oldest first: each a record of this same shape as it stood when it was given up, with `plan_generation` and `superseded_because`. |
+| `leg_plan_generations` | After a `replan`: leg directory name → the `plan_generation` it carried out a phase of. |
 | `specification` | What the proposal made of the instruction (below). |
 | `initially_true` | Invented atoms measured true on the first image (`classify_initial`); `[]` otherwise. |
 | `provenance` | Who produced what: `phases_and_their_order`, `phase_sub_goals`, `invented_predicates` and `human_instructions` (the VLM); `human_operators` and `robot_operators`, each `{by, signatures}` in one spelling, `Name(param: type)` (a declared signature is read and re-rendered, whatever its spacing); `robot_phases` (the planner); `who_does_what` (tandem); `human_steps` (the executor that would carry a step out; whether it did is `phases[k].carried_out`). |
@@ -485,8 +517,10 @@ From the session:
 | `session_start`, `session_end` | |
 | `awaiting_task` | |
 | `awaiting_label` | `dir` |
-| `labeled` | `dir`, `success`, and the trial summary: `trajectory_id`, `outcome`, `excluded`, `filed_under`, `failure_stage`, `reason` |
+| `labeled` | `dir`, `success`, and the trial summary: `trajectory_id`, `outcome`, `excluded`, `filed_under`, `failure_stage`, `reason`, `labeled` |
 | `trial_excluded` | `dir` and the trial summary |
+| `trial_filed` | `dir` and the trial summary: failed part-way or aborted, filed without a label |
+| `trial_unlabeled` | `dir` and the trial summary: the session stopped at the label prompt |
 | `rollout_discarded` | the trial summary: nothing was recorded |
 | `rollout_aborted` | `error` when the attempt failed rather than being preempted |
 | `teleop_switch_pending` | the operator asked for the arm; honoured at the next phase boundary |
@@ -495,7 +529,7 @@ From the session:
 `tandem.core.session.Session.summary()` (the web UI's state, and `GET /api/sessions/{id}`) carries
 the live view:
 
-- `state`, `labeled`, `success`, `excluded`, `target`;
+- `state`, `labeled`, `success`, `excluded`, `aborted`, `target`;
 - `last_trial`: how the last attempt ended;
 - `human_phase`: the step being shown, with `executor` and `by_hand`, which says whether "done"
   would be accepted;
@@ -572,10 +606,8 @@ still reads `cmd_joint_velocity`).
 
 ### Known limitations
 
-- A trial that is re-planned (`replan`) keeps the legs it already recorded. Those legs carry the
-  phase indices of the plan they were recorded under, which the new plan may number differently.
-- `tandem traj relabel <id> success` moves an excluded trial into `success/`, and
-  `tandem export lerobot` then exports it. Neither reads `hitl.json`. Do not relabel an excluded
-  trial unless you mean to overrule the check.
+- A trial that is re-planned (`replan`) keeps the legs it already recorded, stamped with the phase
+  indices of the plan they were recorded under. Read them with `plan_generation` (in `segments[]`,
+  or `leg_plan_generations` for legs never merged) against `superseded_plans`.
 - `segments[]` stamps a conjoined robot leg with its first phase only. Read `hitl.json`
   `covers_phases` for the rest.

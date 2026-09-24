@@ -5,8 +5,9 @@ hand-off, from the teleop driver. Each leg has its own directory under
 ``<profile>/trajectories/eval/``, and every leg carries the trajectory id the session minted. This
 module handles the disk side of that. It allocates a leg's directory, takes back the directories
 nothing was recorded into, and, once the operator has labeled the trial, files the trial under
-success/ or failure/. A trial the method EXCLUDED (a human phase that never verified) is filed under
-failure/ with no label, and its record says ``excluded: true``. Either way the legs are then merged
+success/ or failure/. A trial the phase loop ended itself -- EXCLUDED (a human phase that never
+verified), failed part-way, or aborted -- is filed under failure/ with no label, and its record says
+how it ended (``excluded: true`` for the first). Either way the legs are then merged
 into one episode, tau = ((tau_1, phi_1), .., (tau_N, phi_N)) in the paper's terms (Sec. IV-E), and
 the phase record is written beside it.
 
@@ -16,7 +17,7 @@ Nothing here holds a session. Each function is given the profile it files into a
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -102,32 +103,49 @@ def merge_trajectory(
     log: Callable[[str], None],
     emit: Callable[[dict], None],
     reason: str | None = None,
+    superseded: Sequence[dict] = (),
+    leg_generations: Mapping[str, int] | None = None,
 ) -> None:
     """Join a task's legs into one trajectory, in the background.
 
     Every trial with legs on disk comes through here, an excluded one included: excluded means kept
     out of the dataset, not deleted, and its legs are what a reader auditing the exclusion needs.
     ``reason`` is why the phase loop ended the trial, when it did (``TrialOutcome.reason``).
+    ``superseded`` and ``leg_generations`` are the plans a replan replaced and which plan each leg
+    carried out a phase of (``TrialOutcome``): the first goes into the record, the second -- after a
+    replan -- into each leg's stretch of the merged episode, so ``(plan_generation, phase_index)``
+    names its phase.
+
+    The record is written into the leg the trial is filed under BEFORE the merge starts, and again
+    beside the merged episode after. The first copy is the one that survives a merge that never
+    finishes -- a process exiting under it, a disk that fills -- and for an excluded trial it is
+    the only thing on disk that says the trial is excluded.
 
     Failure here must never take down a session: the legs are untouched on disk (the merge
     never partially writes) and `tandem traj merge` can retry once the cause is fixed.
     """
     from tandem.core import merge as merge_mod
 
+    record = {"reason": reason, "superseded": superseded, "leg_generations": leg_generations}
     episode_dir = promote_primary_leg(profile, trajectory_id, status, log=log)
+    write_phase_record(plan, episode_dir, status=status, vlm_dir=vlm_dir, log=log, **record)
+    # Only after a replan: with one plan, phase_index alone names the phase, and a segment without
+    # `plan_generation` is read as the trial's only plan (generation 0).
+    extra: dict = {}
+    if superseded and leg_generations:
+        extra["leg_stamps"] = {name: {"plan_generation": g} for name, g in leg_generations.items()}
     try:
-        result = merge_mod.merge(profile, trajectory_id, status=status, tools_dir=tools_dir)
+        result = merge_mod.merge(profile, trajectory_id, status=status, tools_dir=tools_dir, **extra)
     except Exception as exc:
         log(f"could not merge trajectory {trajectory_id}: {exc}")
         log(f"the legs are intact; retry with: tandem traj merge {trajectory_id}")
-        write_phase_record(plan, episode_dir, status=status, vlm_dir=vlm_dir, log=log, reason=reason)
         return
     # `dir` is absent when the merge declined for want of state data, so fall back to the leg
     # the label was filed against — the record has to land somewhere a reader will open.
     # Not `Path(...) or episode_dir`: Path("") is PosixPath("."), which is truthy, so an
     # absent `dir` would file the record in the working directory.
     merged_dir = Path(result["dir"]) if result.get("dir") else episode_dir
-    write_phase_record(plan, merged_dir, status=status, vlm_dir=vlm_dir, log=log, reason=reason)
+    write_phase_record(plan, merged_dir, status=status, vlm_dir=vlm_dir, log=log, **record)
     if result.get("merged"):
         log(
             f"merged {result['n_legs']} legs into one trajectory "
@@ -174,22 +192,82 @@ def promote_primary_leg(
     return destination
 
 
-def trial_outcome(outcome: str | None, status: str | None) -> dict:
+def trial_outcome(outcome: str | None, status: str | None, *, failure_stage: str | None = None) -> dict:
     """How the trial ended, as ``hitl.json`` states it: the loop's word, then the operator's label.
 
     ``outcome`` is what the phase loop recorded (``PhasePlan.set_outcome``), None for a trial that
-    ran to the end. ``status`` is where the episode was filed, ``success`` or ``failure``: the
-    operator's label, or ``failure`` for a trial filed without one.
+    ran to the end. ``failure_stage`` is where the loop ended it. ``status`` is where the episode was
+    filed, ``success`` or ``failure``: the operator's label, or ``failure`` for a trial filed without
+    one.
 
-    An ``excluded`` or ``aborted`` trial keeps that outcome whatever it was filed under. Excluded is
-    the whole point of the record -- such a trial is filed under failure/ WITHOUT a label prompt, and
-    reading the filing as its outcome would put it back among the ordinary failures a dataset keeps.
+    The loop's word stands whatever the trial was filed under when the loop settled the trial itself:
+
+    * ``excluded`` -- the whole point of the record. Such a trial is filed under failure/ WITHOUT a
+      label prompt, and reading the filing as its outcome would put it back among the ordinary
+      failures a dataset keeps.
+    * ``aborted`` -- the attempt did not finish, so it is not a demonstration of anything.
+    * ``failure`` at a stage other than ``verification`` -- a plan that did not finish (Fig. 4's TAMP
+      and human-policy failures). "success" beside ``failure_stage: tamp_execution`` is a pair
+      ``PhasePlan.set_outcome`` itself refuses; no filing makes it true.
+
     Any other trial takes the label when there is one, since the label is the verdict the operator
-    was asked for (with ``on_verification_failure: label`` it overrules the check on purpose), and
-    otherwise the loop's own word.
+    was asked for -- with ``on_verification_failure: label`` it overrules the check on purpose -- and
+    otherwise the loop's own word. A failure with no stage recorded is one written before stages
+    were, and takes the label as it always did.
+
+    The session files none of the settled ones under success/. Should one be moved there by hand, the
+    record keeps saying what it is, and ``filed_under`` where it is; the export reads the first.
     """
-    final = outcome if outcome in ("excluded", "aborted") or not status else status
+    settled = outcome in ("excluded", "aborted") or (
+        outcome == "failure" and failure_stage not in (None, "verification")
+    )
+    final = outcome if settled or not status else status
     return {"outcome": final, "excluded": final == "excluded", "filed_under": status}
+
+
+def record_unfiled(
+    profile: Profile,
+    trajectory_id: str,
+    plan: PhasePlan | None,
+    *,
+    vlm_dir: Path | None,
+    log: Callable[[str], None],
+    reason: str | None = None,
+    superseded: Sequence[dict] = (),
+    leg_generations: Mapping[str, int] | None = None,
+) -> Path | None:
+    """Write the phase record of a trial nobody labeled into its primary leg, leaving every leg in eval/.
+
+    For a session stopped at the label prompt: there is no label to file the trial under, but the
+    plan, the verdicts and the invented predicates exist only in memory, and a later ``tandem traj
+    merge`` cannot recreate them. The leg chosen is the one a merge treats as primary, and a merge
+    carries its extra files up beside the joined episode, so the record follows the trial wherever
+    it is filed. Its ``filed_under`` is None: nothing has decided it yet. Returns that leg, or None
+    when there is no plan or no leg to write it into.
+    """
+    from tandem.core import merge as merge_mod
+
+    if plan is None or not trajectory_id:
+        return None
+    try:
+        legs = merge_mod.find_legs(profile, trajectory_id)
+    except Exception as exc:
+        log(f"could not find the legs of trajectory {trajectory_id} to keep its phase record: {exc}")
+        return None
+    if not legs:
+        return None
+    primary = next((leg for leg in legs if leg["source"] == "tamp"), legs[0])["dir"]
+    write_phase_record(
+        plan,
+        primary,
+        status=None,
+        vlm_dir=vlm_dir,
+        log=log,
+        reason=reason,
+        superseded=superseded,
+        leg_generations=leg_generations,
+    )
+    return primary
 
 
 def write_phase_record(
@@ -200,29 +278,47 @@ def write_phase_record(
     vlm_dir: Path | None,
     log: Callable[[str], None],
     reason: str | None = None,
+    superseded: Sequence[dict] = (),
+    leg_generations: Mapping[str, int] | None = None,
 ) -> None:
     """Drop the plan, the invented predicates and every verdict beside the finished episode.
 
-    Written AFTER the merge and into the merged directory, not into a leg. The merge surfaces
-    only the first planner leg's extra files, and that copy is the earliest snapshot — a low
-    phase index and no verifications at all — so a record written per leg reads as though the
-    task barely started.
+    Written from the trial's LAST plan, once the trial is over -- into the leg it is filed under,
+    and again into the merged directory -- never per leg as the legs are recorded. A record written
+    as each leg is recorded is the earliest snapshot: a low phase index and no verifications at
+    all, so it reads as though the task barely started.
 
     ``status`` is where the episode was filed. It settles the record's ``outcome`` for a trial the
     loop did not end itself (``trial_outcome``); ``failure_stage`` is always the loop's, the stage
     at which it ended the attempt, whatever the label said afterwards. ``reason`` is the loop's own
     account of why it ended the attempt, written as ``outcome_reason`` when there is one: the
     failure stage says where a trial stopped, and this says what was wrong there.
+
+    ``superseded`` are the plans a replan replaced, oldest first, written as ``superseded_plans``:
+    the phases, planner records and verdicts of everything carried out under them. The plan the
+    record is written from is generation ``len(superseded)`` (``plan_generation``). And, after a
+    replan, ``leg_generations`` says which plan each recorded leg carried out a phase of, by leg
+    directory, for a reader of a trial whose legs were never merged (the merged episode's segments
+    carry it too).
     """
     if plan is None or directory is None or not Path(directory).is_dir():
         return
     directory = Path(directory)
     record = plan.to_json()
-    record.update(trial_outcome(record.get("outcome"), status))
+    record.update(trial_outcome(record.get("outcome"), status, failure_stage=record.get("failure_stage")))
     if reason:
         record["outcome_reason"] = reason
+    record["plan_generation"] = len(superseded)
+    record["superseded_plans"] = [dict(snapshot) for snapshot in superseded]
+    if superseded and leg_generations:
+        record["leg_plan_generations"] = dict(sorted(leg_generations.items()))
     try:
-        (directory / "hitl.json").write_text(json.dumps(record, indent=2, default=str))
+        # Replaced whole, never truncated in place: the record is written twice (into the leg, then
+        # beside the merged episode, which the merge may have surfaced a copy into), and a reader --
+        # the web page, `traj show` -- must never catch it half-written.
+        staged = directory / ".hitl.json.tmp"
+        staged.write_text(json.dumps(record, indent=2, default=str))
+        staged.replace(directory / "hitl.json")
     except OSError as exc:
         log(f"could not write the phase record: {exc}")
 

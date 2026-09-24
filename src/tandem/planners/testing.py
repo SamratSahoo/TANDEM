@@ -346,6 +346,12 @@ def _recording_problems(result: ExecuteResult, directory: Path, meta: dict) -> l
             missing = sorted(str(name) for name in named.values() if not (directory / str(name)).is_file())
             if missing:
                 reasons.append(f"the clips _meta.json names are missing: {', '.join(missing)}")
+            unknown = sorted(str(name) for name in named.values() if name not in trajectories.CAMERA_FILES)
+            if unknown:
+                reasons.append(
+                    f"clip {', '.join(unknown)} is not one of {', '.join(trajectories.CAMERA_FILES)}; "
+                    "tandem.core.merge joins only those, and the viewer and the export read only those"
+                )
         elif not any((directory / name).is_file() for name in trajectories.CAMERA_FILES):
             reasons.append(
                 f"there is no camera clip (_meta.json names none, and none of {', '.join(trajectories.CAMERA_FILES)})"

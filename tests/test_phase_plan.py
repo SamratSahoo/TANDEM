@@ -807,18 +807,27 @@ def test_a_trial_that_ran_to_the_end_takes_the_operators_label(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("loop", "filed", "outcome"),
+    ("loop", "stage", "filed", "outcome"),
     [
-        ("excluded", "failure", "excluded"),  # no label was asked for; the filing is not its verdict
-        ("aborted", "failure", "aborted"),
-        ("failure", "success", "success"),  # on_verification_failure: label -- the operator overrules
-        ("failure", None, "failure"),  # never filed: the loop's own word stands
-        (None, "failure", "failure"),
-        (None, None, None),
+        ("excluded", "verification", "failure", "excluded"),  # no label was asked; the filing is not its verdict
+        ("aborted", None, "failure", "aborted"),
+        # on_verification_failure: label -- the operator overrules the check, which is what it is for.
+        ("failure", "verification", "success", "success"),
+        ("failure", None, "success", "success"),  # a record from before stages: the label decides
+        ("failure", None, None, "failure"),  # never filed: the loop's own word stands
+        (None, None, "failure", "failure"),
+        (None, None, None, None),
+        # A plan that did not finish is never a success, wherever it ends up filed; nor is an
+        # aborted one. Only the directory ("filed_under") says where somebody put it.
+        ("failure", "tamp_execution", "success", "failure"),
+        ("failure", "tamp_planning", "success", "failure"),
+        ("failure", "human_policy", "success", "failure"),
+        ("aborted", None, "success", "aborted"),
+        ("excluded", "verification", "success", "excluded"),
     ],
 )
-def test_the_outcome_is_the_loops_word_then_the_label(loop, filed, outcome):
-    fields = episodes.trial_outcome(loop, filed)
+def test_the_outcome_is_the_loops_word_then_the_label(loop, stage, filed, outcome):
+    fields = episodes.trial_outcome(loop, filed, failure_stage=stage)
     assert fields == {"outcome": outcome, "excluded": outcome == "excluded", "filed_under": filed}
 
 
