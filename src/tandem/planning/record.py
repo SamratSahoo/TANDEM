@@ -6,7 +6,9 @@ is the one to open -- a run's worth of them scrolls past as "here is what the mo
 it decided", which is the only practical way to tell a bad classifier wording from a bad camera view.
 
 Every ATTEMPT is recorded, rejected ones included. A proposal that had to be reprompted is exactly
-the case worth looking at, and it is invisible if only the accepted answer is kept.
+the case worth looking at, and it is invisible if only the accepted answer is kept. So is an answer
+replayed from the proposal cache (``cached: true``): it is the plan the trial ran on, and a trail
+that began at the first camera check could not say what the proposer had been asked or answered.
 """
 
 from __future__ import annotations
@@ -73,12 +75,39 @@ def _wrap(text: str, columns: int = 100) -> list[str]:
     return lines
 
 
+# The sequence number every file a query writes starts with: `003_classify-IsOpen-box_input.png`.
+_SEQ_PREFIX = re.compile(r"^(\d+)_")
+
+
+def _last_seq(directory: Path) -> int:
+    """The highest sequence number already written into ``directory``, 0 when there is none.
+
+    Read off the files rather than counted from ``index.jsonl``: a query whose image was saved and
+    whose index line was not (a full disk, a render that failed) still owns its number, and a count
+    of lines would hand that number out again.
+    """
+    try:
+        names = [p.name for p in directory.iterdir()]
+    except OSError:
+        return 0
+    return max((int(m.group(1)) for m in map(_SEQ_PREFIX.match, names) if m), default=0)
+
+
 class VLMRecorder:
-    """Writes the image/response pair for each query into one directory."""
+    """Writes the image/response pair for each query into one directory.
+
+    Numbering CONTINUES from what the directory already holds rather than starting at 001. One
+    directory is written to by many recorders: the phase loop opens one per model call site into the
+    attempt's single ``vlm/`` directory -- the proposal, then every camera check -- and ``tandem plan
+    --save-vlm-io DIR`` run twice opens two. Each used to count from 001, so the retry of a check
+    wrote ``001_classify-IsOpen-box_input.png`` over the first attempt's frame, and the index then
+    held two lines pointing at one file showing only the second image: the frame an operator was sent
+    back over, and the verdict an excluded trial was excluded on, were gone.
+    """
 
     def __init__(self, directory: Path) -> None:
         self._dir = Path(directory)
-        self._seq = 0
+        self._seq = _last_seq(self._dir)
 
     @property
     def directory(self) -> Path:
@@ -94,8 +123,13 @@ class VLMRecorder:
         response: str,
         image: Any | None,
         rejected: str | None = None,
+        cached: bool = False,
     ) -> None:
-        """Save one query. Never raises: an audit trail is not worth failing a rollout over."""
+        """Save one query. Never raises: an audit trail is not worth failing a rollout over.
+
+        ``cached`` marks an answer replayed from the proposal cache rather than asked for: the plan
+        the trial ran on still has to be on its trail, and it must not read as a live answer.
+        """
         try:
             self._seq += 1
             self._dir.mkdir(parents=True, exist_ok=True)
@@ -108,7 +142,7 @@ class VLMRecorder:
                 input_path = self._dir / f"{stem}_input.png"
                 image.save(input_path)
             output_path = self._dir / f"{stem}_output.png"
-            self._render(label, attempt, model, response, image, rejected).save(output_path)
+            self._render(label, attempt, model, response, image, rejected, cached).save(output_path)
 
             with (self._dir / "index.jsonl").open("a") as f:
                 f.write(
@@ -121,6 +155,7 @@ class VLMRecorder:
                             "input_image": input_path.name if input_path else None,
                             "output_image": output_path.name,
                             "rejected": rejected,
+                            "cached": cached,
                             "prompt": prompt,
                             "response": response,
                         }
@@ -138,6 +173,7 @@ class VLMRecorder:
         response: str,
         image: Any | None,
         rejected: str | None,
+        cached: bool = False,
     ):
         """The image the model saw, above what it answered."""
         from PIL import Image, ImageDraw
@@ -152,7 +188,11 @@ class VLMRecorder:
             thumbnail.thumbnail((_PANEL_WIDTH - 2 * _MARGIN, 520))
 
         header = f"{label}" + (f"   (attempt {attempt})" if attempt > 1 else "")
-        subtitle = model + ("   REJECTED" if rejected else "")
+        subtitle = (
+            model
+            + ("   REJECTED" if rejected else "")
+            + ("   CACHED (replayed, not asked)" if cached else "")
+        )
         lines = _wrap(_pretty(response))
         if rejected:
             lines = ["Rejected: " + rejected, ""] + lines

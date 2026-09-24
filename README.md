@@ -441,7 +441,8 @@ hitl:
 - **Your part is recorded like the robot's.** A human phase is carried out by `hitl.human_executor`,
   and its leg is stamped with the phase it carried out. Answering "I did it" without teleoperating
   would leave that phase with no demonstration while the episode looks complete. So while recording,
-  it is refused unless `allow_unrecorded_human_phase: true`. `tandem executors list` shows what the
+  it is refused unless `allow_unrecorded_human_phase: true`, and a step accepted that way says so in
+  `hitl.json` (`phases[k].carried_out`, `checks.unrecorded_human_phases`). `tandem executors list` shows what the
   executor still needs on this machine, and `tandem doctor` says so before you start rather than at
   the first human step.
 
@@ -533,7 +534,8 @@ trajectories/success/2026-08-16_21-14-02/
 
   The full schema is in [docs/METHOD.md §6](docs/METHOD.md#hitljson).
 - **`vlm/`** holds each image sent to a model, a rendered PNG of what it answered (rejected
-  attempts included), and `index.jsonl` with every prompt and reply. When a run goes wrong, the
+  attempts included, and a proposal replayed from the cache, marked as such), and `index.jsonl` with
+  every prompt and reply. When a run goes wrong, the
   question is always "what did the model see, and what did it decide". That is unanswerable
   afterwards without it.
 

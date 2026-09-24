@@ -400,10 +400,12 @@ def test_check_plan_refuses_a_robot_phase_no_robot_operator_can_achieve():
     contract_check_off = dataclasses.replace(CFG, check_plan_effects=False)
     with pytest.raises(ProposalError) as raised:
         check_plan(parse(HOLD_THE_TOY, caps=NO_HOLDING), contract_check_off, NO_HOLDING)
+    # Only On is offered: HandEmpty is achievable too, but it has no wire name, and a phase stated
+    # with it alone is refused as a leg with no goal (tests/test_review_method.py).
     assert str(raised.value) == (
         "This plan cannot be carried out: phase 0 ('pick up the toy') asks the robot for "
         "Holding(blue_toy), which no robot operator can achieve. The robot can only pick an object up "
-        "and place it on a surface. Either state that phase with HandEmpty, On, or make it a human phase "
+        "and place it on a surface. Either state that phase with On, or make it a human phase "
         "with an operator."
     )
 

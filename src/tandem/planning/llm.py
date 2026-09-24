@@ -167,6 +167,22 @@ async def query_json(
             try:
                 parsed = parse(json.loads(cached))
                 _log.info(f"{label}: reusing the cached response")
+                recorder = active_recorder()
+                if recorder is not None:
+                    # On the trail like a live answer, and marked as a replay: it is the plan this
+                    # trial runs on, and without it the trail cannot say what the proposer was asked
+                    # or answered. Against the prompt the cache is keyed by -- the original one, even
+                    # where the answer was first given to a repair of it -- and as attempt 1, since
+                    # nothing was re-asked this time.
+                    recorder.record(
+                        label=label,
+                        attempt=1,
+                        model=model,
+                        prompt=prompt,
+                        response=cached,
+                        image=image,
+                        cached=True,
+                    )
                 return parsed
             except (ProposalError, json.JSONDecodeError) as exc:
                 # The validator has changed since the entry was written; ask again rather than fail.

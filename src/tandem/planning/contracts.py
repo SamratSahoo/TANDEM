@@ -132,6 +132,29 @@ def displaced_by(
     )
 
 
+def exclusive_conflicts(atoms: Iterable[Atom], *, caps: Capabilities) -> list[tuple[Atom, Atom]]:
+    """Pairs among ``atoms`` that cannot hold at once, because both claim one exclusive slot.
+
+    ``displaced_by`` asks what a placement ends; this asks the question the same declaration answers
+    about ONE set of atoms. With ``exclusive_arguments = {"On": 0}`` the toy rests on one thing at a
+    time, so a goal holding ``On(toy, box)`` and ``On(toy, shelf)`` together is one no workspace can
+    be in. Handed to a planner, that is not a quick failure: cuTAMP's search has no bound, and the
+    leg burns the whole planning timeout before it gives up (see ``feasibility``). Two places make
+    such a set -- a phase that states both, and consecutive robot phases conjoined into one goal --
+    and both read this.
+
+    Each pair is ``(first, other)`` in rendered order, one pair per extra atom claiming a slot. A
+    predicate absent from the map conflicts with nothing, and a malformed declaration raises
+    ``TandemError`` (``_positions``), since that is the planner's mistake and not the plan's.
+    """
+    exclusive = _positions(caps, "exclusive_arguments")
+    by_slot: dict[tuple[str, str], list[Atom]] = {}
+    for atom in sorted(set(atoms), key=str):
+        if atom.predicate in exclusive:
+            by_slot.setdefault((atom.predicate, atom.values[exclusive[atom.predicate]]), []).append(atom)
+    return [(group[0], other) for group in by_slot.values() for other in group[1:]]
+
+
 def simulate_phases(
     spec: TaskSpecification, initially_true: Iterable[Atom] = frozenset(), *, caps: Capabilities
 ) -> list[PhaseTrace]:
@@ -200,7 +223,14 @@ def check_plan_effects(
     invented_names = {p.name for p in spec.invented}
     for trace in simulate_phases(spec, initially_true, caps=caps):
         for atom in sorted(trace.unmet, key=str):
-            provably_false = atom in deleted and atom not in established
+            # Deleted outright, or ruled out by a placement the plan made and nothing since undid:
+            # with On(toy, box) established, On(toy, table) is false whatever the workspace started
+            # as. `deleted` alone misses that second case whenever no earlier phase had established
+            # the needed atom first -- "toy into the box, then wipe under the toy on the table" --
+            # because a displacement is only ever computed against what was established.
+            provably_false = atom not in established and (
+                atom in deleted or bool(displaced_by((atom,), established, exclusive))
+            )
             never_established = (
                 initial_state_known
                 and atom.predicate in invented_names
@@ -223,8 +253,10 @@ def check_plan_effects(
             )
         # A displacement deletes whatever the object was resting on before, so it counts as something
         # the plan made false just as much as a declared delete effect does. Computed against what
-        # was ESTABLISHED, not against the trace's state: the question is whether an earlier phase is
-        # on the hook for the atom, and only an atom some phase established can be.
+        # was ESTABLISHED, not against the trace's state, so that `established` keeps saying where
+        # the plan last put each object. That is not the whole of what a placement rules out: an
+        # atom no phase ever established is ruled out too, and the check above asks `established`
+        # about it directly rather than waiting for it to be in `deleted`.
         displaced = displaced_by(trace.phase.add_effects, established, exclusive)
         deleted |= trace.phase.delete_effects | displaced
         established |= trace.phase.add_effects

@@ -524,7 +524,10 @@ def test_by_default_a_phase_that_cannot_be_planned_ends_the_trial_at_tamp_planni
         "tamp_planning",
         2,
     )
-    assert r.sink.named("phase_plan_failed") == [{"reason": "no collision-free grasp", "policy": "abort"}]
+    # With the phase it was about, so the events file ties the failure to a phase of the episode.
+    assert r.sink.named("phase_plan_failed") == [
+        {"reason": "no collision-free grasp", "policy": "abort", "phase_index": 2}
+    ]
 
 
 def test_teleop_hands_the_phase_to_a_person_who_is_checked_on_its_atoms(rig):
@@ -594,15 +597,39 @@ def test_with_phase_planning_off_an_empty_goal_ends_the_trial_instead_of_looping
     assert ended["failure_stage"] == "tamp_planning"
 
 
-def test_a_robot_phase_the_planner_can_be_given_nothing_for_ends_the_trial_at_invention(rig):
-    """HandEmpty() is achievable, and TipTop supplies it for itself: no goal survives rendering."""
-    empty_handed = {
-        "executor": "robot",
-        "description": "let go of whatever it holds",
-        "atoms": [{"predicate": "HandEmpty", "args": []}],
-    }
+EMPTY_HANDED = {
+    "executor": "robot",
+    "description": "let go of whatever it holds",
+    "atoms": [{"predicate": "HandEmpty", "args": []}],
+}
+
+
+def test_a_robot_phase_the_planner_can_be_given_nothing_for_is_sent_back_to_the_proposer(rig):
+    """HandEmpty() is achievable, and TipTop supplies it for itself: no goal survives rendering.
+
+    That used to be found out by the loop, as the leg came up -- after the robot's earlier legs had
+    run -- and the trial ended at invention with the proposer never told. It is refused inside the
+    repair loop now, so the model is told why on every attempt; a model that never fixes it still
+    ends the trial at invention, having planned nothing.
+    """
     # A person's step after it, so the phase is a leg of its own rather than conjoined with the next.
-    r = rig(plan=proposal(empty_handed, OPEN_THE_BOX, PUT_IN))
+    r = rig(plan=proposal(EMPTY_HANDED, OPEN_THE_BOX, PUT_IN))
+    outcome = r.run()
+
+    assert (outcome.outcome, outcome.failure_stage) == ("failure", "invention")
+    assert "HandEmpty()" in outcome.reason and "let go of whatever it holds" in outcome.reason
+    assert len(r.camera.plan_prompts) == 3, "the repair loop had its three attempts"
+    assert "cannot be given as a goal" in r.camera.plan_prompts[1], "and the model was told why"
+    assert r.backend.plan_requests == [] and r.backend.legs == []
+    assert outcome.plan is None
+
+
+def test_an_empty_goal_that_gets_past_the_proposal_still_ends_the_trial_instead_of_looping(rig, monkeypatch):
+    """The loop's own check stays as the backstop, for a leg the proposal-time check never saw."""
+    from tandem.planning import proposal as proposal_mod
+
+    monkeypatch.setattr(proposal_mod, "check_plan", lambda spec, cfg, caps: None)
+    r = rig(plan=proposal(EMPTY_HANDED, OPEN_THE_BOX, PUT_IN))
     outcome = r.run()
 
     assert (outcome.outcome, outcome.failure_stage) == ("failure", "invention")

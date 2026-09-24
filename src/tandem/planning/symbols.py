@@ -25,11 +25,9 @@ audit trail, and what equality is defined by. There is no second internal spelli
 from __future__ import annotations
 
 import re
+import string
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-
-# ``{0}``, ``{1}`` ... in a natural-language template, standing in for a predicate's arguments.
-_PLACEHOLDER = re.compile(r"\{(\d+)\}")
 
 
 class ProposalError(Exception):
@@ -114,8 +112,43 @@ def describe(atom: Atom, descriptions: Mapping[str, str] | None = None) -> str:
 
 
 def validate_template(template: str, arity: int, context: str) -> None:
-    """Reject a template that refers to arguments the predicate does not have."""
-    used = {int(i) for i in _PLACEHOLDER.findall(template)}
+    """Reject a template ``describe`` could not render with this predicate's arguments.
+
+    ``describe`` renders with ``str.format``, which reads a great deal more than ``{0}``: a named
+    field (``{box}``), a spaced one (``{ 0 }``), attribute and index access (``{0.x}``, ``{0[1]}``), a
+    conversion or a format spec, an auto-numbered ``{}``, and a stray brace. Only the ``{N}`` fields
+    used to be looked at here, so every one of those was accepted -- and then raised KeyError,
+    ValueError or AttributeError from the first render, in the middle of a trial (``phase_summary``,
+    the classifier prompt), where the proposer can no longer be asked to fix it and the trial ends
+    with no outcome on its record.
+
+    So every field is read the way ``format`` reads it (``string.Formatter().parse``, which is also
+    what raises on an unbalanced brace), and anything but a bare argument index is refused here, as a
+    ``ProposalError`` the repair loop hands back to the model. Parsed rather than trial-rendered with
+    stand-in values on purpose: ``{0[1]}`` renders fine against a stand-in and raises against a real
+    one-letter object name.
+    """
+    try:
+        fields = [
+            (name, conversion, spec)
+            for _, name, spec, conversion in string.Formatter().parse(template)
+            if name is not None
+        ]
+    except ValueError as exc:
+        raise ProposalError(
+            f"{context} is not a valid template ({exc}). Write only {{0}}, {{1}}, ... for the arguments, "
+            "and write a literal brace as {{ or }}."
+        ) from exc
+    for name, conversion, spec in fields:
+        # ASCII digits only: "²".isdigit() is true, and int() refuses it.
+        if not (name.isascii() and name.isdigit()) or conversion or spec:
+            written = f"{{{name}{f'!{conversion}' if conversion else ''}{f':{spec}' if spec else ''}}}"
+            raise ProposalError(
+                f"{context} uses {written}, which is not a placeholder. Write only {{0}}, {{1}}, ... "
+                "standing in for the arguments, in the order they are declared, with nothing else "
+                "inside the braces, and write a literal brace as {{ or }}."
+            )
+    used = {int(name) for name, _, _ in fields}
     allowed = set(range(arity))
     if not used.issubset(allowed):
         raise ProposalError(
@@ -125,3 +158,32 @@ def validate_template(template: str, arity: int, context: str) -> None:
 
 def atoms_of(values: Sequence[Atom]) -> frozenset[Atom]:
     return frozenset(values)
+
+
+# `Pick(?obj: movable)` or `Pick(obj: movable)`: a typed operator signature. The `?` is optional
+# because the human operators the proposer invents render without it (Parameter strips it) and a
+# planner's declared robot operators usually carry it; whitespace around the parts is not meaning.
+_SIGNATURE = re.compile(r"^([A-Za-z_]\w*)\((.*)\)$")
+_TYPED_PARAMETER = re.compile(r"^\??([A-Za-z_]\w*)\s*:\s*([A-Za-z_][\w-]*)$")
+
+
+def parse_operator_signature(signature: str) -> tuple[str, tuple[tuple[str, str], ...]]:
+    """``Pick(?obj: movable)`` -> ``("Pick", (("obj", "movable"),))``, or ValueError saying what is wrong.
+
+    The one reading of an operator signature. There used to be two that disagreed: the planner SDK's
+    conformance check accepted ``Pick(?obj:movable)`` and ``Place(?obj: movable,?surface: surface)``,
+    and the record then printed them with only the ``?`` removed, so ``hitl.json`` listed
+    ``Pick(obj:movable)`` beside ``Open(x0: surface)`` -- one record, two spellings. Both now read
+    through this, and the record re-renders what it reads (``plan.operator_signature``).
+    """
+    match = _SIGNATURE.match(signature.strip()) if isinstance(signature, str) else None
+    if match is None:
+        raise ValueError(f"{signature!r} is not a signature such as 'Pick(?obj: movable)'")
+    body = match.group(2).strip()
+    parameters: list[tuple[str, str]] = []
+    for part in (p.strip() for p in body.split(",")) if body else ():
+        parameter = _TYPED_PARAMETER.match(part)
+        if parameter is None:
+            raise ValueError(f"{signature!r}: {part!r} is not a typed parameter such as '?obj: movable'")
+        parameters.append((parameter.group(1), parameter.group(2)))
+    return match.group(1), tuple(parameters)
