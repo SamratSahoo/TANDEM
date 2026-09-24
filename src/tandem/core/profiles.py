@@ -28,7 +28,7 @@ from collections.abc import Collection, Mapping
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, ValidationInfo, field_validator, model_validator
 from ruamel.yaml import YAML
 
 from tandem.core import settings as settings_mod
@@ -550,6 +550,9 @@ class Profile(BaseModel):
     planner: PlannerSpec = Field(default_factory=PlannerSpec)
     recording: RecordingSpec = Field(default_factory=RecordingSpec)
     export: ExportSpec = Field(default_factory=ExportSpec)
+    # The profiles root this profile's directory is under, fixed by `pinned`; None resolves it afresh
+    # on every call. Not a setting: it is never written into profile.yml.
+    _root: Path | None = PrivateAttr(default=None)
 
     @model_validator(mode="before")
     @classmethod
@@ -576,7 +579,23 @@ class Profile(BaseModel):
     # ---- paths -------------------------------------------------------------
 
     def dir(self) -> Path:
-        return profiles_root() / self.name
+        return (self._root if self._root is not None else profiles_root()) / self.name
+
+    def pinned(self) -> Profile:
+        """This profile, with its directory fixed where it resolves now.
+
+        ``dir()`` otherwise resolves the data root afresh on every call, from $TANDEM_DATA_ROOT, the
+        settings and the home directory, whichever thread asks. A session's merge runs on a thread of
+        its own, and can outlive the environment it was started in: one that outlived its test put a
+        trajectory into the real ~/tandem-data, the test's own data root having been unset by then.
+        A session works from a pinned copy, so every leg, record and merge of it lands in the one
+        place it started in. A shallow copy: the settings it holds are the same objects. It compares
+        unequal to an unpinned profile (pydantic compares private attributes too); compare
+        ``model_dump()`` to ask whether two say the same thing.
+        """
+        copy = self.model_copy()
+        copy._root = self.dir().parent
+        return copy
 
     def profile_file(self) -> Path:
         return self.dir() / "profile.yml"

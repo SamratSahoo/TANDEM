@@ -178,7 +178,10 @@ class Session:
         session_id: str | None = None,
     ) -> None:
         self.id = session_id or uuid.uuid4().hex[:12]
-        self.profile = profile
+        # Where everything this session writes goes, fixed now, on the thread that made it. Its legs are
+        # filed and merged from threads of their own, which can outlive the environment the session was
+        # started in; resolving the data root there again is how a merge once wrote into the real home.
+        self.profile = profile.pinned()
         # The planner's runtime is its factory's to find, from the settings, so a session takes none.
         # ``Session(profile, Runtime(...))`` was how a script started one before there was a registry,
         # and it still works: the runtime's root is handed to the planner's factory as the one to use
@@ -263,6 +266,10 @@ class Session:
         self._backend = None
         self._capabilities = None
         self._planning_cfg = None
+        # The machine's settings, and the planner runtime's tools the merges use: both read at start(),
+        # for the same reason the profile is pinned.
+        self._settings = None
+        self._tools_dir: Path | None = None
 
         # The lineage id the legs of the task in progress share, and the plan they were walking.
         # Both are tandem's now; they used to live inside the planner's process, where tandem could
@@ -323,6 +330,12 @@ class Session:
             # already part-way through the task. Only described here, not built; the loop builds it.
             executors.info(self.profile.hitl.human_executor)
 
+        # Everything a background thread would otherwise resolve later, resolved here: the settings, the
+        # ffmpeg the merges use, and the planning config, whose proposal cache path is relative to the
+        # profile or to `~`.
+        self._settings = settings_mod.load()
+        self._tools_dir = registry.tools_dir(self.profile.planner.backend, self._settings)
+        self._planning_config()
         self._files = self._session_files()
         self._backend = self._build_backend()
         try:
@@ -371,7 +384,7 @@ class Session:
                 record=self.record,
                 on_log=self._log,
                 options=dict(spec.options),
-                settings=settings_mod.load(),
+                settings=self._settings,
                 session_id=self.id,
                 task=self.task,
                 events_file=self._files["events_file"],
@@ -827,7 +840,7 @@ class Session:
                 args=(self.profile, trajectory_id, status, plan),
                 kwargs={
                     # The planner runtime's own ffmpeg, which is the build that wrote the clips.
-                    "tools_dir": registry.tools_dir(self.profile.planner.backend, settings_mod.load()),
+                    "tools_dir": self._tools_dir,
                     # This attempt's audit trail, taken now rather than when the merge finishes. A
                     # merge of several GB of video can outlast the start of the next task, which
                     # points `_vlm_dir` at that task's trail instead.

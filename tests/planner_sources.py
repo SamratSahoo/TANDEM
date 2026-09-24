@@ -16,8 +16,9 @@ sources from somewhere, in this order:
    do with the change under test -- so the test is skipped, and says to reinstall.
 3. Otherwise the test is skipped, and says how to stop skipping it.
 
-The runtime is located when this module is imported -- at collection, before ``conftest`` points
-every tandem root at a temporary directory -- so a developer's own runtime is found.
+The runtime is located when this module is imported, under the environment the run was started in
+(``home_guard.as_the_developer``): conftest has pointed HOME and every tandem root at temporary
+directories by then, and a developer's own runtime is under the real ones.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import home_guard
 import pytest
 
 ENV = "TANDEM_PLANNER_SOURCES"
@@ -39,7 +41,8 @@ def _installed_runtime() -> tuple[Path | None, dict[str, str]]:
     try:
         from tandem.core import settings as settings_mod
 
-        root = settings_mod.load(force=True).resolved_runtime_dir()
+        with home_guard.as_the_developer():
+            root = settings_mod.load(force=True).resolved_runtime_dir()
     except Exception:  # pragma: no cover - an unreadable config is a reason to skip, not to fail
         return None, {}
     finally:

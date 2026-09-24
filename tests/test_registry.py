@@ -126,7 +126,8 @@ def test_the_session_builds_a_registered_planner_from_one_context(profile, tmp_p
     try:
         assert wait_for(lambda: session.state is State.AWAITING_TASK), f"stuck in {session.state}"
         (ctx,) = factory.contexts
-        assert ctx.profile is profile
+        # The session's own profile: the one it was given, pinned to where it started (`Profile.pinned`).
+        assert ctx.profile is session.profile and ctx.profile.model_dump() == profile.model_dump()
         assert ctx.options == {"bins": ["red"]}
         assert ctx.output_dir == profile.trajectories_dir()
         assert ctx.session_id == session.id
