@@ -928,7 +928,8 @@ def test_the_planner_build_pins_curobos_version(tmp_path, monkeypatch):
 
 
 def test_the_old_runtime_interface_reads_the_new_record(tmp_path, monkeypatch):
-    """core.runtime.Runtime is what the backend, `traj open` and the merge still hold. Same answers."""
+    """core.runtime.Runtime, the deprecated path scripts written before the registry import, gives the same
+    answers as TiPToP's runtime it re-exports."""
     from tandem.core.runtime import Runtime
     from tandem.planners.tiptop.recipe import RECIPE
 

@@ -38,7 +38,8 @@ from unittest import mock
 import numpy as np
 import pytest
 from fake_executor import FakeExecutor, use_fake_executor
-from helpers import FakeRuntime, isolate_registry, wait_for
+from helpers import isolate_registry, wait_for
+from ruamel.yaml import YAML
 from toy_planner import TOY_CAPABILITIES, ToyPlanner, ToySidecarPlanner
 
 from tandem.core import episodes, profiles, secrets
@@ -375,12 +376,12 @@ def of(calls: list[SimpleNamespace], verb: str) -> list[SimpleNamespace]:
 def fake_video(monkeypatch):
     """Stand in for ffprobe/ffmpeg: every clip holds as many frames as its leg has states."""
 
-    def leg_video_frames(leg, cameras, runtime_dir):
+    def leg_video_frames(leg, cameras, tools_dir):
         with np.load(leg["dir"] / "robot_state.npz") as store:
             n = len(store["frame_time"])
         return n, {cam: n for cam in cameras}
 
-    def concat_videos(legs, camera, leg_frames, dest, scratch, runtime_dir):
+    def concat_videos(legs, camera, leg_frames, dest, scratch, tools_dir):
         dest.write_bytes(b"joined")
         return sum(leg_frames)
 
@@ -650,7 +651,7 @@ def test_the_merged_episode_is_the_demonstration_and_hitl_json_says_who_did_what
         TRAJECTORY,
         "success",
         outcome.plan,
-        runtime_dir=None,
+        tools_dir=None,
         vlm_dir=None,
         log=lambda text: None,
         emit=lambda message: None,
@@ -763,8 +764,9 @@ def test_replan_feeds_the_toys_failure_back_and_the_new_plan_is_carried_out(tria
 def toy_session(profile, tmp_path, monkeypatch, fake_video):
     """A live session on a profile saved with ``planner: {backend: toy}`` and loaded back from disk.
 
-    Nothing about the planner is handed to the session: the profile names it, the profile loader checks
-    the name against the registry, and the session builds it from the registry with the profile's
+    Nothing about the planner is handed to the session -- not even a runtime: the profile names it, the
+    profile loader checks the name against the registry and the options against the toy's own
+    ``OPTIONS`` (``validate_options``), and the session builds it from the registry with the profile's
     ``planner.options``, the way it builds any planner.
     """
     from tandem.planning import llm
@@ -777,7 +779,11 @@ def toy_session(profile, tmp_path, monkeypatch, fake_video):
         scene = HOSTINGS["in-process"][2]
         profile.planner = PlannerSpec(backend="toy", options={"items": list(scene.items)})
         profile.hitl.enabled = True
-        profiles.save(profile)
+        saved = YAML(typ="safe").load(profiles.save(profile).read_text())
+        # The file on disk is the toy's profile and nobody else's: TiPToP's robot, perception and tamp
+        # are its planner options, so a profile planning with the toy carries none of them anywhere.
+        assert saved["planner"] == {"backend": "toy", "options": {"items": list(scene.items)}}
+        assert not {"robot", "perception", "tamp"} & set(saved)
         loaded = profiles.load(profile.name)
         assert (loaded.planner.backend, loaded.planner.options) == ("toy", {"items": list(scene.items)})
 
@@ -786,7 +792,7 @@ def toy_session(profile, tmp_path, monkeypatch, fake_video):
         monkeypatch.setattr(llm, "gemini_client", lambda: model)
         person = Person()
         use_fake_executor(monkeypatch, person)
-        session = Session(loaded, FakeRuntime(tmp_path / "runtime"), task=scene.instruction)
+        session = Session(loaded, task=scene.instruction)
         states: list[str] = []
         session.subscribe(lambda m: states.append(m["state"]) if m.get("type") == "state" else None)
         session.start()
@@ -818,6 +824,8 @@ def test_a_session_on_the_toy_runs_the_trial_and_files_the_demonstration(toy_ses
     # The planner the profile names, built with the profile's options: the world holds its items.
     assert isinstance(session._backend, ToyPlanner)
     assert set(whereabouts(session._backend)) == set(scene.items)
+    # No runtime was located for it: TiPToP's is TiPToP's factory's to find, and the toy declares none.
+    assert session._backend.ctx.runtime_dir is None
 
     session.next_task()
     _carry_out_the_persons_step(session, attempt=1)
