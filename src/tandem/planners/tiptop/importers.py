@@ -247,13 +247,14 @@ def _merge_tamp_config(data: dict, options: dict, raw: dict, notes: list[str]) -
 
     overrides = dict(raw.get("tamp_overrides") or {})
     # Keys tiptop has but tandem refuses, because on the path tandem runs they would do nothing
-    # (tamp_keys.REFUSED): LJ1356's placement_* in five of hitl-tamp-vla's configs (1_toy_puzzle_v3
-    # and every 4_bread_box*), tiptop's own loop's auto_mode. A profile stating one is refused when it
-    # loads, so that leaving one out is a decision and never a surprise. Here the import is the
-    # decision: each is left out with a warning naming it and why, at the one moment a person is
-    # looking at this config. Refusing instead would make those five configs unimportable, though
-    # everything else in them -- the task, the rest of the TAMP settings, the hitl block -- carries
-    # over, and the file is not tandem's to fix.
+    # (tamp_keys.REFUSED): tiptop's own loop's auto_mode, reset_placement_region, clear_goal_surfaces.
+    # A profile stating one is refused when it loads, so that leaving one out is a decision and never a
+    # surprise. Here the import is the decision: each is left out with a warning naming it and why, at
+    # the one moment a person is looking at this config. Refusing instead would make such a config
+    # unimportable, though everything else in it -- the task, the rest of the TAMP settings, the hitl
+    # block -- carries over, and the file is not tandem's to fix. (The placement_* keys of
+    # 1_toy_puzzle_v3 and every 4_bread_box* used to be among them; the pinned TiPToP reads them now,
+    # and they import as they are.)
     refused: dict[str, list[str]] = {}
     for key in [k for k in overrides if k in tamp_keys.REFUSED]:
         overrides.pop(key)
@@ -268,6 +269,7 @@ def _merge_tamp_config(data: dict, options: dict, raw: dict, notes: list[str]) -
             f"{'it' if one else 'them'}; check the task still works without {'it' if one else 'them'}."
         )
     if raw.get("tamp_overrides"):
+        _note_lj_behaviours(overrides, notes)
         # Substituted, not merged: an upstream cfg/tamp file is a complete TAMP specification,
         # and folding the template's defaults into it would change the trajectories it
         # produces. Unknown keys fail loudly rather than import a knob that does nothing --
@@ -288,6 +290,42 @@ def _merge_tamp_config(data: dict, options: dict, raw: dict, notes: list[str]) -
     slug = raw.get("hugginface_slug") or raw.get("huggingface_slug")
     if slug:
         data["export"] = {"hf_repo": str(slug), "private": False}
+
+
+#: What LJ1356's tiptop did unconditionally, from the commits the monorepo's placement configs were
+#: tuned on (LJ1356/tiptop@37b9678 and @ffe370a), and the switch that does it in the pinned TiPToP, off
+#: by default there. The keys are ported under the same names (tamp_keys.py).
+LJ_BEHAVIOURS: dict[str, str] = {
+    "table_plane_support_vote": "chose the table plane by the objects resting on it",
+    "disjoint_object_masks": "built object meshes and point clouds from disjoint masks",
+    "blend_stretch_to_caps": "slowed a stroke it could not re-time into the velocity and acceleration caps",
+}
+
+
+def _note_lj_behaviours(overrides: dict, notes: list[str]) -> None:
+    """Say what a placement config's runs had that its keys do not ask for, rather than turn it on.
+
+    A config that sets ``placement_support`` came from LJ1356's tiptop, where the three behaviours in
+    ``LJ_BEHAVIOURS`` were not settings but the code, so the config never names them. The pinned TiPToP
+    has each behind a switch, off by default, so the placement keys import exactly (they are the same
+    keys) and still do not plan as those runs did. Adding the switches here would be the translation
+    layer this importer exists not to have -- a key in the profile the file never said -- so the
+    import names them instead, at the one moment someone is reading this config.
+    """
+    if overrides.get("placement_support") is not True:
+        return
+    missing = [key for key in LJ_BEHAVIOURS if key not in overrides]
+    if not overrides.get("blend_trajectory") and "blend_stretch_to_caps" in missing:
+        missing.remove("blend_stretch_to_caps")  # nothing to stretch with blending off
+    if not missing:
+        return
+    did = "; ".join(LJ_BEHAVIOURS[key] for key in missing)
+    keys = missing[0] if len(missing) == 1 else f"{', '.join(missing[:-1])} and {missing[-1]}"
+    notes.append(
+        f"{WARNING_NOTE}this config's placement settings were tuned on LJ1356's tiptop, which always {did}. "
+        f"The pinned TiPToP does {'that' if len(missing) == 1 else 'each'} only when asked: to plan as those "
+        f"runs did, also set {keys} to true (`tandem profile edit`)."
+    )
 
 
 # --------------------------------------------------------------------------- the hitl block

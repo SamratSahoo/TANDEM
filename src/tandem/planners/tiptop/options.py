@@ -346,6 +346,11 @@ def _check_positives(cfg: dict) -> None:
     for key in tamp_keys.NON_NEGATIVE_KEYS:
         if key in cfg and cfg[key] < 0:
             raise ValueError(f"{key} must be >= 0 (got {cfg[key]})")
+    for key in tamp_keys.UNIT_INTERVAL_KEYS:
+        # `not (0 <= v <= 1)`, so NaN is refused too. cuTAMP refuses the same range, but only once the
+        # first plan builds its config -- with the arm already at the capture pose.
+        if key in cfg and not 0.0 <= cfg[key] <= 1.0:
+            raise ValueError(f"{key} must be in [0, 1] (got {cfg[key]})")
     # Both replace robot.time_dilation_factor -- the speed the robot block guards to (0, 1] -- for
     # every plan (resolve_time_dilation_factor), and neither is checked again before the arm moves:
     # cuTAMP's validate_tamp_config does not look, and cuRobo refuses > 1 only at the first plan. 1.0

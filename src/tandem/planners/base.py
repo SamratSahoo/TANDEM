@@ -501,12 +501,22 @@ class SourcePin:
     name: str
     url: str
     commit: str
+    # The branch the commit was taken from ("main", "TANDEM"), when it has one worth naming. Never
+    # what is installed -- the commit is -- so it takes no part in comparing two pins: a runtime whose
+    # record predates it is at the same pin as ever. It is what a person moving the pin moves it along,
+    # what a listing shows beside the commit so nobody has to guess which of a fork's branches it came
+    # from, and where a fetch that cannot ask for a bare commit looks for it.
+    ref: str = field(default="", compare=False)
 
     def short(self) -> str:
         return self.commit[:7]
 
+    def label(self) -> str:
+        """The commit as a person reads it: ``6820474 (TANDEM)``, or just ``3a90ff4``."""
+        return f"{self.short()} ({self.ref})" if self.ref else self.short()
+
     def to_dict(self) -> dict:
-        return {"name": self.name, "url": self.url, "commit": self.commit}
+        return {"name": self.name, "url": self.url, "commit": self.commit, "ref": self.ref or None}
 
 
 @dataclass(frozen=True)

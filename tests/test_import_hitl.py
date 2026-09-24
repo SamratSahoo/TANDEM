@@ -154,18 +154,63 @@ def test_the_no_hitl_control_imports_with_phase_planning_off():
     assert not any("phase planning settings" in note for note in notes)
 
 
-def test_the_placement_keys_are_left_out_with_a_warning_naming_each():
+def test_the_placement_keys_import_as_they_are():
+    """The pinned TiPToP reads LJ1356's placement_* keys under the same names, so they carry over 1:1."""
     raw = _raw("4_bread_box_v3.yml")["tamp_overrides"]
-    placement = sorted(k for k in raw if k in tamp_keys.REFUSED)
+    placement = sorted(k for k in raw if k.startswith("placement_"))
     assert len(placement) == 7
 
     profile, _, notes = _import(FIXTURES / "4_bread_box_v3.yml")
     tamp = options_of(profile).tamp
-    assert not set(placement) & set(tamp)
-    assert set(tamp) == set(raw) - set(placement), "everything else in the block is kept"
+    assert {k: tamp[k] for k in placement} == {k: raw[k] for k in placement}
+    assert set(tamp) == set(raw), "nothing in the block is dropped, and nothing is added"
+    assert not any("not imported" in warning for warning in _warnings(notes))
+
+
+def test_a_placement_config_is_told_what_its_runs_also_had():
+    """LJ1356's tiptop voted for the table by support, built meshes from disjoint masks and slowed
+    strokes into the caps unconditionally; the pinned TiPToP has a switch for each, off by default. The
+    import names them rather than adds them: a key the file never said is not the file imported."""
+    profile, _, notes = _import(FIXTURES / "1_toy_puzzle_v3.yml")
+    tamp = options_of(profile).tamp
+    assert tamp["placement_support"] is True
+    assert not set(importers.LJ_BEHAVIOURS) & set(tamp), "named, not set"
     (warning,) = _warnings(notes)
-    assert all(key in warning for key in placement)
-    assert "LJ1356's fork of tiptop" in warning and "check the task still works without them" in warning
+    assert "tuned on LJ1356's tiptop" in warning
+    assert all(key in warning for key in importers.LJ_BEHAVIOURS)
+    assert set(importers.LJ_BEHAVIOURS) <= set(tamp_keys.SCALAR_KEYS), "each is a setting a profile can make"
+
+
+def test_the_switches_a_placement_config_sets_itself_are_not_named(tmp_path):
+    raw = _raw("4_bread_box_v3.yml")
+    raw["tamp_overrides"].update(table_plane_support_vote=True, disjoint_object_masks=False)
+    path = tmp_path / "box.yml"
+    with path.open("w") as fh:
+        YAML().dump(raw, fh)
+    profile, _, notes = _import(path)
+    assert options_of(profile).tamp["disjoint_object_masks"] is False, "the config's own value stands"
+    (warning,) = _warnings(notes)
+    assert "blend_stretch_to_caps" in warning
+    assert "table_plane_support_vote" not in warning and "disjoint_object_masks" not in warning
+
+    # Without blending there is nothing for blend_stretch_to_caps to stretch, so it is not named either.
+    raw["tamp_overrides"].update(blend_trajectory=False, disjoint_object_masks=True)
+    with path.open("w") as fh:
+        YAML().dump(raw, fh)
+    _, _, notes = _import(path)
+    assert not any("tuned on LJ1356's tiptop" in warning for warning in _warnings(notes))
+
+
+def test_a_key_only_tiptops_own_loop_reads_is_left_out_with_a_warning(tmp_path):
+    raw = _raw("2_bread_fruit_bowl_cloth_v3.yml")
+    raw["tamp_overrides"]["auto_mode"] = True
+    path = tmp_path / "bowl.yml"
+    with path.open("w") as fh:
+        YAML().dump(raw, fh)
+    profile, _, notes = _import(path)
+    assert "auto_mode" not in options_of(profile).tamp
+    (warning,) = _warnings(notes)
+    assert "TAMP setting auto_mode not imported" in warning and "which tandem does not run" in warning
 
 
 def test_a_config_without_placement_keys_imports_with_no_warning():
@@ -316,7 +361,7 @@ def test_a_relative_cache_path_is_said_to_mean_beside_the_profile(tmp_path):
 # --- through the commands ------------------------------------------------------------------------
 
 
-def test_profile_create_shows_what_was_not_imported_as_a_warning():
+def test_profile_create_shows_the_importers_warnings_as_warnings():
     from tandem.cli.app import app
 
     result = CliRunner().invoke(
@@ -324,10 +369,11 @@ def test_profile_create_shows_what_was_not_imported_as_a_warning():
     )
     assert result.exit_code == 0, result.output
     output = " ".join(result.output.split())
-    assert f"{theme.WARN} TAMP settings placement_support" in output
+    assert f"{theme.WARN} this config's placement settings were tuned on LJ1356's tiptop" in output
     assert WARNING_NOTE not in output, "the marker is the importer's, not something to print"
     saved = profiles.load("box")
     assert saved.hitl.enabled and saved.hitl.verify_retries == 1
+    assert options_of(saved).tamp["placement_flatness_tol"] == 0.012, "stored as imported"
 
 
 def test_profile_create_refuses_a_policy_config_before_writing_anything():
@@ -366,4 +412,6 @@ def test_tandem_init_imports_the_hitl_block_of_the_config_it_is_given(tmp_path, 
     profile = profiles.load("rig")
     assert profile.hitl.enabled and profile.hitl.save_vlm_io and profile.hitl.human_executor == "teleop"
     assert profile.cameras.external.serial == "111"
-    assert any("placement_support" in message and "not imported" in message for message in warned)
+    assert options_of(profile).tamp["placement_support"] is True, "the placement settings came across"
+    assert any("tuned on LJ1356's tiptop" in message for message in warned)
+    assert not any("not imported" in message for message in warned)

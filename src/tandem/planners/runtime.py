@@ -31,8 +31,8 @@ The environment is another matter: ``pixi install`` still solves it from conda-f
 TiPToP's lock builds SAM-2 from GitHub), so a sources directory spares GitHub, not the network.
 
 **What was installed is written down**, in ``<runtime>/.tandem-runtime.json``: each tree's URL and
-commit, where it came from, whether that commit was verified, what was trimmed from it and the
-digest of every patch applied to it. ``status()`` compares that record against the recipe. A tandem
+commit (and the branch its pin names), where it came from, whether that commit was verified, what was
+trimmed from it and the digest of every patch applied to it. ``status()`` compares that record against the recipe. A tandem
 upgrade that moves a pin therefore reads "rebuild", instead of starting a session on a planner the
 sidecar was never written against -- which is an ImportError forty seconds into a warm-up, with an
 operator standing next to the arm.
@@ -104,6 +104,7 @@ Log = Callable[[str], None]
 
 _COMMIT = re.compile(r"[0-9a-f]{40}")
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+_BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9_./-]*")
 _PLACEHOLDER = re.compile(r"\{(root|source|version|commit)(?::([A-Za-z0-9_.-]+))?\}")
 # Build junk a working tree accumulates and an install must never copy: VCS state, caches, and the
 # artifacts of a previous build (a compiled extension from someone else's machine is worse than none).
@@ -278,6 +279,10 @@ def _validate(recipe: RuntimeRecipe) -> None:
             # A branch or a short hash names a different tree tomorrow, and a dataset has to be
             # traceable to the planner that produced it.
             raise bad(f"{name} is pinned to {source.pin.commit!r}, which is not a full 40-character commit")
+        if source.pin.ref and not _is_branch_name(source.pin.ref):
+            # It is handed to `git fetch` when the commit alone cannot be fetched, so it has to be a
+            # branch -- not a commit, which belongs in `commit`, and not an option or a refspec.
+            raise bad(f"{name}'s ref {source.pin.ref!r} is not a branch name")
         if not source.pin.url:
             raise bad(f"{name} has no URL to fetch it from")
         for relative in (*source.trim, *source.persistent, *([source.marker] if source.marker else [])):
@@ -329,6 +334,19 @@ def _is_inside(relative: str) -> bool:
     return bool(relative) and not path.is_absolute() and ".." not in path.parts and "\\" not in relative
 
 
+def _is_branch_name(ref: str) -> bool:
+    """A plain branch name, as ``git check-ref-format --branch`` would take it, and not a commit.
+
+    Checked without git, because a recipe is validated when it is imported -- to list planners, on a
+    laptop that may have no git. Stricter than git: no ``@{``, no ``..``, no component starting with a
+    dot or ending in ``.lock``, nothing that could be read as an option or a refspec.
+    """
+    if not _BRANCH.fullmatch(ref) or _COMMIT.fullmatch(ref):
+        return False
+    parts = ref.split("/")
+    return ".." not in ref and not any(p.startswith(".") or p.endswith(".lock") or not p for p in parts)
+
+
 # --------------------------------------------------------------------------- status
 
 
@@ -345,6 +363,8 @@ class SourceState:
     origin: str | None = None
     verified: bool | None = None
     patches_match: bool = True
+    # The branch the record says the installed commit was pinned from, when it named one.
+    ref: str | None = None
 
     @property
     def current(self) -> bool:
@@ -457,9 +477,10 @@ class RecipeRuntime:
                 origin=entry.get("origin"),
                 verified=entry.get("verified"),
                 patches_match=_patches_match(entry.get("patches"), source.patches),
+                ref=entry.get("ref"),
             )
             states.append(state)
-            short = source.pin.commit[:7]
+            short = source.pin.label()
             if not present:
                 problems.append(f"{source.name} source is missing from {self.root}")
             elif state.commit is None:
@@ -594,7 +615,8 @@ class RecipeRuntime:
         """The installed record (``.tandem-runtime.json``), normalised:
         ``{planner, sources, assets, built, last_build}``.
 
-        ``sources`` maps each installed tree to ``{url, commit, origin, verified, trimmed, patches}``.
+        ``sources`` maps each installed tree to ``{url, commit, ref, origin, verified, trimmed, patches}``;
+        ``ref`` is the branch the pin named (None when it named none).
         ``built`` is ``{at, sources}``: when the build last finished (None since a tree changed) and
         the commits it was for. ``last_build`` is ``{step, command, ok: False, at}`` while a build
         that failed has not been followed by one that finished. Empty, never an error, for a runtime
@@ -610,7 +632,8 @@ class RecipeRuntime:
         for name in order:
             entry = installed.get(name)
             if isinstance(entry, dict) and entry.get("commit"):
-                pins.append(SourcePin(name, str(entry.get("url") or ""), str(entry["commit"])))
+                url, ref = str(entry.get("url") or ""), str(entry.get("ref") or "")
+                pins.append(SourcePin(name, url, str(entry["commit"]), ref))
         return tuple(pins)
 
     @property
@@ -821,7 +844,7 @@ class RecipeRuntime:
             if due:
                 todo.append((source, entry))
             else:
-                say(f"{source.name}: already at {source.pin.short()}")
+                say(f"{source.name}: already at {source.pin.label()}")
 
         # Before any tree is replaced: a runtime built when the environment lived INSIDE the tree has
         # it moved out, and so does one whose trees still keep what they must not lose -- or the swap
@@ -838,7 +861,7 @@ class RecipeRuntime:
                     record["planner"] = self.recipe.planner
                     _write_manifest(self.manifest_file, record)
                 if entry.get("commit") and entry.get("commit") != source.pin.commit:
-                    say(f"{source.name}: replacing {str(entry['commit'])[:7]} with {source.pin.short()}")
+                    say(f"{source.name}: replacing {str(entry['commit'])[:7]} with {source.pin.label()}")
                 record["sources"][source.name] = self._install_source(source, override, staging, say)
                 self._link_persistent(say)
                 # The environment and anything built in it were built for the old tree. What it was
@@ -916,10 +939,13 @@ class RecipeRuntime:
             raise
         # rmtree never follows a symlink, so the environment the old tree's .pixi pointed at survives.
         shutil.rmtree(old, ignore_errors=True)
-        say(f"{source.name}: installed at {source.pin.short()}")
+        say(f"{source.name}: installed at {source.pin.label()}")
         return {
             "url": source.pin.url,
             "commit": source.pin.commit,
+            # Which branch that commit was pinned from: the runtime's own record of it, so a runtime
+            # says "tiptop 6820474 of TANDEM" without anyone having to find the tandem that built it.
+            "ref": source.pin.ref or None,
             **origin,
             "trimmed": trimmed,
             "patches": applied,
@@ -1227,9 +1253,9 @@ def export_pinned(pin: SourcePin, dest: Path, *, scratch: Path, log: Log | None 
     say = log or _quiet
     git_error = None
     if _which("git"):
-        say(f"{pin.name}: fetching {pin.short()} from {pin.url}")
+        say(f"{pin.name}: fetching {pin.label()} from {pin.url}")
         try:
-            _export_with_git(pin.url, pin.commit, dest, scratch=scratch, fetch=True)
+            _export_with_git(pin.url, pin.commit, dest, scratch=scratch, fetch=True, ref=pin.ref, log=say)
             return {"origin": "git", "verified": True}
         except TandemError as exc:
             git_error = exc
@@ -1332,18 +1358,55 @@ def export_from_tree(
     return {"origin": f"directory {entry}", "verified": False}
 
 
-def _export_with_git(repository: str, commit: str, dest: Path, *, scratch: Path, fetch: bool) -> None:
-    """``git archive`` of exactly ``commit``, from a URL (fetched shallow first) or a local repository."""
+def _export_with_git(
+    repository: str,
+    commit: str,
+    dest: Path,
+    *,
+    scratch: Path,
+    fetch: bool,
+    ref: str = "",
+    log: Log | None = None,
+) -> None:
+    """``git archive`` of exactly ``commit``, from a URL (fetched shallow first) or a local repository.
+
+    With ``ref``, a server that will not hand out a bare commit is asked for that branch instead, and
+    the commit looked for in what came back. GitHub serves a commit by its id, so this is for the
+    server that does not: ``uploadpack.allowReachableSHA1InWant`` is off by default in git itself.
+    """
     scratch.mkdir(parents=True, exist_ok=True)
     workdir = Path(tempfile.mkdtemp(prefix="git-", dir=scratch))
     try:
         if fetch:
             repo = workdir / "repo.git"
             _git(["init", "--bare", "--quiet", str(repo)])
-            _git(
-                ["-C", str(repo), "fetch", "--depth", "1", "--no-tags", "--quiet", repository, commit],
-                what=f"fetching {commit[:7]} from {repository}",
-            )
+            try:
+                _git(
+                    ["-C", str(repo), "fetch", "--depth", "1", "--no-tags", "--quiet", repository, commit],
+                    what=f"fetching {commit[:7]} from {repository}",
+                )
+            except TandemError as exc:
+                if not ref:
+                    raise
+                why = exc.message.splitlines()[-1]
+                (log or _quiet)(
+                    f"{repository} would not hand out {commit[:7]} by itself ({why}); "
+                    f"fetching its {ref} branch to find it there"
+                )
+                # The whole branch, not its tip: a pin is usually behind the branch it names. `--` keeps
+                # a ref that starts like an option from being read as one (_is_branch_name refuses it
+                # anyway).
+                refspec = f"+refs/heads/{ref}:refs/heads/{ref}"
+                branch = _git(
+                    ["-C", str(repo), "fetch", "--no-tags", "--quiet", "--", repository, refspec], check=False
+                )
+                if branch.returncode != 0:
+                    raise TandemError(
+                        f"git could fetch neither commit {commit[:7]} nor the {ref} branch from "
+                        f"{repository}:\n{exc.message}\n{branch.stderr.strip()}",
+                        hint=f"Check the network and the URL, and that {ref} is pushed there with "
+                        f"{commit} on it -- or install from a directory of sources (--sources).",
+                    ) from exc
         else:
             repo = Path(repository)
         # The object's own id is the verification: a fetch that handed back anything else would not
@@ -1352,11 +1415,16 @@ def _export_with_git(repository: str, commit: str, dest: Path, *, scratch: Path,
             ["-C", str(repo), "rev-parse", "--verify", "--quiet", f"{commit}^{{commit}}"], check=False
         )
         if found.returncode != 0 or found.stdout.strip() != commit:
+            if not fetch:
+                hint = "Fetch it there first (git fetch origin " + commit + "), or check the URL and the pin."
+            elif ref:
+                hint = f"Check that the commit is pushed to the {ref} branch of that repository."
+            else:
+                hint = "Check that the commit is pushed and reachable from a branch of that repository."
             raise TandemError(
-                f"{repository} does not have commit {commit}.",
-                hint="Fetch it there first (git fetch origin " + commit + "), or check the URL and the pin."
-                if not fetch
-                else "Check that the commit is pushed and reachable from a branch of that repository.",
+                f"{repository} does not have commit {commit}"
+                + (f" on its {ref} branch." if fetch and ref else "."),
+                hint=hint,
             )
         archive = workdir / "tree.tar"
         _git(

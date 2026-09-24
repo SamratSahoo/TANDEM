@@ -386,11 +386,11 @@ def test_when_git_cannot_fetch_from_github_the_archive_is_tried(upstream, shippe
     archive = _github_style_archive(upstream, upstream.first, tmp_path)
     real = rt_mod._export_with_git
 
-    def git_blocked(repository, commit, dest, *, scratch, fetch):
+    def git_blocked(repository, commit, dest, *, scratch, fetch, **more):
         if fetch:
             (dest / "half-extracted").mkdir(parents=True)
             raise TandemError("git failed fetching: the remote end hung up unexpectedly")
-        return real(repository, commit, dest, scratch=scratch, fetch=fetch)
+        return real(repository, commit, dest, scratch=scratch, fetch=fetch, **more)
 
     monkeypatch.setattr(rt_mod, "_export_with_git", git_blocked)
     monkeypatch.setattr(rt_mod, "_github_archive_url", lambda url, commit: archive)
@@ -870,17 +870,19 @@ def test_the_web_ui_and_doctor_read_the_same_runtime_the_terminal_does(profile):
 # --- TiPToP's recipe ---------------------------------------------------------------------------------
 
 
-def test_tiptop_pins_the_user_s_main_branches():
-    """tiptop 1c6daf3 and cuTAMP 3a2e4d0 are the heads of SamratSahoo's main branches, and move
-    together (the recipe says why); cuRobo's main has not moved from 3a90ff4. Full hashes. Moving a
-    pin is a deliberate act that moves the sidecar checks with it (tests/test_tiptop_bump.py)."""
+def test_tiptop_pins_the_tandem_branches():
+    """tiptop 6820474 and cuTAMP fc8f233 are the heads of the TANDEM branches of SamratSahoo's forks --
+    main plus LJ1356's surface-fitted placement, opt-in -- and move together (the recipe says why);
+    cuRobo's main has not moved from 3a90ff4. Full hashes, each with the branch it follows. Moving a pin
+    is a deliberate act that moves the sidecar checks with it (tests/test_tiptop_bump.py,
+    tests/test_tiptop_placement.py)."""
     from tandem.planners.tiptop.factory import INFO, SOURCES
     from tandem.planners.tiptop.recipe import RECIPE
 
-    assert {pin.name: pin.commit for pin in RECIPE.pins} == {
-        "tiptop": "1c6daf3f5d1ab822a0787c40ec0ed6b6caa472de",
-        "cuTAMP": "3a2e4d000339f7460f1989bde84d32b328ac92f9",
-        "curobo": "3a90ff49eee169d9636b2a679d98457a2592fb52",
+    assert {pin.name: (pin.commit, pin.ref) for pin in RECIPE.pins} == {
+        "tiptop": ("682047493b88e5301c6b2b49da914ea4f173e5d9", "TANDEM"),
+        "cuTAMP": ("fc8f233cf6694f069a7a9e1774ae3f31dbedcb17", "TANDEM"),
+        "curobo": ("3a90ff49eee169d9636b2a679d98457a2592fb52", "main"),
     }
     assert SOURCES == RECIPE.pins == INFO.sources, "the catalog names exactly what an install fetches"
     assert all(pin.url.startswith("https://github.com/SamratSahoo/") for pin in RECIPE.pins)

@@ -102,15 +102,20 @@ class Obj:
 
 
 class StubEnvironment:
-    """cuTAMP's TAMPEnvironment constructor, down to the one check the rebuild relies on."""
+    """cuTAMP's TAMPEnvironment constructor, down to the one check the rebuild relies on -- and to
+    setting ``support_points`` whether it is given any or not, which is what made a rebuild that did not
+    pass them lose them (test_the_support_points_survive_the_rebuild)."""
 
-    def __init__(self, name, movables, statics, type_to_objects, goal_state, pick_transparent=()):
+    def __init__(
+        self, name, movables, statics, type_to_objects, goal_state, pick_transparent=(), support_points=None
+    ):
         self.name = name
         self.movables = movables
         self.statics = statics
         self.type_to_objects = type_to_objects
         self.goal_state = goal_state
         self.pick_transparent = tuple(pick_transparent)
+        self.support_points = dict(support_points or {})
         both = {o.name for o in movables} & {o.name for o in statics}
         if both:
             raise ValueError(f"Objects cannot be both movable and static: {both}")
@@ -179,13 +184,36 @@ def test_an_empty_restriction_leaves_nothing_to_pick():
 
 
 def test_what_the_planner_hangs_on_an_environment_survives_the_rebuild():
-    # A planner that attaches something after construction -- per-surface support points, say -- is
-    # describing the scene. Losing it would change the plan with nothing to say it had.
+    # A planner that attaches something after construction is describing the scene. Losing it would
+    # change the plan with nothing to say it had.
     (restrict_movables,) = _sidecar_functions("restrict_movables")
     env = _kitchen()
-    env.support_points = {"plate": [(0.0, 0.0, 0.0)]}
+    env.placement_region = ((0.2, 0.6), (-0.3, 0.3))
     rebuilt, _ = restrict_movables(env, {"bread"}, StubEnvironment)
-    assert rebuilt.support_points is env.support_points
+    assert rebuilt.placement_region is env.placement_region
+
+
+def test_the_support_points_survive_the_rebuild():
+    """The surfaces' observed points, which placement_support fits its regions to. cuTAMP's constructor
+    sets the attribute whatever it is given, so the copy of what was hung on afterwards skips it: a
+    rebuild that did not pass them placed every restricted leg on bounding boxes (reproduced against
+    the real class by the port: ['box'] before, [] after)."""
+    (restrict_movables,) = _sidecar_functions("restrict_movables")
+    plate = [(0.40, 0.0, 0.02), (0.42, 0.01, 0.021)]
+    env = _kitchen()
+    env = StubEnvironment(
+        name=env.name,
+        movables=env.movables,
+        statics=env.statics,
+        type_to_objects=env.type_to_objects,
+        goal_state=env.goal_state,
+        pick_transparent=env.pick_transparent,
+        support_points={"plate": plate},
+    )
+    rebuilt, demoted = restrict_movables(env, {"bread"}, StubEnvironment)
+    assert demoted == ["screwdriver", "toy"]
+    assert rebuilt.support_points == {"plate": plate}
+    assert rebuilt.support_points["plate"] is plate, "the points themselves, not a copy of them"
 
 
 def test_a_goal_that_moves_something_the_leg_may_not_pick_is_named():

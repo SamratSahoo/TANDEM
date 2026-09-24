@@ -158,7 +158,10 @@ def test_importing_a_v3_config_gives_the_paper_preset_plus_that_tasks_own_settin
     paper = _paper()
     assert imported.hitl == paper.hitl
     extra = set(options_of(imported).tamp) - set(options_of(paper).tamp)
-    assert extra <= {"grasp_center_weight", "grasp_threshold", "voxel_downsample_size"}
+    # The task's own: its grasp and perception tuning, and -- for the puzzle and the bread/box task --
+    # the surface-fitted placement its runs were tuned with (tamp_keys.PLACEMENT_GATED and the gate).
+    own = {"grasp_center_weight", "grasp_threshold", "voxel_downsample_size", "placement_support"}
+    assert extra <= own | set(tamp_keys.PLACEMENT_GATED)
     shared = {k: v for k, v in options_of(imported).tamp.items() if k not in extra}
     assert shared == options_of(paper).tamp
 

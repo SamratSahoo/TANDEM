@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import typer
+from rich.markup import escape
 
 from tandem.cli import theme
 from tandem.core import paths
@@ -135,7 +136,9 @@ def runtime_payload(*, planner: str | None = None, profile_name: str | None = No
                     "name": s.name,
                     "url": s.wanted.url,
                     "commit": s.wanted.commit,
+                    "ref": s.wanted.ref or None,
                     "installed": s.commit,
+                    "installed_ref": s.ref,
                     "present": s.present,
                     "origin": s.origin,
                     "verified": s.verified,
@@ -148,7 +151,9 @@ def runtime_payload(*, planner: str | None = None, profile_name: str | None = No
                     "name": p.name,
                     "url": p.url,
                     "commit": p.commit,
+                    "ref": p.ref or None,
                     "installed": None,
+                    "installed_ref": None,
                     "present": False,
                     "origin": None,
                     "verified": None,
@@ -157,7 +162,12 @@ def runtime_payload(*, planner: str | None = None, profile_name: str | None = No
                 for p in info.sources
             ],
             vendor={
-                n: {"url": e.get("url") or "", "commit": e.get("commit"), "version": str(e.get("commit"))[:7]}
+                n: {
+                    "url": e.get("url") or "",
+                    "commit": e.get("commit"),
+                    "ref": e.get("ref"),
+                    "version": str(e.get("commit"))[:7],
+                }
                 for n, e in installed.items()
                 if isinstance(e, dict) and e.get("commit")
             }
@@ -194,7 +204,7 @@ def status(
     if sources:
         theme.blank()
         theme.heading("sources", "pinned by this version of tandem")
-        table = theme.table("source", "pinned", "installed", "upstream")
+        table = theme.table("source", "pinned", "branch", "installed", "upstream")
         for source in sources:
             installed = source["installed"]
             if installed is None:
@@ -205,7 +215,10 @@ def status(
                 )
             else:
                 shown = f"[warn]{installed[:12]}[/warn]"
-            table.add_row(source["name"], source["commit"][:12], shown, f"[faint]{source['url']}[/faint]")
+            branch = escape(source.get("ref") or "") or "[faint]—[/faint]"
+            table.add_row(
+                source["name"], source["commit"][:12], branch, shown, f"[faint]{source['url']}[/faint]"
+            )
         theme.console().print(table)
 
     theme.blank()

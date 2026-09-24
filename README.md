@@ -127,11 +127,17 @@ kernels, cuTAMP, tiptop) is built on your machine into a self-contained **runtim
 in the package. `tandem planners install tiptop`, which `tandem init` runs for you, fetches the exact
 commits this version of tandem pins:
 
-| source | pinned commit |
-|---|---|
-| [SamratSahoo/tiptop](https://github.com/SamratSahoo/tiptop) | `1c6daf3` |
-| [SamratSahoo/cuTAMP](https://github.com/SamratSahoo/cuTAMP) | `3a2e4d0` |
-| [SamratSahoo/curobo](https://github.com/SamratSahoo/curobo) | `3a90ff4` |
+| source | branch | pinned commit |
+|---|---|---|
+| [SamratSahoo/tiptop](https://github.com/SamratSahoo/tiptop/tree/TANDEM) | `TANDEM` | `6820474` |
+| [SamratSahoo/cuTAMP](https://github.com/SamratSahoo/cuTAMP/tree/TANDEM) | `TANDEM` | `fc8f233` |
+| [SamratSahoo/curobo](https://github.com/SamratSahoo/curobo) | `main` | `3a90ff4` |
+
+The `TANDEM` branches are each fork's `main` plus LJ1356's surface-fitted placement, ported so that
+the paper's placement tasks can be reproduced ([below](#surface-fitted-placement-placement_)). All of
+it is off until a profile turns it on: without those settings the two branches plan exactly as the
+mains do. The branch is recorded with each commit, in `tandem planners info tiptop` and in the
+runtime's own record.
 
 Each is fetched with `git fetch --depth 1` and exported with `git archive` (GitHub's archive of the
 commit when there is no git), and the commit is checked. The install then applies one small patch,
@@ -201,7 +207,8 @@ tandem profile create bread-box --import-from ~/hitl-tamp-vla --tamp-config ~/hi
 What comes across as a profile:
 
 - the robot config, camera serials and extrinsics, per-workspace layers included;
-- a task config's TAMP settings;
+- a task config's TAMP settings, the `placement_*` keys of the puzzle and bread/box configs
+  included, under the same names;
 - its `hitl:` block (`HITL_KEYS` in `src/tandem/planners/tiptop/importers.py` says what each key
   becomes).
 
@@ -210,7 +217,12 @@ What tandem cannot do is refused rather than swapped for something it can:
 - A config whose human phases a learned policy carries out (`policy_type: diffusion` or `act`, the
   HITL-TAMP baseline) is not imported with phase planning on, and the refusal names the same task's
   config for a person.
-- Settings only LJ1356's tiptop fork reads (`placement_*`) are left out, with a warning.
+- Settings only tiptop's own rollout loop reads (`auto_mode`, `reset_placement_region`,
+  `clear_goal_surfaces`) are left out, with a warning.
+
+A config that sets `placement_support` also gets a warning naming what LJ1356's tiptop, which it was
+tuned on, always did and the pinned TiPToP does only when asked
+([below](#surface-fitted-placement-placement_)).
 
 ---
 
@@ -282,7 +294,7 @@ $ tandem planners list
 | | |
 |---|---|
 | `tandem planners list` | Every planner tandem can see: built in, or registered by an installed package. Each is `installed`, `not installed`, `outdated`, `no runtime needed` or `broken` (with why). `●` marks the one the active profile uses. |
-| `tandem planners info NAME` | What it is and needs, the commits it pins against what is installed, its goal language as the phase planner sees it, what it supports, the `planner.options` it reads, and its presets. |
+| `tandem planners info NAME` | What it is and needs, the commits it pins (and the branch each is taken from) against what is installed, its goal language as the phase planner sees it, what it supports, the `planner.options` it reads, and its presets. |
 | `tandem planners install NAME` | Fetch its pinned sources and build its runtime. Safe to re-run: an installed, current runtime returns at once, and an outdated one is rebuilt. `--sources DIR` takes the sources from DIR instead of GitHub; `--force` rebuilds; `--yes` asks nothing. |
 | `tandem planners use NAME` | Make a profile plan with it (`--profile P`; `--option KEY=VALUE` for a setting it needs; `--default` for every new profile too). The old planner's `planner.options` leave the profile, named, and are kept beside it in `planner-options.<planner>.yml`: switching back restores them. It also repairs a profile naming a planner this machine no longer has. |
 | `tandem planners default NAME` | The planner new profiles get. Changes no profile. |
@@ -484,6 +496,45 @@ planner:
 
 `tandem profile show NAME --planner` prints exactly what the planner will receive: the answer to "did
 my setting apply?".
+
+#### Surface-fitted placement (`placement_*`)
+
+By default cuTAMP may put an object down anywhere in a surface's bounding box, with the object's
+bottom at the height of the surface's highest point. That is right for a slab and wrong for anything
+with structure: for an open box it is the top of the folded-back lid, for a plate its rim. In
+"Store Bread in Closed Box" the bread was released about 19 cm up, out over the box's far wall, and
+fell. `placement_support: true` fits the region to what the camera saw of the surface instead: the
+level patches that would hold this object's footprint, at that patch's own height.
+
+| key | default | what it does |
+|---|---|---|
+| `placement_support` | `false` | Turns it on. The six keys below are read only when it is on; set without it, `tandem doctor` says they do nothing. |
+| `placement_support_margin` | `0.01` | Surface the object must keep around its footprint, in metres. `>= 0`. |
+| `placement_flatness_tol` | `0.008` | How much the surface under a footprint may vary and still count as one level patch, in metres. `> 0`. It absorbs stereo noise too, so a noisy reconstruction needs it raised; it is also how much real slope a placement may sit on. |
+| `placement_support_required` | `true` | When no patch of a goal surface would hold the object, the plan fails with that reason. `false` falls back to the bounding box. |
+| `placement_into_surface` | `true` | A placed object may overlap the surface it was placed on in the collision check. Placing *into* a container needs it: perception reconstructs one as a filled hull. |
+| `placement_fill_occluded` | `false` | The unobserved cells inside a surface's outline count as floor, for a camera that looks across a box and cannot see its floor. The one setting that places onto surface nobody saw. |
+| `placement_min_seen_frac` | `0.25` | The fraction of every footprint that must really have been observed: the guard on `placement_fill_occluded`. In `[0, 1]`. |
+
+Two of the paper's tasks use it. **Solve Constrained Puzzle** (`1_toy_puzzle_v3.yml`) sets
+`placement_support`, `placement_support_required` and `placement_into_surface`, so the toy rests on
+the cloth rather than back on the puzzle board. **Store Bread in Closed Box** (`4_bread_box.yml`,
+`4_bread_box_v3.yml`) sets all seven: margin `0.005` (the tray is barely wider than the bread),
+flatness `0.012`, `placement_fill_occluded: true` with `placement_min_seen_frac: 0.25`. Import either
+config with `--tamp-config` and they come across as they are.
+
+When no surface can hold the object, the leg is an ordinary plan failure, so
+`hitl.on_robot_phase_failure` decides what happens next: `abort` (the default) ends the trial,
+`replan` asks for another plan, `teleop` hands the phase to the operator, as LJ1356's tiptop did.
+
+Those configs were tuned on LJ1356's tiptop, which also always did three things the pinned TiPToP
+does only when asked. Set them too to plan as those runs did:
+
+| key | what it switches on |
+|---|---|
+| `table_plane_support_vote` | Pick the table among RANSAC's planes by the objects resting ON each one, not by any object within 3 cm of it either side (which counts objects below a plane too). |
+| `disjoint_object_masks` | Build object meshes and point clouds from disjoint masks, every pixel two masks claim going to the smaller object, so a container's hull stops at what rests on it. (The placement fit always uses disjoint masks.) |
+| `blend_stretch_to_caps` | With `blend_trajectory` on, slow a stroke that cannot be re-timed inside the velocity and acceleration caps until it fits, instead of running it at the plan's own timing. It can make a stroke many times slower. |
 
 Profiles written before profile version 2 had `robot:`, `perception:` and `tamp:` at the top level.
 They still load, with a one-line notice, and are written in the new layout the next time they are
@@ -725,6 +776,17 @@ against the pixi environment already on disk rather than solving one from nothin
 The full log is `~/.local/state/tandem/logs/runtime-build-<time>.log`. The usual causes are no
 `nvcc`, a torch/CUDA mismatch, or running out of disk mid-compile. `tandem planners install tiptop`
 retries; a step already done is skipped.
+</details>
+
+<details>
+<summary><b>A leg fails with "No level patch of … is large enough"</b></summary>
+
+That is `placement_support` saying no observed patch of the goal surface would hold the object with
+`placement_support_margin` around it. From the camera's side a box's near wall and lid can hide most
+of its floor: `placement_fill_occluded: true` counts the hidden floor, and a noisy floor needs a larger
+`placement_flatness_tol`. `placement_support_required: false` places on the bounding box instead,
+which is what the setting exists to avoid. The full reason, with the object's footprint and the
+margin, is in the leg's `metadata.json` and in the session log.
 </details>
 
 <details>

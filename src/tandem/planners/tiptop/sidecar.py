@@ -121,10 +121,15 @@ def restrict_movables(env, keep, environment_cls):
         type_to_objects={**env.type_to_objects, "Movable": kept},
         goal_state=env.goal_state,
         pick_transparent=env.pick_transparent,
+        # Each surface's observed points, which placement_support fits its regions to. Passed, not
+        # left to the copy below: the constructor always sets the attribute (to {} when it is given
+        # nothing), so the copy would skip it, and every restricted leg would quietly place on
+        # bounding boxes -- the region that released the bread 19 cm up, out over the box's wall.
+        support_points=env.support_points,
     )
-    # Anything hung on the environment AFTER it was constructed (a planner that attaches, say,
-    # per-surface support points) describes the scene, not which objects move, so it carries over. A
-    # rebuild that dropped it would change the plan with nothing to say it had.
+    # Anything hung on the environment AFTER it was constructed describes the scene, not which objects
+    # move, so it carries over. A rebuild that dropped it would change the plan with nothing to say it
+    # had.
     for attr, value in getattr(env, "__dict__", {}).items():
         if attr not in rebuilt.__dict__:
             setattr(rebuilt, attr, value)
@@ -236,6 +241,7 @@ class Sidecar:
             resolve_grasp_orientation_cost,
             resolve_grasp_rank_conf_weight,
             resolve_max_motion_refine_attempts,
+            resolve_placement_support,
             resolve_posture_selection,
             resolve_require_m2t2_grasps,
             resolve_time_dilation_factor,
@@ -291,6 +297,15 @@ class Sidecar:
                 f" | prior: {posture_ref_summary(posture_selection.get('posture_ref'))}"
             )
 
+        # Surface-fitted placement (placement_support and the keys it gates): {} unless the profile
+        # turns it on, which leaves the bounding-box region every config has always used.
+        placement = resolve_placement_support(self.cost_overrides)
+        if placement:
+            _log(
+                "surface-fitted placement on: "
+                + ", ".join(f"{k}={v}" for k, v in placement.items() if k != "placement_check")
+            )
+
         robot_types = tiptop_run._planning_robot_types()
         tamp_configs = {
             robot_type: build_tamp_config(
@@ -317,6 +332,9 @@ class Sidecar:
                 # A leg whose object got no M2T2 grasps then fails to plan, and says so, instead of
                 # grasping a collision-sphere guess -- which comes back as an ordinary ok=False.
                 require_m2t2_grasps=resolve_require_m2t2_grasps(self.cost_overrides),
+                # Where an object may be put down: the surface's bounding box, or -- with
+                # placement_support -- the level patches of its observed points (see plan()).
+                placement=placement,
             )
             for robot_type in robot_types
         }
@@ -853,10 +871,13 @@ class Sidecar:
         continues from). The trim happens before the plan is serialised, so the plan on disk, the one
         executed and the one the recorded episode is built from are the same plan.
         """
+        import time
         from pathlib import Path
 
         import numpy as np
         from cutamp.envs.utils import TAMPEnvironment
+        from cutamp.particle_initialization import NoGraspsError
+        from cutamp.utils.support import NoSupportRegion
         from tiptop.config import tiptop_cfg
         from tiptop.goal_clearing import drop_return_to_initial
         from tiptop.motion_planning import resolve_trace_cfg
@@ -901,6 +922,10 @@ class Sidecar:
             list(goal),
             True,
             extra_surface_labels=set(surfaces),
+            # Each object's points as observed, before the near-table filter took a shallow
+            # container's floor away. Only the surfaces keep theirs, and cuTAMP reads them only under
+            # placement_support; without it they ride along unused, as they do in tiptop's own rollout.
+            support_points=processed_scene.object_support_points,
         )
         if movables is not None:
             env, demoted = restrict_movables(env, movables, TAMPEnvironment)
@@ -917,20 +942,32 @@ class Sidecar:
         if why_not:
             _log(f"this leg started wherever the arm was left and cannot be sent home instead: {why_not}")
 
-        cutamp_plan, planning_seconds, failure_reason = run_planning(
-            env,
-            self.config,
-            q_init=observation.q_init,
-            ik_solver=self.container.ik_solver,
-            grasps=processed_scene.grasps,
-            motion_gen=self.container.motion_gen,
-            all_surfaces=all_surfaces,
-            # A directory per sub-goal: two run_planning calls into one experiment directory collide
-            # inside cuTAMP's own logger, and a phase-planned task makes several per episode.
-            experiment_dir=directory / "cutamp",
-            cost_overrides=self.cost_overrides,
-            q_return=q_return,
-        )
+        started = time.perf_counter()
+        try:
+            cutamp_plan, planning_seconds, failure_reason = run_planning(
+                env,
+                self.config,
+                q_init=observation.q_init,
+                ik_solver=self.container.ik_solver,
+                grasps=processed_scene.grasps,
+                motion_gen=self.container.motion_gen,
+                all_surfaces=all_surfaces,
+                # A directory per sub-goal: two run_planning calls into one experiment directory collide
+                # inside cuTAMP's own logger, and a phase-planned task makes several per episode.
+                experiment_dir=directory / "cutamp",
+                cost_overrides=self.cost_overrides,
+                q_return=q_return,
+            )
+        except (NoGraspsError, NoSupportRegion) as exc:
+            # A goal this scene cannot satisfy, not a broken planner: no M2T2 grasp for an object
+            # (require_m2t2_grasps), or no level patch of a goal surface big enough for the object
+            # (placement_support_required). The pinned run_planning already reports both as a plan
+            # that was not found; this keeps it that way should one ever escape it, because a verb
+            # that RAISES ends the trial outright, while ok=False goes to on_robot_phase_failure --
+            # abort, re-plan, or hand the phase to the operator, as LJ1356's fork always did.
+            cutamp_plan, planning_seconds = None, time.perf_counter() - started
+            failure_reason = f"{type(exc).__name__}: {exc}"
+            _log(f"planning failed: {failure_reason}")
         self._save_metadata(
             directory,
             entry,

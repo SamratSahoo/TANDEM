@@ -431,7 +431,7 @@ RECIPE = RuntimeRecipe(
             marker="pixi.toml",                      # exists only when the tree is really there
             persistent=("arm/.cache",),              # written at run time, must outlive a new tree
         ),
-        Source(SourcePin("solver", "https://github.com/you/solver.git", "<40-hex commit>")),
+        Source(SourcePin("solver", "https://github.com/you/solver.git", "<40-hex commit>", ref="main")),
     ),
     environment=PixiEnvironment(
         manifest="arm/pixi.toml",                    # inside one of the sources: the planner's own manifest and lock
@@ -454,9 +454,15 @@ RECIPE = RuntimeRecipe(
 
 - **Pins are full commits.** A branch names a different planner next week, and a dataset has to be
   traceable to the planner that produced it. The recipe refuses anything else when it is declared.
+  A pin may also name the branch its commit was taken from (`ref="main"`; TiPToP's tiptop and cuTAMP
+  follow their forks' `TANDEM` branches). It is never what is installed and takes no part in
+  comparing pins; it is shown next to the commit (`tandem planners info`, `tandem runtime status`),
+  written into the runtime's record and into every bundle's marker, and it is what a bump moves along.
 - **Fetching.** Each pin is fetched with `git fetch --depth 1 <url> <commit>` and exported with
-  `git archive`, so no VCS state or build artifact from anyone's working tree comes along. Without
-  git, GitHub's archive of the commit is used. Either way the commit is checked.
+  `git archive`, so no VCS state or build artifact from anyone's working tree comes along. A server
+  that will not hand out a bare commit (`uploadpack.allowReachableSHA1InWant` off) is asked for the
+  pin's branch instead, when it names one, and the commit is looked for there. Without git, GitHub's
+  archive of the commit is used. Either way the commit is checked.
 - **Layout:**
 
   ```
@@ -465,7 +471,7 @@ RECIPE = RuntimeRecipe(
       arm/.pixi -> ../env      where pixi looks for the environment
       env/                     the environment, outside every tree
       cache/arm/arm/.cache/    each `persistent` directory; arm/arm/.cache links here
-      .tandem-runtime.json     what is installed, from where, verified or not, with each patch's digest
+      .tandem-runtime.json     what is installed (commit and branch), from where, verified or not, with each patch's digest
   ```
 
   The environment lives outside the trees on purpose: moving a pin replaces a tree without solving

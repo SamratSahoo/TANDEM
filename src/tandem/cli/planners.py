@@ -488,7 +488,7 @@ def info(
         theme.blank()
         theme.heading("sources", "what an install fetches, pinned")
         installed = {pin["name"]: pin["commit"] for pin in payload["runtime"].get("pins") or []}
-        table = theme.table("source", "pinned", "installed", "upstream")
+        table = theme.table("source", "pinned", "branch", "installed", "upstream")
         for pin in payload["sources"]:
             have = installed.get(pin["name"])
             shown = (
@@ -496,7 +496,11 @@ def info(
                 if have is None
                 else Text(have[:12], style="default" if have == pin["commit"] else "warn")
             )
-            table.add_row(Text(pin["name"]), pin["commit"][:12], shown, Text(pin["url"], style="faint"))
+            # The branch the commit was taken from, so a fork's pin says which of its lines it follows.
+            branch = Text(pin.get("ref") or "—", style="default" if pin.get("ref") else "faint")
+            table.add_row(
+                Text(pin["name"]), pin["commit"][:12], branch, shown, Text(pin["url"], style="faint")
+            )
         theme.console().print(table)
 
     theme.blank()

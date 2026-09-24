@@ -267,6 +267,8 @@ function runtimeCard() {
         : "—";
       return h("tr", h("td", source.name),
         h("td.mono.faint", String(source.commit || "").slice(0, 12)),
+        // The branch the pin follows (a fork's TANDEM, say), so a commit says where it came from.
+        h("td.mono.faint", source.ref || "—"),
         h("td.mono.faint", installed),
         h("td.faint.small", source.url || ""));
     });
@@ -285,7 +287,8 @@ function runtimeCard() {
     if (sourceRows.length) {
       body.appendChild(h("div.section-title", { style: { marginTop: "16px" } }, "sources"));
       body.appendChild(h("table",
-        h("thead", h("tr", h("th", "source"), h("th", "pinned"), h("th", "installed"), h("th", "upstream"))),
+        h("thead", h("tr", h("th", "source"), h("th", "pinned"), h("th", "branch"), h("th", "installed"),
+          h("th", "upstream"))),
         h("tbody", ...sourceRows)));
     }
   }).catch((error) => mount(body, h("div.alert.err", error.message)));

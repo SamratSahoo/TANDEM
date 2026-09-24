@@ -247,6 +247,18 @@ def check_assets(profile: Profile, options: Any = None, *, runtime_dir: Path | N
             "transit_apex_min_dist only applies when transit_apex_height is above 0; it is ignored here"
         )
 
+    # resolve_placement_support returns nothing at all unless placement_support is on, so a tuned
+    # margin or flatness beside `placement_support: false` places exactly as the bounding box does.
+    if not tamp.get("placement_support"):
+        for key in tamp_keys.PLACEMENT_GATED:
+            if key in tamp:
+                problems.append(f"{key} only applies when placement_support is true; it is ignored here")
+    # Both of its effects are inside trajectory blending (resolve_blend_config's BlendConfig).
+    if "blend_stretch_to_caps" in tamp and not tamp.get("blend_trajectory"):
+        problems.append(
+            "blend_stretch_to_caps only applies when blend_trajectory is true; it is ignored here"
+        )
+
     # Settings tiptop never reads (see options.GeminiSpec): kept so a profile can say which detector
     # labelled its data, and warned about when what they say is not what runs.
     gemini = o.perception.gemini

@@ -207,7 +207,7 @@ jobs:
         # skipping them (tests/planner_sources.py), so this job cannot pass by checking nothing.
         env:
           TANDEM_PLANNER_SOURCES: ${{ runner.temp }}/planner-sources
-        run: pytest -q -rs tests/test_planners.py tests/test_sidecar_legs.py tests/test_packaging.py tests/test_tiptop_bump.py tests/test_review_tiptop.py
+        run: pytest -q -rs tests/test_planners.py tests/test_sidecar_legs.py tests/test_packaging.py tests/test_tiptop_bump.py tests/test_review_tiptop.py tests/test_tiptop_placement.py
 
       - name: Install TiPToP's runtime sources the way an install does, short of the GPU build
         # Fetch, trim, patch and place the checkpoints, against GitHub, from the recipe's pins. Only the

@@ -1,4 +1,5 @@
-"""TiPToP at tiptop 1c6daf3 / cuTAMP 3a2e4d0: what tandem accepts, renders and builds, checked against them.
+"""TiPToP at the TANDEM branches (tiptop 6820474 / cuTAMP fc8f233): what tandem accepts, renders and builds,
+checked against them.
 
 A bump of the planner changes three things on tandem's side, and each can go wrong without an error:
 
@@ -13,7 +14,9 @@ A bump of the planner changes three things on tandem's side, and each can go wro
 The checks that need the planner's own source read it where tests/planner_sources.py finds it: CI's
 planner-sources job fetches the pinned trees, and a workstation with a built runtime uses that.
 The rest run anywhere, including against the monorepo's cfg/tamp files kept as fixtures
-(tests/fixtures/cfg_tamp, copied verbatim from hitl-tamp-vla 90671e1).
+(tests/fixtures/cfg_tamp, copied verbatim from hitl-tamp-vla 90671e1; 4_bread_box.yml is the config
+7412655 added with the placement settings, unchanged since). The placement support itself, and the
+sidecar's half of it, are tests/test_tiptop_placement.py.
 """
 
 from __future__ import annotations
@@ -167,7 +170,7 @@ def test_the_keys_refused_as_tiptops_own_are_read_only_where_tandem_never_goes()
     """The reason given for refusing auto_mode, reset_placement_region and clear_goal_surfaces is that
     only tiptop's own rollout loop and websocket server read them. That is checked here rather than
     trusted: a bump that starts reading one on a path the sidecar runs fails, and the key moves to
-    ALL_KEYS. So does a bump that brings surface-fitted placement upstream."""
+    ALL_KEYS -- as the placement_* keys did when the pins moved to the TANDEM branches."""
     root = _sources() / "tiptop"
     read = _keys_tiptop_reads(root)
     assert {k for k in tamp_keys.REFUSED if k in read} == set(LOOP_ONLY)
@@ -388,26 +391,26 @@ def test_the_fixtures_cover_what_the_monorepo_configs_use():
 
 
 @pytest.mark.parametrize("name", FIXTURE_FILES)
-def test_a_monorepo_config_validates_except_for_its_placement_keys(name):
+def test_a_monorepo_config_validates_whole(name):
     raw = _fixture_overrides(name)
-    placement = {k for k in raw if k.startswith("placement_")}
-    kept = {k: v for k, v in raw.items() if k not in placement}
-
-    out = validate_tamp(kept)
-    assert set(out) == set(kept), "nothing the config sets is dropped"
+    out = validate_tamp(raw)
+    assert set(out) == set(raw), "nothing the config sets is dropped"
     assert out["blend_mode"] == "vae" and out["traj_length_norm"] == "inf"
     assert out["m2t2_num_runs"] == 60 and isinstance(out["m2t2_num_runs"], int)
     assert out["posture_selection_seeds"] == 12 and out["posture_grasp_roll"] is True
     assert out["vae_retiming"] is False and out["require_m2t2_grasps"] is False
-
-    for key in placement:
-        with pytest.raises(ValueError, match="LJ1356's fork of tiptop"):
-            validate_tamp({**kept, key: raw[key]})
+    for key in (k for k in raw if k.startswith("placement_")):
+        assert out[key] == raw[key] and type(out[key]) is tamp_keys.SCALAR_KEYS[key], key
 
 
-def test_the_monorepo_placement_keys_are_all_refused():
-    placement = {k for name in FIXTURE_FILES for k in _fixture_overrides(name) if k.startswith("placement_")}
-    assert placement and placement <= set(tamp_keys.REFUSED)
+def test_the_monorepo_placement_keys_are_the_ones_tandem_accepts():
+    """Every placement_* key a monorepo config sets is a setting (none refused, none a typo), and the
+    bread/box configs between them set all seven."""
+    used = {k for name in FIXTURE_FILES for k in _fixture_overrides(name) if k.startswith("placement_")}
+    assert used == {"placement_support", *tamp_keys.PLACEMENT_GATED}
+    assert used <= tamp_keys.ALL_KEYS and not used & set(tamp_keys.REFUSED)
+    for name in ("1_toy_puzzle_v3.yml", "4_bread_box.yml", "4_bread_box_v3.yml"):
+        assert _fixture_overrides(name)["placement_support"] is True, name
 
 
 # --- validation ------------------------------------------------------------------------------------
@@ -533,9 +536,7 @@ def test_a_knob_read_only_behind_another_says_when_it_does_nothing(profile, tamp
 
 def test_the_monorepo_v3_settings_raise_none_of_those_warnings(profile):
     raw = _fixture_overrides("4_bread_box_v3.yml")
-    profile.planner.options["tamp"] = validate_tamp(
-        {k: v for k, v in raw.items() if not k.startswith("placement_")}
-    )
+    profile.planner.options["tamp"] = validate_tamp(raw)
     problems = [p for p in render.check_assets(profile) if "vae_path does not exist" not in p]
     assert problems == []
 

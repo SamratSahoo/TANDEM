@@ -39,24 +39,36 @@ PATCHES = _HERE / "patches"
 #: Files the runtime needs that no public repository has, shipped as package data.
 ASSETS = _HERE / "assets"
 
-# All three are the clean upstreams, with no phase-planning logic in any of them. That logic is
-# tandem's own (src/tandem/planning), and tandem drives an unmodified planner through
-# src/tandem/planners -- which is the whole point: a planner tandem has to fork is a planner tandem has
-# to keep forking.
+# None of the three carries phase-planning logic. That logic is tandem's own (src/tandem/planning), and
+# tandem drives the planner through src/tandem/planners without changing it -- which is the whole
+# point: a planner tandem has to fork is a planner tandem has to keep forking.
+#
+# tiptop and cuTAMP are the TANDEM branches of SamratSahoo's forks: their mains (tiptop 81569ff,
+# cuTAMP 3a2e4d0) plus LJ1356's surface-fitted placement, ported from LJ1356/tiptop@ffe370a and
+# @37b9678 and LJ1356/cuTAMP@10ce0cc and @46c3a61. Every piece of it is OPT-IN: with none of the
+# placement_* keys, table_plane_support_vote, disjoint_object_masks or blend_stretch_to_caps set, the
+# pair plans exactly as the two mains do. It is what lets "Solve Constrained Puzzle" and "Store Bread in
+# Closed Box" set the placement_* keys their configs were tuned with (tamp_keys.py says what each does).
+# A pin names the branch it follows (SourcePin.ref), so a bump moves along that branch.
 #
 # tiptop and cuTAMP MUST move together, and nothing will catch it if they do not: both cuTAMP commits
 # call themselves 0.0.5, so tiptop's check_cutamp_version passes either way. This tiptop imports
-# cutamp.posture_prior and cutamp.particle_initialization.NoGraspsError and always passes the
-# TAMPConfiguration fields transit_apex_*, grasp_center_cost, grasp_rank_conf_weight and
-# require_m2t2_grasps; under the older cuTAMP that is an ImportError at warm, then a TypeError on
-# every config. cuRobo did not move: SamratSahoo/curobo's main is still 3a90ff4, and it already has
-# everything these two call on it (IKSolver.solve_batch(return_seeds=), the VAE cost's retiming).
+# cutamp.utils.support.NoSupportRegion (as well as cutamp.posture_prior and
+# cutamp.particle_initialization.NoGraspsError), builds TAMPEnvironment with support_points and
+# TAMPConfiguration with the placement_check="support" fields; under cuTAMP's main that is a
+# ModuleNotFoundError the moment the sidecar imports tiptop.planning, at warm-up. cuRobo did not
+# move: SamratSahoo/curobo's main is still 3a90ff4, and it already has everything these two call on it
+# (IKSolver.solve_batch(return_seeds=), the VAE cost's retiming).
 # The sidecar is checked against these exact trees (tests/test_planners.py, tests/test_sidecar_legs.py,
-# tests/test_tiptop_bump.py, run by CI with the pinned sources fetched), and so is the set of `tamp:`
-# keys a profile may set (tamp_keys.py): move the pins and those checks together.
+# tests/test_tiptop_bump.py, tests/test_tiptop_placement.py, run by CI with the pinned sources fetched),
+# and so is the set of `tamp:` keys a profile may set (tamp_keys.py): move the pins and those checks
+# together.
 TIPTOP = Source(
     SourcePin(
-        "tiptop", "https://github.com/SamratSahoo/tiptop.git", "1c6daf3f5d1ab822a0787c40ec0ed6b6caa472de"
+        "tiptop",
+        "https://github.com/SamratSahoo/tiptop.git",
+        "682047493b88e5301c6b2b49da914ea4f173e5d9",
+        ref="TANDEM",
     ),
     trim=(
         "docs/_static",  # 22 MB of screen recordings and screenshots
@@ -86,7 +98,10 @@ TIPTOP = Source(
 
 CUTAMP = Source(
     SourcePin(
-        "cuTAMP", "https://github.com/SamratSahoo/cuTAMP.git", "3a2e4d000339f7460f1989bde84d32b328ac92f9"
+        "cuTAMP",
+        "https://github.com/SamratSahoo/cuTAMP.git",
+        "fc8f233cf6694f069a7a9e1774ae3f31dbedcb17",
+        ref="TANDEM",
     ),
     trim=(
         "cutamp/robots/assets/yam_description",  # 11 MB; the bimanual YAM is out of scope
@@ -97,7 +112,10 @@ CUTAMP = Source(
 
 CUROBO = Source(
     SourcePin(
-        "curobo", "https://github.com/SamratSahoo/curobo.git", "3a90ff49eee169d9636b2a679d98457a2592fb52"
+        "curobo",
+        "https://github.com/SamratSahoo/curobo.git",
+        "3a90ff49eee169d9636b2a679d98457a2592fb52",
+        ref="main",
     ),
     trim=(
         # 115 MB of robot meshes for arms this pipeline does not support. Franka and UR stay: cuTAMP's

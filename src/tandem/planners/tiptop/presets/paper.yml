@@ -17,13 +17,17 @@
 #      voxel_downsample_size: 0.005 (4_bread_box and 8c_pp_3bread_cloth only). Each is that
 #      task's own. To get them, import the task's v3 config with --tamp-config and no --preset:
 #      it already carries every setting here, and this preset would replace its TAMP block.
-#    - the placement_* keys of 1_toy_puzzle_v3 and 4_bread_box_v3. Only LJ1356's fork of
-#      tiptop reads them, so tandem refuses them (planners/tiptop/tamp_keys.py REFUSED).
+#    - the placement_* keys of 1_toy_puzzle_v3 and 4_bread_box_v3 (surface-fitted placement:
+#      "Solve Constrained Puzzle" and "Store Bread in Closed Box" only). Import the task's
+#      config with --tamp-config to get them; the import also names the three switches
+#      LJ1356's tiptop always had on for those runs (table_plane_support_vote,
+#      disjoint_object_masks, blend_stretch_to_caps), which tandem leaves to you.
 #
-#  hitl-tamp-vla pins LJ1356/tiptop cf75a68 and its cuTAMP. TiPToP here pins SamratSahoo/tiptop
-#  1c6daf3 and cuTAMP 3a2e4d0 (planners/tiptop/recipe.py), which read every key below
-#  (tests/test_tiptop_bump.py). 1c6daf3 re-parameterised the VAE timing that blend_mode: vae
-#  optimises, though, so the same settings do not give bit-identical trajectories.
+#  hitl-tamp-vla pins LJ1356/tiptop cf75a68 and its cuTAMP. TiPToP here pins the TANDEM branches
+#  of SamratSahoo/tiptop and cuTAMP (planners/tiptop/recipe.py: main plus LJ1356's placement
+#  support, opt-in), which read every key below (tests/test_tiptop_bump.py). SamratSahoo/tiptop
+#  1c6daf3 re-parameterised the VAE timing that blend_mode: vae optimises, though, so the same
+#  settings do not give bit-identical trajectories.
 # ─────────────────────────────────────────────────────────────────────────────────────────
 title: The TANDEM paper's collection settings, on TiPToP
 summary: the paper's phase planning plus its TAMP and DATAFARM overrides (VAE manifold cost, vae blending)

@@ -9,10 +9,11 @@ installs them from a directory instead -- ``tandem planners install NAME --sourc
         cuTAMP/
         curobo/
 
-Each export carries a ``.tandem-source.json`` marker naming its commit and a digest of its files, and
-an install checks both: the commit against its own pins, so a bundle made for one version of tandem is
-refused by another instead of quietly building the wrong planner, and the files against the digest,
-so a bundle edited or damaged since is not recorded as that commit. That is why this lives in the package rather than only
+Each export carries a ``.tandem-source.json`` marker naming its commit (and the branch the pin takes it
+from, for whoever holds the bundle) and a digest of its files, and an install checks both: the commit
+against its own pins, so a bundle made for one version of tandem is refused by another instead of
+quietly building the wrong planner, and the files against the digest, so a bundle edited or damaged
+since is not recorded as that commit. That is why this lives in the package rather than only
 in the repository: a bundle has to be made by the SAME tandem that installs from it, and a pip or
 pipx install has no repository to run a script from. Patches are not applied here: the install
 applies them, the same way whether the tree came from the network or from a bundle.
@@ -102,6 +103,8 @@ def bundle_sources(
                 "name": source.name,
                 "url": source.pin.url,
                 "commit": source.pin.commit,
+                # The branch the pin names, for a person holding the bundle. Only the commit is checked.
+                "ref": source.pin.ref or None,
                 "planner": planner,
                 "trimmed": dropped,
                 "fetched_from": origin.get("origin"),
@@ -113,7 +116,7 @@ def bundle_sources(
             shutil.rmtree(dest, ignore_errors=True)
             staged.rename(dest)
             size = sum(f.stat().st_size for f in dest.rglob("*") if f.is_file() and not f.is_symlink())
-            log(f"{source.name}: {source.pin.short()} -> {dest}  ({size / 1e6:.1f} MB)")
+            log(f"{source.name}: {source.pin.label()} -> {dest}  ({size / 1e6:.1f} MB)")
             written[source.name] = marker
     finally:
         shutil.rmtree(scratch, ignore_errors=True)

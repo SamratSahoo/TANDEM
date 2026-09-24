@@ -8,8 +8,8 @@ something:
     resolve_time_dilation_factor, resolve_traj_length_norm, resolve_grasp_orientation_cost,
     resolve_grasp_center_cost, resolve_grasp_rank_conf_weight, resolve_transit_apex,
     resolve_posture_selection, resolve_ik_num_seeds, resolve_require_m2t2_grasps,
-    resolve_max_motion_refine_attempts, resolve_vae_retiming, apply_perception_overrides,
-    summarize_curobo_config
+    resolve_max_motion_refine_attempts, resolve_vae_retiming, resolve_placement_support,
+    apply_perception_overrides, summarize_curobo_config
   * ``tiptop/planning.py``          — run_planning's grasp soft-cost weights
   * ``tiptop/trajectory_blending.py`` — resolve_blend_config
   * ``tiptop/tiptop_run.py`` — num_particles / opt_steps_per_skeleton
@@ -115,11 +115,60 @@ SCALAR_KEYS: dict[str, type] = {
     # mean, which restores the between-stroke timing variance the mean target collapses.
     "blend_vae_sample_target": bool,
     "blend_seed": int,
+    # What an operation whose stroke cannot be re-timed inside the vel/accel caps gets. Off (tiptop's
+    # default): blend_mode vae gives up on it and the run keeps its original segments at the plan's own
+    # timing. On: the stroke is slowed past blend_max_duration_mult until it fits, and a run whose
+    # blending failed is slowed into the same caps -- which can make a stroke many times slower than
+    # the planner's. LJ1356's tiptop always did this; hitl-tamp-vla's toy-puzzle and bread/box configs
+    # were tuned with it on. tiptop refuses a quoted "false" (it takes a boolean, or 0/1); tandem
+    # takes a boolean, like every other switch here.
+    "blend_stretch_to_caps": bool,
+    # --- surface-fitted placement (resolve_placement_support) ---
+    # Where an object may be put down. Off (the default), the region is the surface's oriented bounding
+    # box, with the object's bottom at the box's TOP: right for a slab, wrong for anything with
+    # structure -- for an open box it is the top of the folded-back lid, for a plate the rim. On,
+    # cuTAMP fits the region to the surface's OBSERVED points: the level patches that would hold this
+    # object's footprint, at that patch's own height. "Store Bread in Closed Box" and "Solve
+    # Constrained Puzzle" set it; the bread was released ~19 cm up without it. The six keys after it
+    # are read ONLY when it is on (PLACEMENT_GATED).
+    "placement_support": bool,
+    # Surface the object must keep around its footprint, in metres. Default 0.01. >= 0 (cuTAMP's
+    # support_margin).
+    "placement_support_margin": float,
+    # How much the surface under a footprint may vary and still count as one level patch, in metres.
+    # Default 0.008; > 0 (support_flatness_tol). Absorbs stereo noise as well as real relief: the
+    # bread/box config raises it to 0.012 for a tray whose floor came back with a 1.7 cm spread.
+    "placement_flatness_tol": float,
+    # When NO patch of a goal surface would hold the object: true (default) fails the plan with that as
+    # the reason -- an ordinary plan failure, so `hitl.on_robot_phase_failure` decides what happens --
+    # false falls back to the bounding box and logs (placement_support_required).
+    "placement_support_required": bool,
+    # Whether a placed object may overlap the surface it was placed on in the collision cost. Default
+    # true; placing INSIDE a container needs it, since perception reconstructs one as a filled hull
+    # (placement_ignores_target_surface).
+    "placement_into_surface": bool,
+    # Whether the unobserved cells inside a surface's outline count as floor: a camera looking across a
+    # box does not see its floor. Default false -- the one setting that places onto surface nobody
+    # saw (support_fill_occluded).
+    "placement_fill_occluded": bool,
+    # The fraction of every footprint that must be genuinely observed. Default 0.25; in [0, 1]
+    # (support_min_seen_frac). It is what guards placement_fill_occluded.
+    "placement_min_seen_frac": float,
     # --- perception (PERCEPTION_KEYS below says where each one lands) ---
     "contact_threshold_m": float,
     "grasp_threshold": float,
     "m2t2_num_runs": int,
     "voxel_downsample_size": float,
+    # How RANSAC picks the table among its candidate planes. Off (tiptop's default): an object votes for
+    # a plane when its contact point is within 3 cm of it either side, which also counts objects BELOW
+    # one. On: only objects resting ON a plane vote, ties broken by the plane's size (LJ1356's tiptop
+    # always did this).
+    "table_plane_support_vote": bool,
+    # Whether object meshes and point clouds come from DISJOINT masks, every pixel two masks claim
+    # going to the smaller object, so a container's hull stops at what rests on it. Off (tiptop's
+    # default) keeps SAM-2's masks; the placement support points use disjoint masks either way.
+    # LJ1356's tiptop always did this.
+    "disjoint_object_masks": bool,
 }
 
 # Path-valued knobs. tandem resolves these to absolute paths before handing them over, so a
@@ -156,7 +205,20 @@ PERCEPTION_KEYS: dict[str, tuple[str, ...]] = {
     "grasp_threshold": ("perception", "m2t2", "grasp_threshold"),
     "m2t2_num_runs": ("perception", "m2t2", "num_runs"),
     "voxel_downsample_size": ("perception", "voxel_downsample_size"),
+    "table_plane_support_vote": ("perception", "table_plane_support_vote"),
+    "disjoint_object_masks": ("perception", "disjoint_object_masks"),
 }
+
+# The placement keys resolve_placement_support reads only when placement_support is on. Set without it
+# they are accepted and passed on, and change nothing -- which render.check_assets says out loud.
+PLACEMENT_GATED: tuple[str, ...] = (
+    "placement_support_margin",
+    "placement_flatness_tol",
+    "placement_support_required",
+    "placement_into_surface",
+    "placement_fill_occluded",
+    "placement_min_seen_frac",
+)
 
 # Keys a cfg/tamp file can carry that tandem REFUSES, each with the reason, because accepting one
 # would be a setting that does nothing. The profile loader says why instead of "unknown setting".
@@ -177,24 +239,6 @@ REFUSED: dict[str, str] = {
         "states, and a leg may move only the objects that phase allows"
     ),
 }
-# Surface-fitted placement is a feature of LJ1356's fork of tiptop (resolve_placement_support) and its
-# cuTAMP, not of the SamratSahoo trees tandem pins; the monorepo's paper-era box and puzzle configs
-# carry these keys. Refused rather than dropped: a config that relied on them places differently
-# without them (the bread released ~19 cm up), and that should be a decision, not a surprise.
-for _key in (
-    "placement_support",
-    "placement_support_margin",
-    "placement_support_required",
-    "placement_into_surface",
-    "placement_fill_occluded",
-    "placement_min_seen_frac",
-    "placement_flatness_tol",
-):
-    REFUSED[_key] = (
-        "is read only by LJ1356's fork of tiptop (surface-fitted placement), not by the SamratSahoo "
-        "tiptop tandem runs, so it would do nothing. Remove it, or port that placement support upstream"
-    )
-del _key
 
 # Keys whose `null` means something to tiptop that a tandem profile cannot say: a profile drops a
 # null as "not set", which here would silently mean tiptop's default instead.
@@ -232,6 +276,7 @@ POSITIVE_KEYS: tuple[str, ...] = (
     "max_motion_refine_attempts",
     "posture_pos_tol",
     "posture_rot_tol",
+    "placement_flatness_tol",
 )
 NON_NEGATIVE_KEYS: tuple[str, ...] = (
     "blend_boundary_window",
@@ -240,7 +285,10 @@ NON_NEGATIVE_KEYS: tuple[str, ...] = (
     "transit_apex_min_dist",
     "posture_selection_seeds",
     "grasp_rank_conf_weight",
+    "placement_support_margin",
 )
+# A fraction, in [0, 1] both ends included, as cuTAMP's validate_tamp_config has it.
+UNIT_INTERVAL_KEYS: tuple[str, ...] = ("placement_min_seen_frac",)
 
 # Operations blend_ops may name (cuTAMP plan operation names).
 BLEND_OPS = ("Pick", "Place", "MoveFree", "MoveHolding", "GoToInitial")
