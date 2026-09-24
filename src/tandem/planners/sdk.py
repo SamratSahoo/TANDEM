@@ -44,12 +44,17 @@ What the base class supplies, and why each default is the one it is:
 - **It is its own factory.** ``info``, ``capabilities()``, ``create(ctx)`` and ``runtime(settings)``
   are class-level, so the class itself satisfies ``BackendFactory`` and the registry uses it as one
   (it does NOT instantiate it to get a factory: an instance is a backend, built per session).
-  ``create(ctx)`` checks the context's ``planner.options`` (``validate_options``) and then calls
-  ``cls(ctx)`` with them as checked; override it when construction needs more than the context.
-- **Its options are its own.** ``OPTIONS`` names the ``planner.options`` keys it reads, one line each,
-  and the default ``validate_options`` refuses any other -- when a profile naming the planner loads,
-  not when a session starts. A planner whose options have structure (types, ranges, nested blocks)
-  overrides ``validate_options`` to check and normalise them; TiPToP's is a pydantic model.
+  ``create(ctx)`` checks the context's options (``validate_options``, ``validate_rig_options``) and
+  then calls ``cls(ctx)`` with them as checked; override it when construction needs more than the
+  context.
+- **Its options are its own, and of two kinds.** ``OPTIONS`` names the keys it reads from a PROFILE's
+  ``planner.options`` -- settings of the task, one set per profile -- and ``RIG_OPTIONS`` the keys it
+  reads from the RIG, rig.yml's ``planners.<name>`` -- settings of this machine, which every profile
+  shares: a robot shim's ports, a server's address. One line each. The default ``validate_options``
+  and ``validate_rig_options`` refuse any other key -- when a profile or the rig is read, not when a
+  session starts -- and a key put in the wrong one is told where it belongs. A planner whose options
+  have structure (types, ranges, nested blocks) overrides them to check and normalise; TiPToP's are
+  pydantic models.
 - **What else tandem asks it has a default too.** ``describe_options`` lists its options as they are
   (`tandem profile show`, the web editor); ``doctor_checks`` adds nothing to `tandem doctor` beyond
   its runtime, which doctor checks for every planner; ``replay`` says it has no viewer;
@@ -446,10 +451,15 @@ class Planner(abc.ABC):
     #: The runtime it runs in, when it needs more than pip: pinned sources, an environment, build
     #: steps. None for a pure-Python planner. ``info.sources`` is filled in from it when left empty.
     recipe: ClassVar[RuntimeRecipe | None] = None
-    #: The ``planner.options`` keys it reads, each with one line saying what it does. Anything else
-    #: in a profile's options is refused (``validate_options``) rather than ignored: an option that
-    #: silently does nothing is a setting the operator believes is in force and is not.
+    #: The keys it reads from a PROFILE's ``planner.options`` -- settings of the task (TiPToP: tamp) --
+    #: each with one line saying what it does. Anything else in a profile's options is refused
+    #: (``validate_options``) rather than ignored: an option that silently does nothing is a setting the
+    #: operator believes is in force and is not.
     OPTIONS: ClassVar[Mapping[str, str]] = {}
+    #: The keys it reads from the RIG -- rig.yml, under ``planners.<name>`` -- settings of THIS MACHINE,
+    #: which every profile shares: a robot shim's ports, a server's address (TiPToP: robot, perception).
+    #: Checked by ``validate_rig_options``, as OPTIONS are by ``validate_options``. No key may be in both.
+    RIG_OPTIONS: ClassVar[Mapping[str, str]] = {}
     #: The backend's name, as ``TampBackend`` has it. Defaults to ``info.name``.
     name: ClassVar[str] = ""
     #: A directory of presets for this planner's ``planner.options`` (``<name>.yml``, laid out as
@@ -494,8 +504,14 @@ class Planner(abc.ABC):
 
     @classmethod
     def create(cls, ctx: BackendContext) -> Planner:
-        """The backend a session drives, not yet warmed, built with its options as ``validate_options`` left them."""
-        return cls(replace(ctx, options=cls.validate_options(ctx.options)))
+        """The backend a session drives, not yet warmed, built with both its options as their checks left them."""
+        return cls(
+            replace(
+                ctx,
+                options=cls.validate_options(ctx.options),
+                rig_options=cls.validate_rig_options(ctx.rig_options),
+            )
+        )
 
     @classmethod
     def validate_options(cls, options: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -509,12 +525,26 @@ class Planner(abc.ABC):
         ``ValidationError`` is one -- naming what is wrong. It must accept its own output unchanged:
         a saved profile is validated again when it is read back. And its output must be plain data --
         mappings with string keys, lists, strings, numbers, booleans, None -- because it is written
-        into profile.yml as it stands: from a pydantic model, return ``model_dump(mode="json")``. A
-        Path or an Enum is refused (``registry.options_for``). A setting with no sensible default (a
-        robot's address) may be required: refuse ``{}`` with a TandemError naming it, and `tandem
-        planners use NAME --option KEY=VALUE` is how a person supplies it.
+        into the profile's file as it stands: from a pydantic model, return ``model_dump(mode="json")``. A
+        Path or an Enum is refused (``registry.options_for``). A task setting with no sensible default
+        (a scene file) may be required: refuse ``{}`` with a TandemError naming it, and `tandem planners
+        use NAME --option KEY=VALUE` is how a person supplies it. One of the machine's -- a robot's
+        address -- is a ``RIG_OPTIONS`` setting instead (``validate_rig_options``).
         """
         cls.check_options(options)
+        return dict(options or {})
+
+    @classmethod
+    def validate_rig_options(cls, options: Mapping[str, Any] | None) -> dict[str, Any]:
+        """rig.yml's ``planners.<name>`` as this planner reads it: every key checked, defaults filled in.
+
+        ``validate_options``' twin, for the settings of the machine rather than of a task: called when
+        the rig is read, and again by ``create``. The same rules: it must accept its own output
+        unchanged, return plain data, and may refuse ``{}`` with a TandemError naming a setting that has
+        no sensible default -- `tandem rig set planners.<name>.KEY VALUE` supplies it. The default refuses
+        any key ``RIG_OPTIONS`` does not name and returns the rest unchanged.
+        """
+        cls.check_rig_options(options)
         return dict(options or {})
 
     @classmethod
@@ -560,11 +590,25 @@ class Planner(abc.ABC):
 
     @classmethod
     def check_options(cls, options: Mapping[str, Any] | None) -> None:
-        """Refuse any ``planner.options`` key this planner does not declare in ``OPTIONS``."""
+        """Refuse any ``planner.options`` key this planner does not declare in ``OPTIONS``.
+
+        A key it reads from the rig instead is told so: the same setting in both places is the drift the
+        split exists to prevent.
+        """
+        title = cls.info.title if hasattr(cls, "info") else cls.__name__
+        machine = sorted(str(key) for key in (options or {}) if key in cls.RIG_OPTIONS and key not in cls.OPTIONS)
+        if machine:
+            name = cls.info.name if hasattr(cls, "info") else "NAME"
+            raise TandemError(
+                f"{', '.join(machine)} {'is a machine setting' if len(machine) == 1 else 'are machine settings'} "
+                f"of the {title} planner, not a task's: {'it lives' if len(machine) == 1 else 'they live'} in "
+                f"rig.yml under planners.{name}, which every profile shares.",
+                hint=f"Remove {'it' if len(machine) == 1 else 'them'} from the profile's planner.options, and "
+                f"`tandem rig set planners.{name}.{machine[0]}.KEY VALUE` instead.",
+            )
         unknown = sorted(str(key) for key in (options or {}) if key not in cls.OPTIONS)
         if not unknown:
             return
-        title = cls.info.title if hasattr(cls, "info") else cls.__name__
         if not cls.OPTIONS:
             hint = f"The {title} planner reads no options. Remove planner.options from the profile."
         else:
@@ -579,12 +623,53 @@ class Planner(abc.ABC):
             hint=hint,
         )
 
+    @classmethod
+    def check_rig_options(cls, options: Mapping[str, Any] | None) -> None:
+        """Refuse any key of the rig's ``planners.<name>`` this planner does not declare in ``RIG_OPTIONS``."""
+        title = cls.info.title if hasattr(cls, "info") else cls.__name__
+        name = cls.info.name if hasattr(cls, "info") else "NAME"
+        task = sorted(str(key) for key in (options or {}) if key in cls.OPTIONS and key not in cls.RIG_OPTIONS)
+        if task:
+            raise TandemError(
+                f"{', '.join(task)} {'is a task setting' if len(task) == 1 else 'are task settings'} of the "
+                f"{title} planner, not this machine's: a profile's planner.options.",
+                hint=f"Remove {'it' if len(task) == 1 else 'them'} from rig.yml's planners.{name}, and set "
+                f"{'it' if len(task) == 1 else 'them'} with `tandem profile edit NAME`.",
+            )
+        unknown = sorted(str(key) for key in (options or {}) if key not in cls.RIG_OPTIONS)
+        if not unknown:
+            return
+        if not cls.RIG_OPTIONS:
+            hint = f"The {title} planner reads no machine settings. Remove planners.{name} from rig.yml."
+        else:
+            close = difflib.get_close_matches(unknown[0], list(cls.RIG_OPTIONS), n=1, cutoff=0.6)
+            hint = (
+                f"Did you mean {close[0]!r}?"
+                if close
+                else "It reads: " + "; ".join(f"{key} ({text})" for key, text in cls.RIG_OPTIONS.items()) + "."
+            )
+        raise TandemError(
+            f"The {title} planner does not read the machine settings {', '.join(unknown)} "
+            f"(rig.yml, planners.{name}).",
+            hint=hint,
+        )
+
     # ---- conveniences for the implementation ----------------------------------------------------
 
     @property
     def options(self) -> dict[str, Any]:
         """The profile's ``planner.options``, as validated by ``create``."""
         return dict(self.ctx.options) if self.ctx is not None else {}
+
+    @property
+    def rig_options(self) -> dict[str, Any]:
+        """This machine's ``planners.<name>`` block of rig.yml, as validated by ``create``."""
+        return dict(self.ctx.rig_options) if self.ctx is not None else {}
+
+    @property
+    def rig(self) -> Any:
+        """This machine's rig (``tandem.core.rig.Rig``: robot.host and type, cameras, calibration), or None."""
+        return self.ctx.rig if self.ctx is not None else None
 
     @property
     def settings(self) -> Any:
@@ -801,6 +886,18 @@ def _declaration_problems(cls: type[Planner], *, complete: bool) -> list[str]:
         isinstance(k, str) and isinstance(v, str) for k, v in options.items()
     ):
         problems.append("OPTIONS must map each option name to one line describing it")
+    machine = cls.RIG_OPTIONS
+    if not isinstance(machine, Mapping) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in machine.items()
+    ):
+        problems.append("RIG_OPTIONS must map each machine setting's name to one line describing it")
+    elif isinstance(options, Mapping):
+        both = sorted(set(options) & set(machine))
+        if both:
+            problems.append(
+                f"{', '.join(both)} {'is' if len(both) == 1 else 'are'} in both OPTIONS and RIG_OPTIONS: a key "
+                "cannot be both the task's and the machine's"
+            )
 
     name = own.get("name", "")
     if complete and name and isinstance(info, PlannerInfo) and name != info.name:

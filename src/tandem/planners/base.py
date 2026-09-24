@@ -562,8 +562,9 @@ class BackendContext:
     """Everything a session hands a factory to build its backend.
 
     Deliberately planner-neutral. Nothing here is TipTop's, and a field a backend has no use for is
-    simply ignored by it; what one backend needs that no other does belongs in ``options``, which is
-    the profile's ``planner.options`` block and is the backend's own to define and validate.
+    simply ignored by it; what one backend needs that no other does belongs in ``options``, the
+    profile's ``planner.options`` block (the task's), or ``rig_options``, rig.yml's ``planners.<name>``
+    block (this machine's) -- each the backend's own to define and validate.
     """
 
     # The profile the session runs under (``tandem.core.profiles.Profile``; typed loosely so this
@@ -591,6 +592,13 @@ class BackendContext:
     # Where the caller has already located this planner's runtime, if it has. None means the factory
     # resolves its own from ``settings``. A backend with no runtime ignores it.
     runtime_dir: Path | None = None
+    # This machine's rig (``tandem.core.rig.Rig``): the robot's host and type, the cameras, the
+    # calibration file. None only for a context built by hand; a planner that needs it then reads
+    # ``tandem.core.rig.load()``.
+    rig: Any = None
+    # rig.yml's ``planners.<name>`` block: this planner's machine settings, as its
+    # ``validate_rig_options`` left them.
+    rig_options: Mapping[str, Any] = field(default_factory=dict)
 
     def log(self, text: str, *, stream: str = "tandem") -> None:
         if self.on_log is not None:
@@ -756,6 +764,9 @@ class BackendFactory(Protocol):
 
     - ``validate_options(options) -> dict``: ``planner.options`` checked and normalised, called when
       a profile naming the planner loads. Default: taken as written.
+    - ``validate_rig_options(options) -> dict``: rig.yml's ``planners.<name>`` checked and normalised,
+      called when the rig is read. Default: taken as written. Its keys are declared in ``RIG_OPTIONS``
+      as the task's are in ``OPTIONS``; a key in the wrong one is refused with where it belongs.
     - ``describe_options(profile, *, settings=None) -> OptionsView``: those options for a person.
       Default: ``OptionsView.generic``.
     - ``doctor_checks(profile, *, settings=None, probe_hardware=True) -> list[tandem.core.probe.Check]``:

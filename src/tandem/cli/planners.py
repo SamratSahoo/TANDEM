@@ -257,9 +257,10 @@ def info_payload(name: str, *, profile_name: str | None = None) -> dict:
     cfg = settings_mod.load()
     profile, in_use, problem = profile_planner(profile_name)
     state = runtime_state(name, info, cfg)
-    # A tandem.planners.Planner declares the planner.options it reads; any other factory does not
-    # say, which is not the same as reading none.
+    # A tandem.planners.Planner declares the planner.options it reads, and its machine settings; any other
+    # factory does not say, which is not the same as reading none.
     options = getattr(factory, "OPTIONS", None)
+    rig_options = getattr(factory, "RIG_OPTIONS", None)
     return {
         "kind": "planner",
         **info.to_dict(),
@@ -277,6 +278,7 @@ def info_payload(name: str, *, profile_name: str | None = None) -> dict:
             "mismatched": state["mismatched"],
         },
         "options": dict(options) if isinstance(options, Mapping) else None,
+        "rig_options": dict(rig_options) if isinstance(rig_options, Mapping) else None,
         **_presets_of(name),
         "capabilities": capabilities_summary(caps),
     }
@@ -526,11 +528,18 @@ def info(
     )
     if payload["options"] is not None:
         theme.blank()
-        theme.heading("planner.options", "what a profile may set for it")
+        theme.heading("planner.options", "what a profile may set for it: the task's settings")
         if payload["options"]:
             theme.kv([(escape(str(key)), text) for key, text in payload["options"].items()])
         else:
             theme.info("none: it reads no planner.options")
+    if payload["rig_options"]:
+        theme.blank()
+        theme.heading(
+            f"machine settings (rig.yml planners.{escape(name)})",
+            f"every profile shares them: `tandem rig set planners.{escape(name)}.KEY VALUE`",
+        )
+        theme.kv([(escape(str(key)), text) for key, text in payload["rig_options"].items()])
 
     if payload["presets"] or payload["presets_problem"]:
         theme.blank()

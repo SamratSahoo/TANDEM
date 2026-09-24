@@ -18,5 +18,7 @@ class Test{{class_name}}(PlannerConformance):
     # TODO: True once execute() records complete legs -- robot_state.npz, the camera clips, and the
     # record_start/record_stop/fps timing -- so the kit checks the recording and not only the stamp.
     records_legs = False
-    # The profile's planner.options the planner is built with in these tests.
+    # The profile's planner.options the planner is built with in these tests: the task's settings.
     options = {}
+    # rig.yml's planners.{{name}}: this machine's settings (RIG_OPTIONS), which every profile shares.
+    rig_options = {}

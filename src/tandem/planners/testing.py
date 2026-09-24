@@ -16,7 +16,7 @@ The easy way in is to subclass the test class in your own suite::
         planner = MyPlanner              # a Planner subclass, any BackendFactory, or a registered name
 
 pytest collects every ``test_*`` it inherits. Tune it with class attributes (``records_legs``,
-``phase_planning``, ``verifies_human_phases``, ``options``, ``task_hint``) and hooks (``goal`` to
+``phase_planning``, ``verifies_human_phases``, ``options``, ``rig_options``, ``task_hint``) and hooks (``goal`` to
 choose what is planned, ``make_backend`` to build the backend some other way). The two in the middle
 are on by default and hold a planner to what the method needs of it: an image from every perception
 pass, which the task is decomposed from, and a camera frame, which a person's step is verified from.
@@ -611,8 +611,10 @@ class PlannerConformance:
     #: pass every human phase unchecked. Turn it off, visibly, only for a planner whose profiles turn
     #: those checks off.
     verifies_human_phases: bool = True
-    #: The ``planner.options`` the backend is built with.
+    #: The ``planner.options`` the backend is built with: a profile's, the task's settings.
     options: Mapping[str, Any] = {}
+    #: The machine settings the backend is built with: rig.yml's ``planners.<name>`` (``RIG_OPTIONS``).
+    rig_options: Mapping[str, Any] = {}
     #: The instruction handed to ``perceive`` as its detection hint.
     task_hint: str = "put one thing where it belongs"
 
@@ -636,6 +638,7 @@ class PlannerConformance:
             record=True,
             on_log=lambda stream, text: self.logs.append((stream, text)),
             options=dict(self.options),
+            rig_options=dict(self.rig_options),
             session_id="conformance",
             task=self.task_hint,
             events_file=session_dir / "events.jsonl",
@@ -722,7 +725,7 @@ class PlannerConformance:
 
     def test_its_options_check_handles_no_options(self) -> None:
         # `tandem planners use NAME` and `tandem profile create --planner NAME` start a profile with no
-        # planner.options at all. A planner may require one (a robot's address) -- but then it must SAY
+        # planner.options at all. A planner may require one (a scene file) -- but then it must SAY
         # so, with a TandemError or a ValueError naming the key, which tandem turns into "give it
         # --option KEY=VALUE". A KeyError or a TypeError out of an empty block is a traceback instead.
         from tandem.core.errors import TandemError
@@ -738,6 +741,43 @@ class PlannerConformance:
                 [
                     f"given no options it raised {type(exc).__name__}: {exc}; with a setting it requires, "
                     "raise TandemError (or ValueError) naming it"
+                ],
+            )
+
+    def test_its_rig_options_check_accepts_what_it_returns(self) -> None:
+        # rig.yml's planners.<name> is validated every time the rig is read, and what the check returned is
+        # what the planner is built with: a check that refuses (or changes) its own output makes the rig
+        # unloadable once it is written back.
+        from tandem.planners.registry import rig_options_for
+
+        factory = self.factory()
+        checked = rig_options_for(factory, self.rig_options)  # also refuses what is not plain data
+        again = rig_options_for(factory, checked)
+        if again != checked:
+            _raise(
+                "its validate_rig_options",
+                [f"given its own output {checked!r} it returned {again!r}; it must accept it unchanged"],
+            )
+        if json.loads(json.dumps(checked)) != json.loads(json.dumps(again)):
+            _raise("its validate_rig_options", ["its output does not survive a JSON round trip unchanged"])
+
+    def test_its_rig_options_check_handles_no_options(self) -> None:
+        # A machine whose rig.yml has no planners.<name> yet -- every machine, the first time. A planner
+        # may require a machine setting (a robot's address), but must say so with a TandemError or a
+        # ValueError naming it, which tandem turns into "`tandem rig set planners.<name>.KEY VALUE`".
+        from tandem.core.errors import TandemError
+        from tandem.planners.registry import rig_options_for
+
+        try:
+            rig_options_for(self.factory(), {})
+        except (TandemError, ValueError):
+            return
+        except Exception as exc:
+            _raise(
+                "its validate_rig_options",
+                [
+                    f"given no machine settings it raised {type(exc).__name__}: {exc}; with a setting it "
+                    "requires, raise TandemError (or ValueError) naming it"
                 ],
             )
 

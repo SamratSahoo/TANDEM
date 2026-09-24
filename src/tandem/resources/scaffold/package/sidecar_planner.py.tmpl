@@ -92,8 +92,12 @@ class {{class_name}}(SidecarPlanner):
     # TODO: seconds each verb may take before the sidecar is reported as wedged, over the defaults
     # (tandem.planners.sidecar.DEFAULT_TIMEOUTS), e.g. {"warm": 600.0}.
     TIMEOUTS = {}
-    # TODO: the planner.options keys it reads from a profile, each with one line saying what it does.
-    # Hand them to the sidecar by overriding warm_args(). Any other key is refused when a profile naming
-    # the planner loads; override validate_options(options) for types or structure, and
+    # TODO: the TASK's settings it reads, in each profile's planner.options, one line each saying what it
+    # does. Hand them to the sidecar by overriding warm_args(). Any other key is refused when a profile
+    # naming the planner loads; override validate_options(options) for types or structure, and
     # doctor_checks(profile, *, settings, probe_hardware) for what `tandem doctor` should check.
     OPTIONS = {}
+    # TODO: settings of THIS MACHINE it reads -- a robot's ports, a server's address -- each with one line.
+    # They live in the rig (rig.yml, under planners.{{name}}) and every profile shares them: `tandem rig set
+    # planners.{{name}}.KEY VALUE`. OPTIONS above are the TASK's, one set per profile. No key in both.
+    RIG_OPTIONS = {}

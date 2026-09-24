@@ -219,32 +219,100 @@ def validate_options(name: str, options: Mapping[str, Any] | None) -> dict[str, 
 
 
 def options_for(planner: Any, options: Mapping[str, Any] | None) -> dict[str, Any]:
-    """``options`` as the already-loaded factory ``planner`` reads them.
+    """``options`` -- a profile's ``planner.options`` -- as the already-loaded factory ``planner`` reads them.
 
-    A factory with a ``validate_options`` hook is asked; one without it takes its options as written,
-    and is left to refuse what it does not read when it builds a backend from them -- the one place a
-    factory written before the hook existed ever looked at them.
+    A key the planner declares as a machine setting (``RIG_OPTIONS``) is refused first, whatever the
+    planner's own hook would say, with where it lives instead: the same setting in a profile and in the
+    rig is two answers to one question. Then a factory with a ``validate_options`` hook is asked; one
+    without it takes its options as written, and is left to refuse what it does not read when it builds a
+    backend from them -- the one place a factory written before the hook existed ever looked at them.
     """
     raw = dict(options or {})
-    hook = getattr(planner, "validate_options", None)
+    misplaced = _declared_elsewhere(planner, raw, own="OPTIONS", other="RIG_OPTIONS")
+    if misplaced:
+        name = _name_of(planner)
+        key = misplaced[0]
+        raise TandemError(
+            f"{', '.join(misplaced)} {'is a machine setting' if len(misplaced) == 1 else 'are machine settings'} "
+            f"of {_title_of(planner)}: {'it lives' if len(misplaced) == 1 else 'they live'} in rig.yml under "
+            f"planners.{name}.{key}, which every profile on this machine shares.",
+            hint=f"Remove it from the profile's planner.options; `tandem rig set planners.{name}.{key} VALUE` "
+            "sets it for this machine.",
+        )
+    return _checked_by(planner, "validate_options", raw, stored_in="a profile")
+
+
+def rig_options_for(planner: Any, options: Mapping[str, Any] | None) -> dict[str, Any]:
+    """``options`` -- rig.yml's ``planners.<name>`` block -- as the already-loaded factory ``planner`` reads them.
+
+    ``options_for``'s twin, through the planner's ``validate_rig_options``: a key it declares as a task's
+    (``OPTIONS``) is refused with where it belongs, and a factory without the hook takes the block as
+    written. What it returns is plain data, as a profile's options must be.
+    """
+    raw = dict(options or {})
+    misplaced = _declared_elsewhere(planner, raw, own="RIG_OPTIONS", other="OPTIONS")
+    if misplaced:
+        name = _name_of(planner)
+        raise TandemError(
+            f"{', '.join(misplaced)} {'is a task setting' if len(misplaced) == 1 else 'are task settings'} "
+            f"of {_title_of(planner)}: {'it goes' if len(misplaced) == 1 else 'they go'} in a profile's "
+            f"planner.options, not in rig.yml's planners.{name}.",
+            hint="Remove it from rig.yml (`tandem rig edit`), and set it with `tandem profile edit NAME`.",
+        )
+    return _checked_by(planner, "validate_rig_options", raw, stored_in="rig.yml")
+
+
+def validate_rig_options(name: str, options: Mapping[str, Any] | None) -> dict[str, Any]:
+    """rig.yml's ``planners.<name>`` as the planner ``name`` reads it (``rig_options_for``)."""
+    return rig_options_for(factory(name), options)
+
+
+def rig_options_declared(name: str) -> Mapping[str, str] | None:
+    """The machine settings the planner ``name`` declares (``RIG_OPTIONS``), or None when it does not say."""
+    declared = getattr(factory(name), "RIG_OPTIONS", None)
+    return dict(declared) if isinstance(declared, Mapping) else None
+
+
+def _declared_elsewhere(planner: Any, raw: Mapping[str, Any], *, own: str, other: str) -> list[str]:
+    """Keys of ``raw`` the planner declares in its ``other`` set and not in its ``own``."""
+    theirs = getattr(planner, other, None)
+    mine = getattr(planner, own, None)
+    if not isinstance(theirs, Mapping):
+        return []
+    mine = mine if isinstance(mine, Mapping) else {}
+    return sorted(str(key) for key in raw if key in theirs and key not in mine)
+
+
+def _name_of(planner: Any) -> str:
+    return getattr(getattr(planner, "info", None), "name", None) or type(planner).__name__
+
+
+def _title_of(planner: Any) -> str:
+    info = getattr(planner, "info", None)
+    title = getattr(info, "title", None) or getattr(info, "name", None)
+    return f"the {title} planner" if title else f"the {type(planner).__name__} planner"
+
+
+def _checked_by(planner: Any, hook_name: str, raw: dict[str, Any], *, stored_in: str) -> dict[str, Any]:
+    hook = getattr(planner, hook_name, None)
     if not callable(hook):
         return raw
     checked = hook(raw)
-    title = getattr(getattr(planner, "info", None), "name", None) or type(planner).__name__
+    title = _name_of(planner)
     if not isinstance(checked, Mapping):
         raise TandemError(
-            f"The {title!r} planner's validate_options returned a {type(checked).__name__}, not the options.",
-            hint="validate_options(options) returns the options as the planner will read them, or raises.",
+            f"The {title!r} planner's {hook_name} returned a {type(checked).__name__}, not the options.",
+            hint=f"{hook_name}(options) returns the options as the planner will read them, or raises.",
         )
     problems = not_plain_data(checked, "options")
     if problems:
-        # What it returns is written into profile.yml as it stands. A Path, an Enum or a numpy value
+        # What it returns is written into a YAML file as it stands. A Path, an Enum or a numpy value
         # passes validation and then cannot be written as YAML -- found only by the save, too late.
         raise TandemError(
-            f"The {title!r} planner's validate_options returned what a profile cannot store: "
+            f"The {title!r} planner's {hook_name} returned what {stored_in} cannot store: "
             + "; ".join(problems[:5])
             + (f" (and {len(problems) - 5} more)" if len(problems) > 5 else ""),
-            hint="validate_options must return plain data -- mappings with string keys, lists, strings, "
+            hint=f"{hook_name} must return plain data -- mappings with string keys, lists, strings, "
             "numbers, booleans and None. A pydantic model returns model_dump(mode='json').",
         )
     return dict(checked)
