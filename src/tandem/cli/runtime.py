@@ -115,7 +115,7 @@ def runtime_payload(*, planner: str | None = None, profile_name: str | None = No
         "ready": status.installed,
         "root": status.path,
         "wanted": wanted,
-        "mismatched": list(status.mismatched(info.sources)),
+        "mismatched": list(status.outdated(info.sources)),
     }
     if isinstance(rt, RecipeRuntime):
         st = rt.inspect()

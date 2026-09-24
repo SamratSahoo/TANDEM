@@ -631,8 +631,11 @@ so what you see is what training sees.
 
 - Linux, an NVIDIA GPU with CUDA 12 or newer, a recent driver
 - pixi (`tandem init` installs it if you agree) and about 25 GB free disk for the runtime
-- A Franka FR3 (or UR5) with a Robotiq 2F-85, reachable over the bamboo-polymetis shim, started with
-  `--state-port` so encoders stay readable while the arm moves
+- An arm TiPToP drives, named by `robot.type` in the profile's `planner.options`: a Franka FR3 with a
+  Robotiq 2F-85 (`fr3_robotiq`), a Franka Panda with a Robotiq 2F-85 (`panda_robotiq`) or with the
+  Franka Hand (`panda`), reachable over the bamboo-polymetis shim, started with `--state-port` so
+  encoders stay readable while the arm moves; or a UR5 with a Robotiq gripper (`ur5`), over ur_rtde,
+  which is tiptop's `ur5` extra and is not installed by the runtime
 - 2–3 ZED cameras and the [ZED SDK](https://www.stereolabs.com/developers/release)
 - An M2T2 grasp server
 - A [Gemini API key](https://aistudio.google.com/apikey)

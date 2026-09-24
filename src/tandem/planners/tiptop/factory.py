@@ -29,6 +29,7 @@ from tandem.planners.base import (
     PlannerInfo,
     SourcePin,
 )
+from tandem.planners.tiptop import arms
 from tandem.planners.tiptop.capabilities import CAPABILITIES
 from tandem.planners.tiptop.recipe import RECIPE
 from tandem.planners.tiptop.runtime import TiptopRuntime
@@ -73,7 +74,9 @@ INFO = PlannerInfo(
     requires=(
         "Linux with an NVIDIA GPU, CUDA 12 or newer and a recent driver",
         "pixi, and about 25 GB of free disk for the runtime",
-        "a Franka FR3 (or UR5) with a Robotiq 2F-85, over the bamboo-polymetis shim",
+        # Written from the table the options schema checks robot.type against, so it names every arm
+        # the schema accepts and no other.
+        arms.requirement(),
         "2-3 ZED cameras and the ZED SDK",
         "an M2T2 grasp server",
         "a Gemini API key",
@@ -88,7 +91,8 @@ class TiptopFactory:
     info = INFO
     #: The planner.options TiPToP reads, as a catalog lists them. Their schema is ``options.py``.
     OPTIONS = {
-        "robot": "the arm: type, the bamboo-polymetis shim's host and ports, speed, home and capture poses",
+        "robot": "the arm: type, its host and ports (the bamboo-polymetis shim's, or a UR5's), speed, home "
+        "and capture poses",
         "perception": "the Gemini detector, the M2T2 grasp server, SAM-2 and the depth pipeline",
         "tamp": "cuTAMP / cuRobo overrides, by tiptop's own key names; unknown keys are refused",
     }

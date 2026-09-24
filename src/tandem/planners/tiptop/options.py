@@ -3,7 +3,7 @@
     planner:
       backend: tiptop
       options:
-        robot:       the arm and the bamboo-polymetis shim it is reached through
+        robot:       the arm (arms.py) and how it is reached: the bamboo-polymetis shim, or a UR5 directly
         perception:  Gemini detection, the M2T2 grasp server, SAM-2 and the depth pipeline
         tamp:        cuTAMP / cuRobo overrides, by tiptop's own key names (tamp_keys.py)
 
@@ -28,20 +28,12 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from tandem.planners.tiptop import tamp_keys
+from tandem.planners.tiptop.arms import ROBOT_TYPES
 
 # --------------------------------------------------------------------------- the arm
 
-
-#: The arms both halves of the pinned planner know: tiptop's robot client and cuRobo solvers
-#: (get_robot_client, and get_ik_solver / get_motion_gen under build_curobo_solvers), which raise
-#: "Unknown robot type" at warm-up for anything else, and cuTAMP's validate_tamp_config, which tiptop
-#: hands the same name as TAMPConfiguration.robot at every plan. Left out on purpose:
-#:   - "fr3" (a Franka Hand on an FR3): tiptop calls it "fr3" and cuTAMP "fr3_franka", so neither name
-#:     gets through both -- it warms and then fails every plan.
-#:   - the bimanual YAM types: the recipe trims their meshes, and bimanual is out of scope.
-#: tests/test_review_tiptop.py reads the set out of the pinned sources, so a bump that changes it fails
-#: there.
-ROBOT_TYPES = frozenset({"fr3_robotiq", "panda_robotiq", "panda", "ur5"})
+# ROBOT_TYPES, the arms both halves of the pinned planner know, is arms.py's. The catalog lists the same
+# table (arms.requirement), so the arms it names are exactly the ones this schema accepts.
 
 # Names people reach for that are not the planner's, and what they mean by them.
 _ROBOT_ALIASES = {

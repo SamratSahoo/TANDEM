@@ -95,7 +95,8 @@ def runtime_state(name: str, info: Any, settings: Any) -> dict:
     """Whether ``name``'s runtime is on this machine, and built at the commits it pins now.
 
     ``status`` is one of ``STATUSES``; ``detail`` is one line saying why; ``runtime`` is the runtime's
-    own status (JSON-safe) and ``mismatched`` the pinned sources it was not built at. Never raises: a
+    own status (JSON-safe) and ``mismatched`` the pinned sources it was built at other commits of --
+    none for one never built, which is not installed rather than outdated. Never raises: a
     runtime that cannot be inspected is that planner's problem and its row says so, while every other
     row is still worth reading.
 
@@ -117,20 +118,20 @@ def runtime_state(name: str, info: Any, settings: Any) -> dict:
         return _state(BROKEN, f"its runtime could not be inspected: {_why(exc)}")
 
     wanted = tuple(getattr(info, "sources", ()) or ())
-    mismatched = list(status.mismatched(wanted))
-    if status.installed and not mismatched:
+    outdated = list(status.outdated(wanted))
+    if status.installed and not status.mismatched(wanted):
         kind, detail = INSTALLED, status.detail or f"ready at {status.path}"
-    elif status.pins and mismatched:
+    elif outdated:
         have = {pin.name: pin.commit for pin in status.pins}
         moved = ", ".join(
             f"{pin.name} {str(have.get(pin.name) or '—')[:7]} → {pin.short()}"
             for pin in wanted
-            if pin.name in mismatched
+            if pin.name in outdated
         )
         kind, detail = OUTDATED, f"built from other commits than it pins now: {moved}"
     else:
         kind, detail = NOT_INSTALLED, "; ".join(status.problems) or status.detail or "not built"
-    return {"status": kind, "detail": detail, "runtime": status.to_dict(), "mismatched": mismatched}
+    return {"status": kind, "detail": detail, "runtime": status.to_dict(), "mismatched": outdated}
 
 
 def _state(kind: str, detail: str) -> dict:

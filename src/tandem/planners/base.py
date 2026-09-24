@@ -616,6 +616,16 @@ class RuntimeStatus:
         have = {pin.name: pin.commit for pin in self.pins}
         return tuple(pin.name for pin in wanted if have.get(pin.name) != pin.commit)
 
+    def outdated(self, wanted: Sequence[SourcePin]) -> tuple[str, ...]:
+        """Names of the pinned sources a runtime that was built, whole or in part, has at other commits.
+
+        What a listing reports as ``mismatched``. Empty for a runtime that records no commit at all -- one
+        never built: it is not installed rather than outdated, and listing every source it would be
+        built from as "mismatched" said it had been built from the wrong ones. ``mismatched`` is still
+        what decides whether a runtime is current, and a runtime that cannot say is not.
+        """
+        return self.mismatched(wanted) if self.pins else ()
+
     def to_dict(self) -> dict:
         return {
             "installed": self.installed,

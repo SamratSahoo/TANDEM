@@ -833,7 +833,8 @@ def test_runtime_status_on_a_fresh_machine_describes_the_planner_a_new_profile_g
     assert payload["planner"] == "tiptop" and payload["ready"] is False
     assert payload["problems"] == ["the runtime has not been created yet"]
     assert [s["commit"] for s in payload["sources"]] == [pin.commit for pin in RECIPE.pins]
-    assert payload["mismatched"] == ["tiptop", "cuTAMP", "curobo"]
+    # Never built, so nothing is at the wrong commit: `ready: false` and the problem say it all.
+    assert payload["mismatched"] == []
 
 
 def test_the_web_ui_and_doctor_read_the_same_runtime_the_terminal_does(profile):

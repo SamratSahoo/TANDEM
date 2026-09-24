@@ -171,6 +171,16 @@ def test_every_planner_is_listed_with_whether_this_machine_has_it_and_which_is_i
         "solver": "tandem planners install solver",
         "old": "tandem planners install old",
     }
+    # Only a runtime built at other commits has sources at the wrong ones. One never built has none:
+    # "not installed" is the whole story, not every source it would be built from listed as mismatched.
+    assert {name: row["mismatched"] for name, row in rows.items()} == {
+        "tiptop": [],
+        "solver": [],
+        "ready": [],
+        "old": ["solver"],
+        "pure": [],
+        "broken": [],
+    }
     assert "tandem_no_such_planner" in rows["broken"]["error"] and not rows["broken"]["ok"]
     assert rows["broken"]["origin"].startswith("entry point")
     assert rows["solver"]["summary"] == "The solver planner." and rows["solver"]["runtime"]["path"]
@@ -233,11 +243,8 @@ def test_info_says_what_a_planner_is_needs_and_can_be_asked_for(active):
     assert [pin["commit"] for pin in payload["sources"]] == [pin.commit for pin in RECIPE.pins]
     assert payload["status"] == "not installed"
     assert payload["install_command"] == "tandem planners install tiptop"
-    assert payload["runtime"]["needed"] is True and payload["runtime"]["mismatched"] == [
-        "tiptop",
-        "cuTAMP",
-        "curobo",
-    ]
+    # Never built, so nothing is at the wrong commit: not installed says it all.
+    assert payload["runtime"]["needed"] is True and payload["runtime"]["mismatched"] == []
 
     caps = payload["capabilities"]
     signatures = {p["name"]: p["signature"] for p in caps["goal_predicates"]}
