@@ -9,7 +9,8 @@
 - `planners use NAME --default` was the hint for "set the default", and also switched and emptied the
   active profile.
 - Every listing said only "<path> is not a valid profile:", with the reason cut off.
-- `profile create --from X --planner Y` ignored --planner, even a name nothing provides.
+- `profile create --from X --planner Y` ignored --planner, even a name nothing provides (there is no
+  --planner now: a new profile plans with the machine's default).
 - Settings were saved from a stale in-process copy, undoing a terminal's change; and a key nobody set was
   written, breaking an older tandem on the same machine.
 """
@@ -205,7 +206,8 @@ def test_the_web_answers_400_not_500_and_takes_the_options(active):
 
 def test_creating_a_profile_for_it_is_refused_loudly_and_writes_nothing(isolated_env):
     registry.register_backend("req", _NeedsHost())
-    created = _run("profile", "create", "p2", "--planner", "req")
+    assert _run("planners", "default", "req").exit_code == 0
+    created = _run("profile", "create", "p2", "--prompt", "pick up the cup")
     assert created.exit_code == 1
     assert isinstance(created.exception, TandemError) and "robot_ip" in created.exception.message
     assert not profiles.exists("p2")
@@ -329,14 +331,12 @@ def test_planners_default_works_while_the_active_profile_does_not_load(active):
     assert settings_mod.load(force=True).default_planner == "pure"
 
 
-# --- --from with flags it cannot honour -------------------------------------------------------------------
+# --- --from copies as written; the planner a profile plans with is `planners use`'s to change ----------------
 
 
-@pytest.mark.parametrize("flag", [["--planner", "no_such_planner"]])
-def test_create_from_refuses_the_flags_a_clone_would_ignore(active, flag):
-    result = _run("profile", "create", "eps", "--from", active.name, *flag)
-    assert result.exit_code != 0
-    assert isinstance(result.exception, ProfileError) and "would be ignored" in result.exception.message
+def test_create_has_no_planner_flag_and_a_copy_keeps_its_planner(active):
+    result = _run("profile", "create", "eps", "--from", active.name, "--planner", "no_such_planner")
+    assert result.exit_code == 2 and "No such option" in result.output
     assert not profiles.exists("eps")
     assert _run("profile", "create", "eps2", "--from", active.name).exit_code == 0
     assert profiles.load("eps2").planner == profiles.load(active.name).planner

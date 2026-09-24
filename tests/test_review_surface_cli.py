@@ -172,11 +172,13 @@ def test_profile_create_warns_about_extrinsics_only_for_a_planner_that_reads_the
     # This machine's cameras, not yet calibrated.
     rig_mod.update({"cameras.hand": {"serial": "111"}, "cameras.external": {"serial": "222"}})
     registry.register_backend("toy", ToyPlanner)
-    toy = _run("profile", "create", "shelf1", "--planner", "toy")
+    assert _run("planners", "default", "toy").exit_code == 0
+    toy = _run("profile", "create", "shelf1", "--prompt", "stack the blocks")
     assert toy.exit_code == 0, toy.output
     assert "extrinsics" not in toy.output
 
-    tiptop = _run("profile", "create", "x")
+    assert _run("planners", "default", "tiptop").exit_code == 0
+    tiptop = _run("profile", "create", "x", "--prompt", "put the cup on the plate")
     assert tiptop.exit_code == 0, tiptop.output
     assert "no extrinsics" in tiptop.output
 

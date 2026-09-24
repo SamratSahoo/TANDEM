@@ -88,7 +88,7 @@ LIGHT_MODULES = [
     "tandem.cli.plan",
     # The catalogs: listing planners and executors is the laptop's question as much as the rig's.
     "tandem.core.names",
-    # `tandem profile create --preset` and `tandem profile presets` run on a laptop too.
+    # Presets, which the web's profile create still lays over a new profile on a laptop too.
     "tandem.core.presets",
     "tandem.cli.planners",
     "tandem.cli.executors",

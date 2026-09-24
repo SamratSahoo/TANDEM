@@ -120,3 +120,84 @@ def test_a_new_task_on_another_planner_starts_from_that_planners_defaults():
     assert profiles.create("shelf-2", prompt="stack them").planner.backend == "toy"
     # A copy is its source as written, planner and all.
     assert profiles.create("copy", source="cover-bread-rolls").planner.backend == "tiptop"
+
+
+# --------------------------------------------------------------------------- `tandem profile create`
+
+
+def _run(*args: str):
+    from typer.testing import CliRunner
+
+    from tandem.cli.app import app
+
+    return CliRunner().invoke(app, ["profile", *args])
+
+
+def _said(result) -> str:
+    return " ".join(result.output.split())
+
+
+def test_create_with_a_prompt_is_one_flag():
+    result = _run("create", "my-task", "--prompt", "put the cup on the plate")
+    assert result.exit_code == 0, result.output
+    assert "Created profile 'my-task' the paper's settings" in _said(result)
+    assert "tandem profile edit my-task" in _said(result) and "tandem collect my-task" in _said(result)
+    assert profiles.load("my-task").task.prompt == "put the cup on the plate"
+    assert settings_mod.load(force=True).active_profile != "my-task", "only --use makes it active"
+
+
+def test_create_without_a_task_says_to_give_one():
+    result = _run("create", "my-task")
+    assert result.exit_code == 1
+    assert "needs its task" in result.exception.message and "--prompt" in result.exception.hint
+    assert not profiles.exists("my-task")
+
+
+def test_create_at_a_terminal_asks_for_the_task(monkeypatch):
+    from tandem.cli import profile as profile_cli
+
+    asked = []
+    monkeypatch.setattr(profile_cli.theme, "is_tty", lambda: True)
+    monkeypatch.setattr(profile_cli.typer, "prompt", lambda text, **kw: asked.append(text) or "open the box")
+    result = _run("create", "box")
+    assert result.exit_code == 0, result.output
+    assert asked == ["  Task prompt"] and profiles.load("box").task.prompt == "open the box"
+    # A copy has its task already: nothing is asked.
+    assert _run("create", "box-2", "--from", "box").exit_code == 0 and len(asked) == 1
+
+
+def test_create_from_one_of_the_papers_five_and_use_it():
+    result = _run("create", "rolls", "--from", "cover-bread-rolls", "--use")
+    assert result.exit_code == 0, result.output
+    assert "a copy of cover-bread-rolls" in _said(result)
+    assert settings_mod.load(force=True).active_profile == "rolls"
+    assert profiles.load("rolls").task.prompt == profiles.load_file(
+        profiles.builtin_path("cover-bread-rolls"), name="x"
+    ).task.prompt
+
+
+def test_create_replaces_only_with_force():
+    assert _run("create", "x", "--prompt", "one").exit_code == 0
+    again = _run("create", "x", "--prompt", "two")
+    assert again.exit_code == 1 and "--force" in again.exception.hint
+    assert _run("create", "x", "--prompt", "two", "--force").exit_code == 0
+    assert profiles.load("x").task.prompt == "two"
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [["--preset", "paper"], ["--import-from", "/tmp"], ["--tamp-config", "x.yml"], ["--planner", "tiptop"]],
+)
+def test_the_flags_that_are_gone_are_refused(flags):
+    result = _run("create", "x", "--prompt", "p", *flags)
+    assert result.exit_code == 2 and "No such option" in result.output
+    assert not profiles.exists("x")
+
+
+def test_there_is_no_presets_command_and_an_empty_list_says_where_profiles_come_from():
+    gone = _run("presets")
+    assert gone.exit_code == 2 and "No such command" in gone.output
+    empty = _run("list")
+    assert empty.exit_code == 0
+    assert "tandem init" in empty.output and "add the paper's five tasks" in _said(empty)
+    assert "tandem profile create NAME --prompt" in _said(empty)

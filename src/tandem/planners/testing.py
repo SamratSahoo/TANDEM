@@ -724,9 +724,9 @@ class PlannerConformance:
             _raise("its validate_options", ["its output does not survive a JSON round trip unchanged"])
 
     def test_its_options_check_handles_no_options(self) -> None:
-        # `tandem planners use NAME` and `tandem profile create --planner NAME` start a profile with no
-        # planner.options at all. A planner may require one (a scene file) -- but then it must SAY
-        # so, with a TandemError or a ValueError naming the key, which tandem turns into "give it
+        # `tandem planners use NAME`, and `tandem profile create` on a machine whose default it is, start
+        # a profile with no planner.options at all. A planner may require one (a scene file) -- but then it
+        # must SAY so, with a TandemError or a ValueError naming the key, which tandem turns into "give it
         # --option KEY=VALUE". A KeyError or a TypeError out of an empty block is a traceback instead.
         from tandem.core.errors import TandemError
         from tandem.planners.registry import options_for

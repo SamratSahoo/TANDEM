@@ -8,7 +8,6 @@ value nobody can trace fails here rather than shipping.
 
 from __future__ import annotations
 
-import json
 from fnmatch import fnmatch
 from pathlib import Path
 
@@ -17,10 +16,8 @@ import tomlkit
 from helpers import isolate_registry
 from ruamel.yaml import YAML
 from toy_planner import ToyPlanner
-from typer.testing import CliRunner
 
 from tandem import resources
-from tandem.cli.app import app
 from tandem.core import presets, profiles
 from tandem.core.errors import TandemError
 from tandem.core.profiles import HitlSpec, Profile
@@ -356,78 +353,6 @@ def test_the_preset_files_ship_in_the_wheel():
 
 
 # --- the commands -----------------------------------------------------------------------------------
-
-
-def test_profile_create_with_the_paper_preset_says_what_it_changed(profile):
-    # Over the suite's own profile (phase planning off, four overrides): the template is the paper's already.
-    result = CliRunner().invoke(app, ["profile", "create", "paper-run", "--from", profile.name, "--preset", "paper"])
-    assert result.exit_code == 0, result.output
-    output = " ".join(result.output.split())
-    assert "Preset 'paper': The TANDEM paper's collection settings, on TiPToP" in output
-    assert "hitl.enabled: False -> True" in output
-    assert "planner.options.tamp.num_particles: 256 -> 512" in output
-    assert "planner.options.tamp.vae_manifold_weight: unset -> 25000.0" in output
-    # Full-speed planned motion is said as a warning, not left in the list of changes to be noticed.
-    assert "! Planned motions run at the pace blending gives them" in output
-    assert "ships no" not in output
-    saved = profiles.load("paper-run")
-    assert saved.hitl == _paper().hitl and _tamp(saved) == _tamp(_paper())
-
-
-def test_a_prompt_given_with_the_preset_is_the_profiles_own():
-    result = CliRunner().invoke(
-        app, ["profile", "create", "p", "--preset", "paper", "--prompt", "open the box"]
-    )
-    assert result.exit_code == 0, result.output
-    assert profiles.load("p").task.prompt == "open the box"
-
-
-def test_profile_create_clones_a_profile_and_lays_the_preset_over_it(profile):
-    profile.task.prompt = "stack the cups"
-    profiles.save(profile)
-    result = CliRunner().invoke(app, ["profile", "create", "p", "--from", profile.name, "--preset", "paper"])
-    assert result.exit_code == 0, result.output
-    saved = profiles.load("p")
-    assert saved.task.prompt == "stack the cups" and saved.hitl.enabled
-
-
-def test_profile_create_on_another_planner_says_only_tandems_half_was_applied():
-    _toy()
-    result = CliRunner().invoke(app, ["profile", "create", "bins", "--planner", "toy", "--preset", "paper"])
-    assert result.exit_code == 0, result.output
-    output = " ".join(result.output.split())
-    assert "The Toy planner ships no 'paper' preset of its own" in output
-    assert "planner.options are unchanged" in output
-    assert profiles.load("bins").hitl.enabled
-
-
-def test_profile_create_refuses_an_unknown_preset_and_writes_nothing():
-    result = CliRunner().invoke(app, ["profile", "create", "p", "--preset", "papr"])
-    assert result.exit_code != 0
-    assert "did you mean 'paper'" in result.exception.message
-    assert not profiles.exists("p")
-
-
-def test_profile_presets_lists_them_with_what_each_sets():
-    result = CliRunner().invoke(app, ["profile", "presets", "--json"])
-    assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
-    assert payload["planner"] == "tiptop"
-    (paper,) = payload["presets"]
-    assert (
-        paper["name"] == "paper" and paper["layers"] == ["tandem", "tiptop"] and paper["extends"] == "paper"
-    )
-    assert paper["sets"]["hitl"]["enabled"] is True
-    assert paper["sets"]["planner"]["options"]["tamp"]["blend_mode"] == "vae"
-
-    shown = CliRunner().invoke(app, ["profile", "presets"])
-    assert shown.exit_code == 0 and "paper" in shown.output and "tandem + tiptop" in shown.output
-
-
-def test_profile_presets_for_another_planner_lists_tandems():
-    _toy()
-    payload = json.loads(CliRunner().invoke(app, ["profile", "presets", "--planner", "toy", "--json"]).output)
-    assert [(p["name"], p["layers"]) for p in payload["presets"]] == [("paper", ["tandem"])]
 
 
 def test_planners_info_lists_a_planners_own_presets():

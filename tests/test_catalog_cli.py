@@ -353,13 +353,13 @@ def test_the_default_is_what_every_new_profile_plans_with(tmp_path):
     assert settings_mod.load(force=True).default_planner == "pure"
     assert runtime_cli.active_planner("not-made-yet") == "pure", "init builds the default's runtime"
 
-    assert _run("profile", "create", "fresh").exit_code == 0
+    assert _run("profile", "create", "fresh", "--prompt", "sort the bins").exit_code == 0
     assert profiles.load("fresh").planner.backend == "pure"
 
     # A default naming a planner this machine no longer has stops the next profile before it is
     # written, rather than leaving one every later command refuses.
     registry.unregister_backend("pure")
-    refused = _run("profile", "create", "later")
+    refused = _run("profile", "create", "later", "--prompt", "sort the bins")
     assert refused.exit_code == 1
     assert "default_planner" in refused.exception.message
     assert "tandem planners default NAME" in refused.exception.hint

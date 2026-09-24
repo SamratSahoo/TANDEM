@@ -12,9 +12,8 @@ import shutil
 import typer
 from rich.syntax import Syntax
 
-from tandem import resources
 from tandem.cli import theme
-from tandem.core import presets, profiles
+from tandem.core import profiles
 from tandem.core import settings as settings_mod
 from tandem.core.errors import ProfileError, TandemError
 from tandem.planners import registry
@@ -34,7 +33,7 @@ def list_profiles(as_json: bool = typer.Option(False, "--json", help="Machine-re
         theme.info("No profiles yet.")
         theme.next_steps(
             [
-                ("tandem init", "set tandem up and create the default profile"),
+                ("tandem init", "set tandem up, and add the paper's five tasks"),
                 ('tandem profile create NAME --prompt "..."', "make one of your own"),
             ]
         )
@@ -231,81 +230,43 @@ def show(
             )
 
 
-@app.command("create", help="Create a profile.")
+@app.command(
+    "create",
+    help='Create a profile: the paper\'s settings with your task (--prompt "..."), or a copy of another (--from).',
+)
 def create(
     name: str = typer.Argument(..., help="Profile name (lowercase, digits, - and _)."),
-    from_profile: str = typer.Option(None, "--from", help="Clone an existing profile."),
-    planner: str = typer.Option(
+    prompt: str = typer.Option(None, "--prompt", help="The task, in words: what the robot and you are to do."),
+    from_profile: str = typer.Option(
         None,
-        "--planner",
-        help="The planner the new profile plans with. Default: the machine's default planner.",
+        "--from",
+        help="Copy this profile instead: one of yours, or one of the paper's five (`tandem profile list`).",
     ),
-    preset: str = typer.Option(
-        None,
-        "--preset",
-        help="Lay a named preset over it, such as `paper` (the paper's collection settings). "
-        "`tandem profile presets` lists them.",
-    ),
-    prompt: str = typer.Option(None, "--prompt", help="The task prompt."),
-    activate: bool = typer.Option(False, "--use", help="Make this the active profile."),
-    force: bool = typer.Option(False, "--force", help="Overwrite an existing profile of that name."),
+    activate: bool = typer.Option(False, "--use", help="Make it the active profile."),
+    force: bool = typer.Option(False, "--force", help="Replace a profile of that name (its trajectories are kept)."),
 ) -> None:
-    if profiles.exists(name) and not force:
-        raise ProfileError(f"Profile {name!r} already exists.", hint="Pass --force to overwrite it.")
-    if from_profile and planner:
-        # A clone is the source as it is; a planner name nothing checks would be silently ignored. Loud
-        # instead, with the way to get what was meant.
-        raise ProfileError(
-            f"--from clones {from_profile!r} as it is, so --planner would be ignored.",
-            hint=f"Clone first, then `tandem planners use NAME --profile {name}` to switch its planner.",
-        )
+    from tandem.cli import planners as planners_cli
 
-    if from_profile:
-        source = profiles.load(from_profile)
-        profile = source.model_copy(deep=True)
-        profile.name = name
-        profile.description = f"copied from {from_profile}"
-        origin = f"cloned from {from_profile}"
-    else:
-        from tandem.cli import planners as planners_cli
+    if prompt is None and from_profile is None and theme.is_tty():
+        prompt = typer.prompt("  Task prompt").strip()
+    # The machine's default planner (`tandem planners default NAME`), checked by name before anything is
+    # written: a default naming a planner this machine no longer has is said here, not by every command after.
+    planner = planners_cli.planner_for_new_profile() if from_profile is None else None
+    profile = profiles.create(name, source=from_profile, prompt=prompt, planner=planner, force=force)
 
-        profile = profiles.load_file(resources.path("profile_template.yml"), name=name)
-        profile.description = ""
-        # The machine's default planner (`tandem planners default NAME`), not the template's. The
-        # template's options are its own planner's (TiPToP's), kept when that is the one chosen.
-        chosen = planners_cli.planner_for_new_profile(planner)
-        if profile.planner.backend != chosen:
-            if preset:
-                # A preset of that planner's own may supply what the planner requires: the options are
-                # checked once the preset is laid over them (presets.apply validates the result).
-                profile.planner = profiles.PlannerSpec.model_construct(backend=chosen, options={})
-            else:
-                profile.planner = profiles.planner_spec(chosen, profile=name)
-        origin = "from the built-in template"
-
-    # After the base -- template, clone or import -- and its planner are settled, since a preset is looked
-    # up for the profile's planner and says what to change in it. Before --prompt, which is this profile's
-    # own and wins over anything a preset says about the task.
-    laid: tuple[list[presets.Preset], dict] | None = None
-    if preset:
-        before = profile
-        profile = presets.apply(profile, preset)
-        changes = presets.differences(before.model_dump(mode="python"), profile.model_dump(mode="python"))
-        laid = (presets.layers(preset, profile.planner.backend), changes)
-
-    if prompt:
-        profile.task.prompt = prompt
-
-    path = profiles.save(profile)
-
+    origin = f"a copy of {from_profile}" if from_profile else "the paper's settings"
     theme.ok(f"Created profile {name!r}", origin)
-    theme.info(str(path))
-    if laid is not None:
-        show_preset(profile, *laid)
+    theme.info(str(profile.file()))
     warn_planner_profile_checks(profile)
-
     if activate:
         use(name)
+    else:
+        theme.next_steps(
+            [
+                (f"tandem profile edit {name}", "change any of its settings"),
+                (f"tandem collect {name}", "collect with it"),
+            ]
+        )
 
 
 def warn_planner_profile_checks(profile: profiles.Profile) -> None:
@@ -323,67 +284,6 @@ def warn_planner_profile_checks(profile: profiles.Profile) -> None:
     for check in checks:
         if check.group in ("profile", "rig") and check.state == probe.FAIL:
             theme.warn(f"{check.name}: {check.detail}", check.hint or None)
-
-
-def show_preset(profile: profiles.Profile, stack: list[presets.Preset], changes: dict[str, tuple]) -> None:
-    """What ``--preset`` changed, setting by setting (a preset is exactly the changes it makes), and what
-    its authors said a person must know before the arm moves."""
-    preset = stack[-1]
-    theme.ok(f"Preset {preset.name!r}: {preset.title}", f"{len(changes)} setting(s) changed")
-    for dotted, (old, new) in changes.items():
-        theme.info(f"{dotted}: {_shown(old)} -> {_shown(new)}")
-    for line in (line for layer in stack for line in layer.caution):
-        theme.warn(line)
-    if preset.origin == presets.TANDEM_ORIGIN:
-        # Only tandem's half was laid down. Said, because a planner that ships no half of its own keeps
-        # its options as they were, and nothing stands in for them under the preset's name.
-        theme.warn(
-            f"The {_planner_title(profile.planner.backend)} planner ships no {preset.name!r} preset of its own",
-            "only tandem's settings were applied; planner.options are unchanged",
-        )
-
-
-def _shown(value: object) -> str:
-    if value is None:
-        return "unset"
-    return json.dumps(value) if isinstance(value, (list, dict)) else str(value)
-
-
-@app.command("presets", help="List the presets `tandem profile create --preset` can lay over a new profile.")
-def list_presets(
-    planner: str = typer.Option(
-        None,
-        "--planner",
-        help="The planner the new profile plans with, whose own presets are listed too. "
-        "Default: the machine's default planner.",
-    ),
-    as_json: bool = typer.Option(False, "--json", help="Machine-readable output, with what each one sets."),
-) -> None:
-    from tandem.cli import planners as planners_cli
-
-    chosen = planners_cli.planner_for_new_profile(planner)
-    rows = []
-    for name, preset in sorted(presets.available(chosen).items()):
-        stack = presets.layers(name, chosen)
-        sets: dict = {}
-        for layer in stack:
-            sets = presets.overlay(sets, layer.settings, replace=layer.replace)
-        rows.append({**preset.to_dict(), "layers": [layer.origin for layer in stack], "sets": sets})
-    if as_json:
-        typer.echo(json.dumps({"planner": chosen, "presets": rows}, indent=2))
-        return
-    if not rows:
-        theme.info(f"No presets for a profile that plans with {chosen!r}.")
-        return
-    table = theme.table("preset", "from", "what it is", "settings")
-    for row in rows:
-        count = len(presets.differences({}, row["sets"]))
-        table.add_row(row["name"], " + ".join(row["layers"]), row["title"], str(count))
-    theme.console().print(table)
-    theme.info(
-        f"for a profile that plans with {chosen}",
-        "`tandem profile create NAME --preset NAME` lays one over a new profile and says what it changed",
-    )
 
 
 @app.command(
