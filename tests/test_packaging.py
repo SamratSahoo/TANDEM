@@ -124,10 +124,19 @@ print("ok")
 def test_package_data_is_present():
     """Files that only exist as package data — a wheel that drops them installs a CLI that
     cannot create a profile or serve a page."""
+    from fnmatch import fnmatch
+
     import tandem
+    from tandem.core import profiles
 
     root = Path(tandem.__file__).parent
     assert (root / "resources" / "profile_template.yml").is_file()
+    # The paper's five tasks, which `tandem init` copies in and `profile create --from` reads before it has.
+    globs = _package_data_globs()
+    for name in profiles.BUILTIN:
+        relative = f"resources/profiles/{name}.yml"
+        assert (root / relative).is_file()
+        assert any(fnmatch(relative, glob) for glob in globs), f"{relative} matches no package-data glob"
     assert (root / "server" / "static" / "index.html").is_file()
     assert (root / "server" / "static" / "app.js").is_file()
     assert (root / "server" / "static" / "theme.css").is_file()

@@ -1,20 +1,18 @@
 # ─────────────────────────────────────────────────────────────────────────────────────────
-#  A new task, with the TANDEM paper's collection settings.
+#  Store Bread in Closed Box  —  task 5 of the TANDEM paper (Fig. 3)
 #
-#  `tandem profile create NAME --prompt "..."` starts every new profile from this file. It holds
-#  what the paper's five tasks share: phase planning on, and the TAMP and DATAFARM settings common
-#  to hitl-tamp-vla's five *_v3.yml configs, plus three switches every v3 run had on. A task's own
-#  extras (surface-fitted placement, a finer voxel size) are in the paper profiles that use them.
-#
-#  A profile is only the task. This machine's robot, cameras and calibration are its rig
-#  (`tandem rig show`), which every profile shares.
+#  The settings the paper collected it with: the prompt, the hitl block and the
+#  tamp_overrides of hitl-tamp-vla's data-collection/cfg/tamp/4_bread_box_v3.yml
+#  (41cf4ac), plus the three switches every v3 run had on. Keys it does not set are tandem's
+#  defaults, which are the paper's. The robot, cameras and calibration are this machine's rig
+#  (`tandem rig show`).
 # ─────────────────────────────────────────────────────────────────────────────────────────
 version: 3
-description: ''
+description: 'Store Bread in Closed Box: task 5 of the TANDEM paper'
 
 task:
   # What to do: the label stored with every episode, and what phase planning splits into steps.
-  prompt: describe the task here
+  prompt: place the bread on the plate, and then open the box and place the bread in the box
   # The goal handed to the planner, only when it has to differ from the prompt.
   goal: null
   target_episodes: 20
@@ -85,6 +83,15 @@ planner:
       table_plane_support_vote: true
       disjoint_object_masks: true
       blend_stretch_to_caps: true
+      # this task's own: place into the box's tray, fitted to its observed floor
+      placement_support: true
+      placement_support_margin: 0.005
+      placement_support_required: true
+      placement_into_surface: true
+      placement_fill_occluded: true
+      placement_min_seen_frac: 0.25
+      placement_flatness_tol: 0.012
+      voxel_downsample_size: 0.005
 
 recording:
   enabled: true

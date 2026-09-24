@@ -153,7 +153,9 @@ def test_the_web_creates_a_profile_with_a_preset_and_lists_them(profile):
     client = TestClient(create_app())
     assert "paper" in [p["name"] for p in client.get("/api/presets").json()["presets"]]
 
-    made = client.post("/api/profiles", json={"name": "bread", "preset": "paper", "prompt": "bread in the box"})
+    made = client.post(
+        "/api/profiles", json={"name": "bread", "from": profile.name, "preset": "paper", "prompt": "bread in the box"}
+    )
     assert made.status_code == 200, made.text
     bread = profiles.load("bread")
     assert bread.hitl.enabled and bread.planner.options["tamp"]["blend_mode"] == "vae"

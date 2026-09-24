@@ -14,6 +14,12 @@ On disk::
         success/<ts>/
         failure/<ts>/
 
+The TANDEM paper's five tasks ship as five ordinary profile files (``BUILTIN``, in
+``tandem/resources/profiles/``), with the settings the paper collected each one with. `tandem init`
+copies them into profiles/; after that they are the user's own, to edit or delete like any other. A new
+task starts from ``resources/profile_template.yml``: what those five share, with its own prompt
+(``create``).
+
 Profiles written before version 3 were directories (``profiles/<name>/profile.yml``, with the cameras,
 the robot and a calibration.json of their own). ``tandem.core.layout`` moves them into this layout and
 their machine settings into the rig; until it has, they are said to be there and are not loaded.
@@ -51,6 +57,19 @@ OLD_SECTIONS = ("cameras", "robot", "perception", "tamp")
 
 #: Where a profile's previous planner's options are set aside (``stash_file``), inside profiles/.
 STASH_DIR = ".planner-options"
+
+#: The TANDEM paper's five tasks, in the paper's order (Fig. 3): profiles shipped in resources/profiles/,
+#: which `tandem init` copies into profiles/ (``seed_builtins``).
+BUILTIN = (
+    "cover-bread-rolls",
+    "solve-constrained-puzzle",
+    "sort-and-cover-snacks",
+    "open-obstructed-book",
+    "store-bread-in-closed-box",
+)
+
+#: What every new profile starts from (``create``): the paper's settings, with no task yet.
+TEMPLATE = "profile_template.yml"
 
 # OmegaConf env interpolations: "${oc.env:VAR}" or "${oc.env:VAR,default}".
 #
@@ -672,7 +691,8 @@ def _not_found(name: str, path: Path) -> ProfileError:
     hint = (
         f"Known profiles: {', '.join(known)}."
         if known
-        else "No profiles exist yet — run `tandem init` or `tandem profile create <name>`."
+        else "No profiles here yet: `tandem init` adds the paper's five tasks, and `tandem profile create NAME "
+        '--prompt "..."` makes your own.'
     )
     return ProfileError(f"Profile {name!r} not found at {path}.", hint=hint)
 
@@ -800,8 +820,7 @@ def save(profile: Profile) -> Path:
         raise ProfileInvalid(f"Profile {profile.name!r} is not valid:\n{format_errors(exc)}") from exc
     text = _yaml_text(_dump_dict(profile), what=f"Profile {profile.name!r}")
     path.parent.mkdir(parents=True, exist_ok=True)
-    for status in STATUSES:
-        (trajectories / status).mkdir(parents=True, exist_ok=True)
+    _make_trajectory_dirs(trajectories)
     _write_atomic(path, text)
     return path
 
@@ -865,6 +884,151 @@ def delete(name: str, *, keep_data: bool = True) -> Path:
     if not keep_data and data.exists():
         shutil.rmtree(data)
     return path
+
+
+# --------------------------------------------------------------------------- the paper's five, and new profiles
+
+
+def builtin_path(name: str) -> Path:
+    """The packaged copy of one of the paper's five (``BUILTIN``)."""
+    from tandem import resources
+
+    return resources.path(f"profiles/{name}.yml")
+
+
+def seed_builtins() -> list[str]:
+    """Copy each of the paper's five that profiles/ does not have yet, word for word. Returns the names copied.
+
+    Never over one that is there: once copied it is the user's, and their edits are the point. One they
+    deleted comes back the next time `tandem init` runs.
+    """
+    written = []
+    for name in BUILTIN:
+        path = path_of(name)
+        if path.exists():
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_atomic(path, builtin_path(name).read_text())
+        _make_trajectory_dirs(trajectories_root() / name)
+        written.append(name)
+    return written
+
+
+def source_text(name: str) -> str:
+    """The profile ``name`` as written, to copy: this machine's file, else the paper's packaged one.
+
+    The packaged copy is what lets `tandem profile create X --from cover-bread-rolls` work before `tandem
+    init` has copied the five in.
+    """
+    import difflib
+
+    name = _checked(name)
+    path = path_of(name)
+    if path.is_file():
+        return path.read_text()
+    if name in BUILTIN:
+        return builtin_path(name).read_text()
+    if (profiles_root() / name / "profile.yml").is_file():
+        raise _not_found(name, path)  # in the old layout: it says how to move it
+    close = difflib.get_close_matches(name, sorted({*list_names(), *BUILTIN}), n=1, cutoff=0.6)
+    raise ProfileError(
+        f"There is no profile {name!r} to copy.",
+        hint=(f"Did you mean {close[0]!r}? " if close else "")
+        + f"It copies a profile here (`tandem profile list`) or one of the paper's: {', '.join(BUILTIN)}.",
+    )
+
+
+def create(
+    name: str,
+    *,
+    source: str | None = None,
+    prompt: str | None = None,
+    planner: str | None = None,
+    force: bool = False,
+) -> Profile:
+    """Write a new profile ``name``: the paper's settings (the template) with ``prompt``, or a copy of ``source``.
+
+    ``source`` is any profile here or one of the paper's five, copied as written -- comments included --
+    with ``prompt`` as its task when one is given. Without a source there is no task yet, so ``prompt`` is
+    required: a profile that would collect "describe the task here" is not one. ``planner`` is the planner
+    a new task plans with (default: the machine's ``default_planner``); the template's tamp settings are
+    TiPToP's, so a new task on another planner starts from that planner's own defaults instead.
+
+    Validated before anything is written, as ``load`` would read it: the planner and human executor it
+    names must be installed here, since a profile is created to collect with.
+    """
+    from datetime import date
+
+    from tandem import resources
+
+    name = _checked(name)
+    path = path_of(name)
+    if path.exists() and not force:
+        raise ProfileError(
+            f"Profile {name!r} already exists ({path}).",
+            hint="Pass --force to replace it (its trajectories are kept), or choose another name.",
+        )
+    prompt = (prompt or "").strip() or None
+    if source is None and prompt is None:
+        raise ProfileError(
+            "A new profile needs its task.",
+            hint=f'`tandem profile create {name} --prompt "put the cup on the plate"` starts it from the paper\'s '
+            f"settings; `--from PROFILE` copies another profile instead (the paper's: {', '.join(BUILTIN)}).",
+        )
+
+    text = source_text(source) if source is not None else resources.read(TEMPLATE)
+    doc = _new_yaml().load(_without_header(text))
+    if not isinstance(doc, dict):
+        raise ProfileInvalid(f"{source or TEMPLATE} is not a mapping of profile settings, so it cannot be copied.")
+    doc.pop("name", None)
+    doc["version"] = LAYOUT_VERSION
+    doc["description"] = f"copied from {source}" if source is not None else ""
+    if prompt is not None:
+        if not isinstance(doc.get("task"), dict):
+            from ruamel.yaml.comments import CommentedMap
+
+            doc["task"] = CommentedMap()
+        doc["task"]["prompt"] = prompt
+    if source is None:
+        chosen = planner or settings_mod.load().default_planner
+        written = doc.get("planner") if isinstance(doc.get("planner"), dict) else {}
+        if written.get("backend") != chosen:
+            doc["planner"] = planner_spec(chosen, profile=name).model_dump(mode="python")
+
+    origin = f"as a copy of {source}" if source is not None else "with the TANDEM paper's settings"
+    header = (
+        f"# {name}: made by `tandem profile create` {origin} on {date.today():%Y-%m-%d}.\n"
+        "# Only the task: this machine's robot, cameras and calibration are its rig (`tandem rig show`).\n"
+    )
+    body = io.StringIO()
+    yaml = _new_yaml()
+    yaml.width = 4096  # lines as the source wrote them, not folded at 100 columns
+    # `goal: null` as written, not the bare `goal:` ruamel writes for None, which reads as a key left unfinished.
+    yaml.representer.add_representer(
+        type(None), lambda representer, _: representer.represent_scalar("tag:yaml.org,2002:null", "null")
+    )
+    yaml.dump(doc, body)
+    data = _resolve_all(_plain(doc))
+    data["name"] = name
+    profile = _validate(data, source=f"{name} ({'copied from ' + source if source else 'new'})")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_atomic(path, header + body.getvalue())
+    _make_trajectory_dirs(profile.trajectories_dir())
+    return profile
+
+
+def _without_header(text: str) -> str:
+    """``text`` from its first setting on: the comment block a file opens with says what THAT file is."""
+    lines = text.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        if line.strip() and not line.lstrip().startswith("#"):
+            return "".join(lines[index:])
+    return ""
+
+
+def _make_trajectory_dirs(root: Path) -> None:
+    for status in STATUSES:
+        (root / status).mkdir(parents=True, exist_ok=True)
 
 
 # --------------------------------------------------------------------------- switching what a profile uses

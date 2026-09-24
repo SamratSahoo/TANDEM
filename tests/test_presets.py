@@ -115,8 +115,10 @@ def test_the_paper_preset_differs_from_the_template_only_where_it_says():
 
 def test_the_papers_phase_planning_is_tandems_defaults_switched_on():
     # tandem's defaults are the paper's settings. If one ever changes, this says which preset to revisit.
-    changes = presets.differences(_template().hitl.model_dump(), _paper().hitl.model_dump())
+    changes = presets.differences(HitlSpec().model_dump(), _paper().hitl.model_dump())
     assert changes == {"enabled": (False, True)}
+    # And the template new profiles start from is the paper's already: the preset changes nothing in it.
+    assert _template().hitl == _paper().hitl and _tamp(_template()) == _tamp(_paper())
 
 
 def test_tandems_half_states_every_phase_planning_setting():
@@ -356,8 +358,9 @@ def test_the_preset_files_ship_in_the_wheel():
 # --- the commands -----------------------------------------------------------------------------------
 
 
-def test_profile_create_with_the_paper_preset_says_what_it_changed():
-    result = CliRunner().invoke(app, ["profile", "create", "paper-run", "--preset", "paper"])
+def test_profile_create_with_the_paper_preset_says_what_it_changed(profile):
+    # Over the suite's own profile (phase planning off, four overrides): the template is the paper's already.
+    result = CliRunner().invoke(app, ["profile", "create", "paper-run", "--from", profile.name, "--preset", "paper"])
     assert result.exit_code == 0, result.output
     output = " ".join(result.output.split())
     assert "Preset 'paper': The TANDEM paper's collection settings, on TiPToP" in output

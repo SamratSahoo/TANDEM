@@ -168,11 +168,15 @@ def test_the_template_spells_out_every_hitl_key():
 
 
 def test_the_template_ships_the_same_defaults_the_code_has():
-    # `tandem init` writes the template, not HitlSpec(). A value that differs between them means a new
-    # profile and a profile with the key deleted behave differently.
+    # A new profile is written from the template, not HitlSpec(). A value that differs between them means a
+    # new profile and a profile with the key deleted behave differently -- except `enabled`: the template is
+    # the paper's settings, phase planning on, where a profile with no hitl block at all has it off.
     block = _template_hitl_block()
     defaults = HitlSpec().model_dump(mode="python")
-    assert {key: block[key] for key in defaults} == defaults
+    assert block["enabled"] is True and defaults["enabled"] is False
+    assert {key: block[key] for key in defaults if key != "enabled"} == {
+        key: value for key, value in defaults.items() if key != "enabled"
+    }
 
 
 # --- validation -----------------------------------------------------------------------------------
