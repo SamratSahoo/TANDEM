@@ -1,4 +1,8 @@
-"""`tandem profile` — create and manage collection profiles."""
+"""`tandem profile` — create and manage collection profiles.
+
+A profile is a task: one YAML file in profiles/, and its trajectories in trajectories/<name>/. This
+machine's robot, cameras and calibration are the rig's (`tandem rig`), which every profile shares.
+"""
 
 from __future__ import annotations
 
@@ -28,7 +32,12 @@ def list_profiles(as_json: bool = typer.Option(False, "--json", help="Machine-re
             typer.echo(json.dumps([]))
             return
         theme.info("No profiles yet.")
-        theme.next_steps([("tandem init", "set tandem up and create the default profile")])
+        theme.next_steps(
+            [
+                ("tandem init", "set tandem up and create the default profile"),
+                ('tandem profile create NAME --prompt "..."', "make one of your own"),
+            ]
+        )
         return
 
     rows = []
@@ -49,7 +58,9 @@ def list_profiles(as_json: bool = typer.Option(False, "--json", help="Machine-re
                     "target": profile.task.target_episodes,
                     "eval": counts["eval"],
                     "failure": counts["failure"],
-                    "path": str(profile.dir()),
+                    "path": str(profile.file()),
+                    "file": str(profile.file()),
+                    "trajectories": str(profile.trajectories_dir()),
                     "valid": True,
                     "missing": missing_here(profile),
                 }
@@ -153,7 +164,8 @@ def show(
     if as_json:
         payload = profile.model_dump(mode="json")
         payload["_resolved"] = {
-            "dir": str(profile.dir()),
+            "file": str(profile.file()),
+            "trajectories_dir": str(profile.trajectories_dir()),
             "trajectories": counts,
             "planner": view.to_dict(),
             "warnings": list(view.warnings),
@@ -168,17 +180,10 @@ def show(
             ("task", profile.task.prompt),
             ("goal", profile.task.goal),
             ("target", f"{counts['success']} / {profile.task.target_episodes} collected"),
-            ("directory", profile.dir()),
+            ("file", profile.file()),
+            ("trajectories", profile.trajectories_dir()),
         ]
     )
-
-    theme.blank()
-    theme.heading("cameras", f"perception reads the {profile.cameras.perception} camera")
-    cam_table = theme.table("role", "serial", "type", "resolution", "fps")
-    for role, cam in profile.cameras.configured().items():
-        label = f"[accent]{role}[/accent]" if role == profile.cameras.perception else role
-        cam_table.add_row(label, cam.serial, cam.type, cam.resolution, str(cam.fps))
-    theme.console().print(cam_table)
 
     theme.blank()
     theme.heading("planner", _planner_title(backend))
@@ -243,7 +248,7 @@ def create(
     ),
     prompt: str = typer.Option(None, "--prompt", help="The task prompt."),
     activate: bool = typer.Option(False, "--use", help="Make this the active profile."),
-    force: bool = typer.Option(False, "--force", help="Overwrite an existing profile.yml."),
+    force: bool = typer.Option(False, "--force", help="Overwrite an existing profile of that name."),
 ) -> None:
     if profiles.exists(name) and not force:
         raise ProfileError(f"Profile {name!r} already exists.", hint="Pass --force to overwrite it.")
@@ -255,13 +260,11 @@ def create(
             hint=f"Clone first, then `tandem planners use NAME --profile {name}` to switch its planner.",
         )
 
-    calibration: dict = {}
     if from_profile:
         source = profiles.load(from_profile)
         profile = source.model_copy(deep=True)
         profile.name = name
         profile.description = f"copied from {from_profile}"
-        calibration = profiles.calibration(source)
         origin = f"cloned from {from_profile}"
     else:
         from tandem.cli import planners as planners_cli
@@ -280,7 +283,7 @@ def create(
                 profile.planner = profiles.planner_spec(chosen, profile=name)
         origin = "from the built-in template"
 
-    # After the base -- template or clone -- and its planner are settled, since a preset is looked
+    # After the base -- template, clone or import -- and its planner are settled, since a preset is looked
     # up for the profile's planner and says what to change in it. Before --prompt, which is this profile's
     # own and wins over anything a preset says about the task.
     laid: tuple[list[presets.Preset], dict] | None = None
@@ -294,8 +297,6 @@ def create(
         profile.task.prompt = prompt
 
     path = profiles.save(profile)
-    if calibration:
-        profile.calibration_file().write_text(json.dumps(calibration, indent=2) + "\n")
 
     theme.ok(f"Created profile {name!r}", origin)
     theme.info(str(path))
@@ -312,14 +313,15 @@ def warn_planner_profile_checks(profile: profiles.Profile) -> None:
     extrinsics for TiPToP, say. Asked of the planner, as `tandem doctor` asks it, because only the planner
     knows what it reads -- camera extrinsics mean nothing to a planner that never localises from them, and
     telling its author to calibrate cameras it ignores sends them off to do exactly that. Only the
-    planner's failures: its softer findings are `tandem doctor`'s to list."""
+    planner's failures, about the profile and the rig it will collect on: its softer findings are
+    `tandem doctor`'s to list."""
     from tandem.core import probe
 
     checks = registry.doctor_checks(
         profile.planner.backend, profile, settings=settings_mod.load(), probe_hardware=False
     )
     for check in checks:
-        if check.group == "profile" and check.state == probe.FAIL:
+        if check.group in ("profile", "rig") and check.state == probe.FAIL:
             theme.warn(f"{check.name}: {check.detail}", check.hint or None)
 
 
@@ -384,65 +386,6 @@ def list_presets(
     )
 
 
-@app.command("migrate", help="Rewrite profiles in the current layout (planner settings under planner.options).")
-def migrate(
-    name: str = typer.Argument(None, help="Profile name (default: every profile)."),
-) -> None:
-    """A profile in an older layout loads as it is, with a notice; saving it once writes the current one.
-
-    Only a profile that IS in an older layout is rewritten, after a copy of it is kept beside it
-    (profile.yml.v1.bak): a rewrite drops every comment and freezes every ``${oc.env:...}`` at the value
-    the environment has right now, which is a loss for a profile that gained nothing from it. One profile
-    that will not load does not stop the others; each is reported, and the command fails at the end.
-    """
-    if name and not profiles.exists(name):
-        known = profiles.list_names()
-        raise ProfileError(
-            f"Profile {name!r} does not exist.",
-            hint=f"Known profiles: {', '.join(known)}." if known else "Run `tandem init` first.",
-        )
-    names = [name] if name else profiles.list_names()
-    if not names:
-        theme.info("No profiles yet.")
-        return
-    failed: list[tuple[str, str]] = []
-    for each in names:
-        path = profiles.profiles_root() / each / "profile.yml"
-        try:
-            raw = profiles.read_data(path, name=each)
-            older = profiles.is_older_layout(raw)
-            moved = profiles.migrate(raw)[1] if older else []
-            # Validated either way, so a broken profile is reported rather than called current.
-            profile = profiles.load(each, require_installed=False)
-            if not older:
-                theme.info(f"{each}: already current")
-                continue
-            backup = path.with_name("profile.yml.v1.bak")
-            shutil.copy2(path, backup)
-            profiles.save(profile)
-        except (ProfileError, ValueError) as exc:
-            if name:
-                raise
-            message = exc.message if isinstance(exc, TandemError) else str(exc)
-            failed.append((each, message))
-            theme.fail(f"{each}: not migrated", _one_line(message))
-            continue
-        theme.ok(f"{each}: rewritten in the current layout", f"{path} (the old one is {backup.name})")
-        for line in moved:
-            theme.info(f"  {line}")
-    if failed:
-        raise ProfileError(
-            f"{len(failed)} profile(s) could not be migrated: {', '.join(n for n, _ in failed)}.",
-            hint="`tandem profile show NAME` says what is wrong with each; `tandem profile edit NAME` fixes it.",
-        )
-
-
-def _one_line(message: str) -> str:
-    from tandem.core.errors import one_line
-
-    return one_line(message)
-
-
 def _planner_title(backend: str) -> str:
     try:
         return registry.info(backend).title
@@ -468,9 +411,7 @@ def use(name: str = typer.Argument(..., help="Profile name.")) -> None:
 def edit(name: str = typer.Argument(None, help="Profile name (default: the active one).")) -> None:
     cfg = settings_mod.load()
     name = name or cfg.active_profile
-    path = profiles.profiles_root() / name / "profile.yml"
-    if not path.is_file():
-        raise ProfileError(f"Profile {name!r} not found at {path}.")
+    path = profiles._existing_file(name)
 
     from tandem.cli.editor import open_in_editor
 
@@ -482,7 +423,7 @@ def edit(name: str = typer.Argument(None, help="Profile name (default: the activ
     try:
         open_in_editor(path)
     except TandemError:
-        backup.unlink(missing_ok=True)  # the editor never ran: profile.yml is as it was
+        backup.unlink(missing_ok=True)  # the editor never ran: the file is as it was
         raise
 
     try:
@@ -529,9 +470,9 @@ def delete(
         theme.info(f"Active profile is now {cfg.active_profile!r}")
 
 
-@app.command("path", help="Print a profile's directory.")
+@app.command("path", help="Print a profile's file.")
 def path_(name: str = typer.Argument(None, help="Profile name (default: the active one).")) -> None:
-    typer.echo(str(profiles.load(name, require_installed=False).dir()))
+    typer.echo(str(profiles.load(name, require_installed=False).file()))
 
 
 # --------------------------------------------------------------------------- helpers

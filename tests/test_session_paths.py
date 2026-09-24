@@ -61,10 +61,13 @@ def test_the_proposal_cache_is_where_it_was_when_the_session_started(profile, tm
 
 def test_a_pinned_profile_keeps_its_directory_and_is_still_the_same_profile(profile, tmp_path, monkeypatch):
     pinned = profile.pinned()
-    before = pinned.dir()
+    before, trajectories = pinned.file(), pinned.trajectories_dir()
     _moved_elsewhere(monkeypatch, tmp_path)
 
-    assert pinned.dir() == before and pinned.trajectories_dir() == before / "trajectories"
-    assert profile.dir() == tmp_path / "elsewhere" / "data" / "profiles" / profile.name, "only the copy is pinned"
-    # Where it lives is not a setting: nothing of the pin reaches what is written into profile.yml.
+    assert pinned.file() == before and pinned.trajectories_dir() == trajectories
+    assert trajectories == before.parent.parent / "trajectories" / profile.name
+    assert profile.file() == tmp_path / "elsewhere" / "data" / "profiles" / f"{profile.name}.yml", (
+        "only the copy is pinned"
+    )
+    # Where it lives is not a setting: nothing of the pin reaches what is written into the profile's file.
     assert pinned.model_dump() == profile.model_dump()

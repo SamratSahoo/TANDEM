@@ -1,8 +1,8 @@
 """`tandem doctor` — is everything tandem needs present and working?
 
 What tandem needs is checked here: Python, ffmpeg, the runtime of the planner the profile uses (and
-the disk and pixi, when that runtime is one to build), the profile, its cameras, phase planning and its
-human executor. What that PLANNER needs -- a GPU, a key for its perception, a robot shim, a grasp
+the disk and pixi, when that runtime is one to build), this machine's rig and its cameras, the profile,
+phase planning and its human executor. What that PLANNER needs -- a GPU, a key for its perception, a robot shim, a grasp
 server -- only the planner knows, so it is asked (its factory's ``doctor_checks``, through the
 registry), and a profile that plans with another planner is shown that planner's rows instead.
 """
@@ -16,6 +16,7 @@ import typer
 
 from tandem.cli import theme
 from tandem.core import probe, profiles, secrets
+from tandem.core import rig as rig_mod
 from tandem.core import settings as settings_mod
 from tandem.core.errors import ProfileError, TandemError, one_line
 
@@ -24,9 +25,13 @@ GROUP_TITLES = {
     "runtime": "runtime",
     "gpu": "gpu",
     "credentials": "credentials",
+    "rig": "rig",
     "hardware": "hardware",
     "profile": "profile",
 }
+
+#: The order the groups are shown in.
+GROUPS = ("core", "runtime", "gpu", "credentials", "rig", "profile", "hardware")
 
 #: The row naming the runtime of the planner the profile uses, whichever planner that is.
 RUNTIME_ROW = "planner runtime"
@@ -53,6 +58,8 @@ def collect_checks(*, profile_name: str | None = None, probe_hardware: bool = Tr
     checks.append(probe.check_ffmpeg())
     checks.append(runtime_check)
     checks.extend(_other_planner_checks(active, cfg))
+    # This machine's rig: tandem's own robot and cameras. What a planner needs of it is the planner's rows.
+    checks.extend(rig_checks())
 
     # Profile-specific checks: the settings that decide whether a session can even start.
     try:
@@ -67,7 +74,6 @@ def collect_checks(*, profile_name: str | None = None, probe_hardware: bool = Tr
     backend = profile.planner.backend
     checks.append(_gemini_check(profile, runtime_ready))
     checks.append(probe.Check("profile", probe.OK, f"{profile.name} · plans with {backend}", group="profile"))
-    checks.append(_cameras_check(profile))
     checks.append(_phase_planning_check(profile))
     executor_check = _human_executor_check(profile)
     if executor_check is not None:
@@ -98,19 +104,55 @@ def _gemini_check(profile, runtime_ready: bool) -> probe.Check:
     return check
 
 
-def _cameras_check(profile) -> probe.Check:
-    """Whether the profile has a rig to record from. The teleop legs record from these cameras whichever
-    planner runs, so they are tandem's to check; whether a planner can also localise from them (its
-    calibration) is the planner's."""
-    configured = profile.cameras.configured()
+def rig_checks() -> list[probe.Check]:
+    """rig.yml, and whether it has cameras to record from.
+
+    The teleop legs record from the cameras whichever planner runs, so they are tandem's to check; whether
+    a planner can also localise from them (its calibration) is the planner's.
+    """
+    try:
+        rig = rig_mod.load()
+    except TandemError as exc:
+        return [probe.Check("rig", probe.FAIL, one_line(exc.message), exc.hint or "`tandem rig edit`", group="rig")]
+    if not rig_mod.exists():
+        rows = [
+            probe.Check(
+                "rig",
+                probe.WARN,
+                "not set up",
+                "`tandem init`, or `tandem rig set robot.host ADDRESS` and `tandem rig set "
+                "cameras.external.serial SERIAL`.",
+                group="rig",
+            )
+        ]
+    else:
+        rows = [probe.Check("rig", probe.OK, f"{rig.file()} · {rig.summary()}", group="rig")]
+    rows.append(_cameras_check(rig))
+    return rows
+
+
+def _cameras_check(rig) -> probe.Check:
+    configured = rig.cameras.configured()
     if not configured:
         return probe.Check(
             "cameras",
             probe.SKIP,
-            "none configured — this profile can be browsed but not collected into",
-            group="profile",
+            "none configured: this machine can browse trajectories but not collect",
+            "`tandem rig set cameras.external.serial SERIAL` (and cameras.hand.serial) to collect here.",
+            group="rig",
         )
-    return probe.Check("cameras", probe.OK, ", ".join(configured), group="profile")
+    missing = rig.cameras.perception_missing()
+    if missing:
+        return probe.Check(
+            "cameras",
+            probe.FAIL,
+            missing,
+            f"`tandem rig set cameras.{rig.cameras.perception}.serial SERIAL`, or `tandem rig set "
+            "cameras.perception ROLE` to read another camera. A session will not start without it.",
+            group="rig",
+        )
+    detail = ", ".join(f"{role} {cam.serial}" for role, cam in configured.items())
+    return probe.Check("cameras", probe.OK, f"{detail} · perception reads {rig.cameras.perception}", group="rig")
 
 
 def _what_the_runtime_needs(active: str | None, cfg) -> tuple[bool, bool]:
@@ -394,7 +436,7 @@ def doctor(
         raise typer.Exit(0 if not _summary(checks)["fail"] else 1)
 
     theme.blank()
-    for group in ("core", "runtime", "gpu", "credentials", "profile", "hardware"):
+    for group in GROUPS:
         rows = [c for c in checks if c.group == group]
         if not rows:
             continue

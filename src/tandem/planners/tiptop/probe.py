@@ -68,9 +68,9 @@ def check_m2t2(url: str, *, timeout: float = 1.5) -> probe.Check:
             "m2t2 grasp server",
             probe.FAIL,
             f"{url} — {exc}",
-            "That is not a usable address. An unresolved ${oc.env:...} here means an import "
-            "left OmegaConf's own syntax behind; set perception.m2t2.url to a plain URL with "
-            "`tandem profile edit`.",
+            "That is not a usable address. An unresolved ${oc.env:...} here means OmegaConf's own syntax was "
+            "left behind. Set it to a plain URL, such as http://localhost:8123: `tandem rig set "
+            "planners.tiptop.perception.m2t2.url URL`.",
             group="hardware",
         )
     if not host:
@@ -78,7 +78,8 @@ def check_m2t2(url: str, *, timeout: float = 1.5) -> probe.Check:
             "m2t2 grasp server",
             probe.FAIL,
             f"{url or '(empty)'} — no host",
-            "Set perception.m2t2.url to something like http://localhost:8123.",
+            "Set it to a plain URL, such as http://localhost:8123: `tandem rig set "
+            "planners.tiptop.perception.m2t2.url URL`.",
             group="hardware",
         )
     return probe.check_port(
@@ -86,5 +87,6 @@ def check_m2t2(url: str, *, timeout: float = 1.5) -> probe.Check:
         host,
         port,
         timeout=timeout,
-        hint="Start the M2T2 server; perception asks it for grasps every rollout.",
+        hint="Start the M2T2 server; perception asks it for grasps every rollout. Another address: "
+        "`tandem rig set planners.tiptop.perception.m2t2.url URL`.",
     )

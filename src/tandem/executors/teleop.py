@@ -278,7 +278,7 @@ class _ChildHost:
         # from the leg, so there is nothing to fall back to.
         self.current = None
         self.instruction = leg.instruction
-        self.profile = _ProfileView(ctx.profile, save_root)
+        self.profile = _ProfileView(ctx.profile, save_root, rig=ctx.rig)
         self._handoff_error: str | None = None
         # Every recording this hand-off saved, as (directory, frames). The child keeps only the last,
         # but the driver starts another recording whenever one ends short of quitting, and every one of
@@ -337,15 +337,24 @@ class _ChildHost:
 
 
 class _ProfileView:
-    """The profile as the child sees it: its cameras, and where this executor was told to write."""
+    """What the child reads off "the profile": the rig's cameras, and where this executor was told to write.
 
-    def __init__(self, profile: Any, save_root: Path) -> None:
+    The cameras are this machine's rig's, not the profile's: every profile on the machine records from the
+    same ones. The context's rig, or this machine's when the context was built without one.
+    """
+
+    def __init__(self, profile: Any, save_root: Path, *, rig: Any = None) -> None:
         self._profile = profile
         self._save_root = save_root
+        self._rig = rig
 
     @property
     def cameras(self) -> Any:
-        return self._profile.cameras
+        if self._rig is None:
+            from tandem.core import rig as rig_mod
+
+            self._rig = rig_mod.load()
+        return self._rig.cameras
 
     def trajectories_dir(self) -> Path:
         return self._save_root

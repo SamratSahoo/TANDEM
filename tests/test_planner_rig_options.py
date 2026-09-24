@@ -1,9 +1,9 @@
 """A planner's settings are of two kinds, and it says which: its task's (OPTIONS) and its machine's (RIG_OPTIONS).
 
 A task's settings live in each profile's planner.options; a machine's -- a robot shim's ports, a server's
-address -- in rig.yml's ``planners.<name>``, once, for every profile. Nothing in tandem knows which of a
-planner's settings are which: the planner declares it, and the SDK, the registry and the conformance kit
-hold every planner to its declaration.
+address -- in rig.yml's ``planners.<name>``, once, for every profile. Nothing in tandem knows which of
+TiPToP's settings are which: TiPToP declares it, as any planner does, and the SDK, the registry, the rig
+and the conformance kit hold every planner to its declaration.
 """
 
 from __future__ import annotations
@@ -14,7 +14,9 @@ import pytest
 from helpers import isolate_registry
 from toy_planner import ToyPlanner
 
-from tandem.core.errors import TandemError
+from tandem.core import profiles
+from tandem.core import rig as rig_mod
+from tandem.core.errors import RigInvalid, TandemError
 from tandem.planners import registry
 from tandem.planners.base import BackendContext
 from tandem.planners.testing import ConformanceError, PlannerConformance
@@ -140,6 +142,45 @@ def test_planners_info_lists_both_kinds_and_says_where_each_is_set(isolated_env)
     assert "tandem rig set planners.toy.KEY VALUE" in shown.output
 
 
+# --- the rig asks the planner -----------------------------------------------------------------------------------
+
+
+def test_the_rig_asks_each_installed_planner_to_check_its_block(isolated_env):
+    registry.register_backend("toy", RigToy)
+    rig = rig_mod.update({"planners.toy.sensor": "10.0.0.7"})
+    assert rig.planners["toy"] == {"sensor": "10.0.0.7"}
+    assert rig_mod.planner_options(rig, "toy") == {"sensor": "10.0.0.7"}
+    with pytest.raises(RigInvalid) as caught:
+        rig_mod.update({"planners.toy.sensr": "10.0.0.8"})
+    assert "planners.toy" in caught.value.message and "sensr" in caught.value.message
+
+
+def test_a_session_hands_the_planner_the_rig_and_its_block(profile, monkeypatch):
+    from tandem.core.session import Session
+
+    contexts: list[BackendContext] = []
+
+    class Recording(RigToy):
+        @classmethod
+        def create(cls, ctx):
+            contexts.append(ctx)
+            return super().create(ctx)
+
+    registry.register_backend("toy", Recording)
+    rig_mod.update({"planners.toy.sensor": "10.0.0.7"})
+    profile.planner = profiles.PlannerSpec(backend="toy")
+    session = Session(profile, task="put the duck in the bin")
+    session.start()
+    try:
+        (ctx,) = contexts
+        assert ctx.rig is session.rig and ctx.rig.cameras.hand.serial == "14846828"
+        assert dict(ctx.rig_options) == {"sensor": "10.0.0.7"}
+        assert session._executor_context().rig is session.rig
+    finally:
+        session.stop(park=False)
+        session.wait(timeout=5)
+
+
 # --- the conformance kit ------------------------------------------------------------------------------------------
 
 
@@ -181,6 +222,13 @@ def test_the_kit_fails_a_check_that_crashes_on_an_empty_block_and_accepts_one_th
             return dict(options)
 
     _kit(Requiring).test_its_rig_options_check_handles_no_options()
+
+
+def test_tiptop_passes_the_kits_machine_settings_checks():
+    kit = _kit("tiptop")
+    kit.test_its_rig_options_check_accepts_what_it_returns()
+    kit.test_its_rig_options_check_handles_no_options()
+    kit.test_its_options_check_accepts_what_it_returns()
 
 
 # --- a new planner is scaffolded with both ---------------------------------------------------------------------------

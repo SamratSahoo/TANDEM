@@ -50,7 +50,7 @@ def _client(profile) -> TestClient:
 
 
 def _write(name: str, text: str) -> Path:
-    path = profiles.profiles_root() / name / "profile.yml"
+    path = profiles.path_of(name)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
     return path
@@ -70,7 +70,7 @@ def test_a_dot_segment_cannot_delete_the_profiles_or_the_data_root(profile, segm
     response = client.delete(f"/api/profiles/{segment}" + ("?purge=true" if purge else ""))
     assert response.status_code in (400, 404), response.text
     assert precious.read_text() == "keep me"
-    assert profile.profile_file().is_file()
+    assert profile.file().is_file()
     assert profiles.list_names() == before
 
 
@@ -81,7 +81,7 @@ def test_delete_exists_and_load_refuse_what_is_not_a_profile_name(profile, name)
     with pytest.raises(ProfileError):
         profiles.load(name)
     assert not profiles.exists(name)
-    assert profile.profile_file().is_file()
+    assert profile.file().is_file()
 
 
 def test_a_real_profile_still_deletes_and_a_soft_deleted_one_can_still_be_purged(profile):
@@ -90,10 +90,10 @@ def test_a_real_profile_still_deletes_and_a_soft_deleted_one_can_still_be_purged
     other.name = "other"
     profiles.save(other)
     assert client.delete("/api/profiles/other").status_code == 200
-    assert not profiles.exists("other") and other.dir().is_dir(), "data kept"
+    assert not profiles.exists("other") and other.trajectories_dir().is_dir(), "data kept"
     assert client.delete("/api/profiles/other?purge=true").status_code == 200
-    assert not other.dir().exists()
-    assert profile.profile_file().is_file()
+    assert not other.trajectories_dir().exists()
+    assert profile.file().is_file()
 
 
 # --- a save that cannot finish never leaves an empty profile -------------------------------------------
@@ -117,13 +117,13 @@ class _PathPlanner(FakeFactory):
 @pytest.mark.parametrize("value", [Path("/x/scene"), _Colour.RED], ids=["path", "enum"])
 def test_options_a_profile_cannot_store_are_refused_and_the_file_is_untouched(profile, value):
     registry.register_backend("pathy", _PathPlanner(value))
-    before = profile.profile_file().read_bytes()
+    before = profile.file().read_bytes()
 
     changed = profile.model_copy(deep=True)
     changed.planner = profiles.PlannerSpec.model_construct(backend="pathy", options={})
     with pytest.raises(TandemError, match="options.scene"):
         profiles.save(changed)
-    assert profile.profile_file().read_bytes() == before
+    assert profile.file().read_bytes() == before
 
     # And a save after the refusal writes a whole file: nothing was left half-written to reuse.
     again = profiles.load(profile.name)
@@ -133,7 +133,7 @@ def test_options_a_profile_cannot_store_are_refused_and_the_file_is_untouched(pr
 
 
 def test_an_interrupted_save_leaves_the_old_file_and_no_partial(profile, monkeypatch):
-    before = profile.profile_file().read_bytes()
+    before = profile.file().read_bytes()
 
     def interrupted(*_args, **_kwargs):
         raise KeyboardInterrupt
@@ -144,13 +144,13 @@ def test_an_interrupted_save_leaves_the_old_file_and_no_partial(profile, monkeyp
         patch.setattr(profiles, "_new_yaml", lambda: SimpleNamespace(dump=interrupted))
         with pytest.raises(KeyboardInterrupt):
             profiles.save(changed)
-    assert profile.profile_file().read_bytes() == before
-    assert not list(profile.dir().glob(".*.partial"))
+    assert profile.file().read_bytes() == before
+    assert not list(profile.file().parent.glob(".*.partial"))
 
 
 @pytest.mark.parametrize("text", ["", "# only a comment\n"], ids=["empty", "comment"])
 def test_an_empty_profile_file_is_an_error_not_a_profile_of_defaults(profile, text):
-    profile.profile_file().write_text(text)
+    profile.file().write_text(text)
     with pytest.raises(ProfileError, match="is empty"):
         profiles.load(profile.name)
 
@@ -177,34 +177,6 @@ def test_the_conformance_kit_refuses_options_that_are_not_plain_data():
     kit = type("Kit", (PlannerConformance,), {"factory": staticmethod(lambda: registry.factory("pathy"))})
     with pytest.raises(TandemError, match="cannot store: options.scene"):
         kit().test_its_options_check_accepts_what_it_returns()
-
-
-# --- a version-1 profile's teleop default is said, not carried over silently ----------------------------
-
-
-def test_a_version_1_profiles_teleop_default_is_named_in_the_migration_notice(isolated_env, caplog):
-    text = (FIXTURES / "v1_ef1411f.yml").read_text()
-    assert "on_robot_phase_failure: teleop" in text
-    _write("old", text)
-    with caplog.at_level("WARNING"):
-        loaded = profiles.load("old")
-    assert loaded.hitl.on_robot_phase_failure == "teleop", "kept: a migration cannot tell a choice from a default"
-    assert "on_robot_phase_failure" in caplog.text and "abort" in caplog.text
-
-    migrated = CliRunner().invoke(app, ["profile", "migrate", "old"])
-    assert migrated.exit_code == 0, migrated.output
-    assert "on_robot_phase_failure" in migrated.output
-
-
-def test_a_version_1_profile_that_chose_abort_or_a_version_2_teleop_is_not_mentioned(isolated_env, caplog):
-    _write("chose", (FIXTURES / "v1_ef1411f.yml").read_text().replace("on_robot_phase_failure: teleop", "on_robot_phase_failure: abort"))
-    current = profiles.load_file(Path(profiles.__file__).parents[1] / "resources" / "profile_template.yml", name="cur")
-    current.hitl.on_robot_phase_failure = "teleop"
-    profiles.save(current)
-    with caplog.at_level("WARNING"):
-        profiles.load("chose")
-        profiles.load("cur")
-    assert "on_robot_phase_failure" not in caplog.text
 
 
 # --- an executor's own settings ------------------------------------------------------------------------
@@ -260,7 +232,8 @@ def test_the_phase_loop_hands_each_executor_its_own_block_and_teleop_none(profil
 
 
 def test_an_absent_executors_options_are_kept_and_survive_switching_executors(profile):
-    data = profiles.read_data(profile.profile_file())
+    # The name is the file's, and is not in it: read it with its name, as `load` does.
+    data = profiles.read_data(profile.file(), name=profile.name)
     data["hitl"]["human_executor_options"] = {"notinstalled": {"checkpoint": "x.ckpt"}}
     profiles.save(profiles.Profile.model_validate(data))
     assert profiles.load(profile.name).hitl.human_executor_options == {"notinstalled": {"checkpoint": "x.ckpt"}}
@@ -279,7 +252,7 @@ def test_an_absent_executors_options_are_kept_and_survive_switching_executors(pr
 @pytest.fixture
 def shelf(profile, make_trajectory):
     """A profile naming a planner and an executor nobody installed here, with one trajectory."""
-    data = profiles.read_data(profile.profile_file())
+    data = profiles.read_data(profile.file())
     data["planner"] = {"backend": "shelfbot", "options": {"bins": ["a", "b"]}}
     data["hitl"]["human_executor"] = "armsim"
     path = _write("shelf1", "x: 1\n")
@@ -288,7 +261,9 @@ def shelf(profile, make_trajectory):
     buf = io.StringIO()
     profiles._new_yaml().dump({**data, "name": "shelf1"}, buf)
     path.write_text(buf.getvalue())
-    make_trajectory(SimpleNamespace(status_dir=lambda s: path.parent / "trajectories" / s), "2026-01-01_00-00-00")
+    make_trajectory(
+        SimpleNamespace(status_dir=lambda s: profiles.trajectories_root() / "shelf1" / s), "2026-01-01_00-00-00"
+    )
     return "shelf1"
 
 

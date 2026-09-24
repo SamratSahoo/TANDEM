@@ -28,6 +28,9 @@ LIGHT_MODULES = [
     "tandem.core.nonidle",
     "tandem.core.merge",
     "tandem.core.events",
+    # The rig: `tandem rig show` runs on a laptop.
+    "tandem.core.rig",
+    "tandem.cli.rig",
     "tandem.core.session",
     "tandem.core.probe",
     "tandem.core.phase_loop",
@@ -60,10 +63,12 @@ LIGHT_MODULES = [
     "tandem.planners.tiptop",
     "tandem.planners.tiptop.backend",
     "tandem.planners.tiptop.factory",
-    # TiPToP's own config, schema and probes: read to validate a profile and to run doctor, both of which
-    # a laptop does.
+    # TiPToP's own config, schema, probes and doctor rows: read to validate a profile and the rig, and to
+    # run doctor, all of which a laptop does.
     "tandem.planners.tiptop.render",
     "tandem.planners.tiptop.tamp_keys",
+    "tandem.planners.tiptop.options",
+    "tandem.planners.tiptop.doctor",
     "tandem.planners.tiptop.runtime",
     "tandem.planners.tiptop.probe",
     # Deprecated, and only a re-export; kept light like what it re-exports.

@@ -1,4 +1,4 @@
-"""What `tandem doctor` checks for TiPToP, and how a profile's TiPToP options are shown to a person.
+"""What `tandem doctor` checks for TiPToP, and how its settings for a profile are shown to a person.
 
 Both used to be written into tandem's own commands -- doctor probed a ZED SDK, a bamboo shim's ports
 and an M2T2 server for every profile, and `tandem profile show` printed a robot's address and the cuRobo
@@ -13,11 +13,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from tandem.core import probe, profiles, secrets
+from tandem.core import probe, secrets
+from tandem.core import rig as rig_mod
+from tandem.core.errors import RigInvalid, TandemError, one_line
 from tandem.planners.base import OptionsSection, OptionsView
 from tandem.planners.tiptop import probe as tiptop_probe
 from tandem.planners.tiptop import render
-from tandem.planners.tiptop.options import TiptopOptions, options_of
+from tandem.planners.tiptop.options import TiptopOptions, check_robot_type, resolve
 
 # check_assets findings that have rows of their own (camera calibration, tiptop cameras), and so are not
 # repeated among the TAMP ones.
@@ -28,7 +30,8 @@ def doctor_checks(
     profile: Any, *, settings: Any, runtime_ready: bool, probe_hardware: bool
 ) -> list[probe.Check]:
     """TiPToP's rows: the GPU its runtime compiles for, the key its perception calls, and -- with a
-    profile -- its calibration, its TAMP settings and the hardware its options name."""
+    profile -- what it needs of the rig (both cameras, their extrinsics, an arm it drives), the profile's
+    TAMP settings, and the hardware and servers the rig names."""
     checks = [probe.check_nvidia_driver(), probe.check_cuda_runtime(), probe.check_nvcc()]
     if probe_hardware:
         checks.append(tiptop_probe.check_zed_sdk())
@@ -39,23 +42,34 @@ def doctor_checks(
     checks.append(_gemini_for_perception(runtime_ready))
 
     try:
-        options = options_of(profile)
-    except ValueError as exc:
-        # The profile loader validates these, so this is a profile built by hand; say so, and stop.
-        checks.append(probe.Check("tiptop options", probe.FAIL, str(exc).splitlines()[0], group="profile"))
+        rig = rig_mod.load()
+        rig_options = rig_mod.planner_options(rig, "tiptop")
+    except RigInvalid as exc:
+        # tandem's own "rig" row says what is wrong with the file; this says TiPToP cannot be checked.
+        checks.append(
+            probe.Check("tiptop rig settings", probe.FAIL, one_line(exc.message), exc.hint or "", group="rig")
+        )
+        return checks
+    checks.append(_robot_type(rig))
+    try:
+        options = resolve(rig, rig_options, profile.planner.options, check_type=False)
+    except (TandemError, ValueError) as exc:
+        # The profile loader and the rig validate these, so this is a profile built by hand; say so, and stop.
+        message = exc.message if isinstance(exc, TandemError) else str(exc)
+        checks.append(probe.Check("tiptop options", probe.FAIL, message.splitlines()[0], group="profile"))
         return checks
 
-    checks.append(_cameras(profile, runtime_ready))
-    checks.append(_calibration(profile))
+    checks.append(_cameras(rig, runtime_ready))
+    checks.append(_calibration(rig))
     runtime_dir = settings.resolved_runtime_dir() if settings is not None else None
     warnings = [
         w
-        for w in render.check_assets(profile, options, runtime_dir=runtime_dir)
+        for w in render.check_assets(profile, rig, options, runtime_dir=runtime_dir)
         if not w.startswith(_OWN_ROWS)
     ]
-    # A setting of the perception block that does nothing is not a TAMP finding; it gets its own row.
+    # A setting of the perception block that does nothing is the rig's, not a TAMP finding: a row of its own.
     for warning in (w for w in warnings if w.startswith("perception.")):
-        checks.append(probe.Check("perception settings", probe.WARN, warning, group="profile"))
+        checks.append(probe.Check("perception settings", probe.WARN, warning, group="rig"))
     warnings = [w for w in warnings if not w.startswith("perception.")]
     for warning in warnings:
         checks.append(probe.Check("tamp settings", probe.WARN, warning, group="profile"))
@@ -90,51 +104,74 @@ def _gemini_for_perception(runtime_ready: bool) -> probe.Check:
     return probe.Check(name, probe.FAIL, "not set", hint, group="credentials")
 
 
-def _cameras(profile: Any, runtime_ready: bool) -> probe.Check:
+def _robot_type(rig: Any) -> probe.Check:
+    """Whether TiPToP drives the arm the rig names. tandem checks only that it is a name."""
+    try:
+        check_robot_type(rig.robot.type)
+    except ValueError as exc:
+        return probe.Check(
+            "robot type",
+            probe.FAIL,
+            str(exc),
+            "`tandem rig set robot.type fr3_robotiq` (or another arm TiPToP drives); `tandem planners info "
+            "tiptop` lists them.",
+            group="rig",
+        )
+    return probe.Check("robot type", probe.OK, rig.robot.type, group="rig")
+
+
+def _cameras(rig: Any, runtime_ready: bool) -> probe.Check:
     """The two cameras the pinned tiptop opens at every warm-up, whichever one perception reads.
 
     Graded like the Gemini key: a FAIL where TiPToP could collect, a WARN on a machine that cannot
     anyway -- a laptop keeping a profile's trajectories often has no cameras in it at all.
     """
     name = "tiptop cameras"
-    missing = [slot for slot in ("hand", "external") if slot not in profile.cameras.configured()]
+    missing = [slot for slot in ("hand", "external") if slot not in rig.cameras.configured()]
     if not missing:
-        return probe.Check(name, probe.OK, "hand and external configured", group="profile")
+        return probe.Check(name, probe.OK, "hand and external configured", group="rig")
     detail = "no " + " or ".join(f"cameras.{slot}" for slot in missing)
     hint = (
         "The pinned tiptop opens cameras.hand and cameras.external at every warm-up, whichever one "
-        "perception reads, so a session fails to start without both. Add them with `tandem profile edit`."
+        f"perception reads, so a session fails to start without both. `tandem rig set cameras.{missing[0]}.serial "
+        "SERIAL` adds one."
     )
     if not runtime_ready:
-        return probe.Check(name, probe.WARN, detail + " (only needed to collect)", hint, group="profile")
-    return probe.Check(name, probe.FAIL, detail, hint, group="profile")
+        return probe.Check(name, probe.WARN, detail + " (only needed to collect)", hint, group="rig")
+    return probe.Check(name, probe.FAIL, detail, hint, group="rig")
 
 
-def _calibration(profile: Any) -> probe.Check:
+def _calibration(rig: Any) -> probe.Check:
     """Every configured camera's extrinsics: tiptop raises at warm-up, arm moving, for one it lacks."""
-    configured = profile.cameras.configured()
+    configured = rig.cameras.configured()
     if not configured:
-        return probe.Check("camera calibration", probe.SKIP, "no cameras configured", group="profile")
-    missing = profiles.missing_calibration(profile)
+        return probe.Check("camera calibration", probe.SKIP, "no cameras configured", group="rig")
+    try:
+        missing = rig.missing_calibration()
+    except RigInvalid as exc:
+        return probe.Check("camera calibration", probe.FAIL, one_line(exc.message), exc.hint or "", group="rig")
     if missing:
         return probe.Check(
             "camera calibration",
             probe.FAIL,
             f"no extrinsics for {', '.join(missing)}",
-            f"Extrinsics are keyed by serial. Add them to {profile.calibration_file()}.",
-            group="profile",
+            f"Extrinsics are keyed by serial. Add them to {rig.calibration_file()} (`tandem runtime run "
+            "calibrate-wrist-cam` writes the wrist camera's).",
+            group="rig",
         )
-    return probe.Check(
-        "camera calibration", probe.OK, f"{len(configured)} camera(s) calibrated", group="profile"
-    )
+    return probe.Check("camera calibration", probe.OK, f"{len(configured)} camera(s) calibrated", group="rig")
 
 
 # --------------------------------------------------------------------------- showing the options
 
 
 def describe(profile: Any, *, settings: Any) -> OptionsView:
-    """A TiPToP profile's robot, perception and TAMP overrides, and exactly what the planner receives."""
-    options: TiptopOptions = options_of(profile)
+    """TiPToP's settings for a profile: this machine's robot and perception, the profile's TAMP overrides,
+    and exactly what the planner receives."""
+    rig = rig_mod.load()
+    options: TiptopOptions = resolve(
+        rig, rig_mod.planner_options(rig, "tiptop"), profile.planner.options, check_type=False
+    )
     runtime_dir = settings.resolved_runtime_dir() if settings is not None else None
     overrides = render.render_tamp_overrides(profile, options, runtime_dir=runtime_dir)
     robot, perception = options.robot, options.perception
@@ -149,6 +186,7 @@ def describe(profile: Any, *, settings: Any) -> OptionsView:
                     ("gripper / state", f"{robot.gripper_port} / {robot.state_port}"),
                     ("speed", f"{robot.time_dilation_factor:.0%} (time_dilation_factor)"),
                 ),
+                "this machine's (rig.yml)",
             ),
             OptionsSection(
                 "perception",
@@ -161,7 +199,7 @@ def describe(profile: Any, *, settings: Any) -> OptionsView:
                         + (f" at {perception.sam_url}" if perception.sam_mode == "remote" else ""),
                     ),
                 ),
-                f"from the {profile.cameras.perception} camera",
+                f"this machine's (rig.yml) · from the {rig.cameras.perception} camera",
             ),
             OptionsSection(
                 "tamp",
@@ -171,7 +209,7 @@ def describe(profile: Any, *, settings: Any) -> OptionsView:
         ),
         receives=overrides,
         receives_note="the cuRobo cost overrides, passed as --curobo-overrides (paths made absolute)",
-        warnings=tuple(render.check_assets(profile, options, runtime_dir=runtime_dir)),
+        warnings=tuple(render.check_assets(profile, rig, options, runtime_dir=runtime_dir)),
     )
 
 

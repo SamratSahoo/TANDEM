@@ -210,7 +210,10 @@ class ExecutorContext:
     Given once per session, like a planner backend's construction arguments, and never per leg: a leg's
     particulars travel in `HumanPhaseRequest` and `LegSpec`.
 
-    * `profile` is the validated ``Profile`` (its cameras, for one).
+    * `profile` is the validated ``Profile``: the task.
+    * `rig` is this machine's rig (``tandem.core.rig.Rig``): the cameras a leg records from, the robot's
+      address. None for a context built by hand; an executor that needs it then reads
+      ``tandem.core.rig.load()``.
     * `session_dir` is the session's scratch directory, for anything that is not a recording: event
       files, logs, a policy server's socket.
     * `settings` is the machine's ``tandem.core.settings.Settings``. None re-reads them at every leg, so
@@ -232,6 +235,8 @@ class ExecutorContext:
     on_emit: Callable[[dict], None] = _ignore
     on_problem: Callable[[str], None] = _ignore
     options: Mapping[str, Any] = field(default_factory=dict)
+    # Last, so a context built positionally before it existed still means what it meant.
+    rig: Any = None
 
 
 @runtime_checkable
@@ -313,7 +318,7 @@ class ExecutorFactory:
     # Checks and normalises the executor's own settings (hitl.human_executor_options.<name>) when a
     # profile loads, the way a planner's validate_options checks planner.options: returns them as the
     # executor will read them, or raises TandemError / ValueError naming the key. None takes them as
-    # written. What it returns is written back to profile.yml, so it must be plain YAML data.
+    # written. What it returns is written back to the profile's file, so it must be plain YAML data.
     validate_options: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None
 
     def __post_init__(self) -> None:
@@ -703,7 +708,7 @@ def options_for(name: str, options: Mapping[str, Any] | None) -> dict[str, Any]:
 
     problems = not_plain_data(checked, "options")
     if problems:
-        # Written into profile.yml as it stands, like a planner's (registry.options_for says why).
+        # Written into the profile's file as it stands, like a planner's (registry.options_for says why).
         raise TandemError(
             f"The human executor {name!r}'s validate_options returned what a profile cannot store: "
             + "; ".join(problems[:5]),

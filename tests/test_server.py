@@ -113,12 +113,14 @@ def test_media_rejects_traversal(client, profile, make_trajectory):
     """An escaping path must never return file content. It cannot even match the route (the
     decoded slashes make it too many segments), so it lands on the api-404."""
     directory = make_trajectory(profile, "2026-01-01_00-00-00")
-    secret = directory.parent.parent.parent / "profile.yml"
+    secret = directory.parents[3] / "profiles" / f"{profile.name}.yml"
     assert secret.is_file()
 
-    response = client.get(f"/api/media/{profile.name}/2026-01-01_00-00-00/..%2F..%2F..%2Fprofile.yml")
+    response = client.get(
+        f"/api/media/{profile.name}/2026-01-01_00-00-00/..%2F..%2F..%2F..%2Fprofiles%2F{profile.name}.yml"
+    )
     assert response.status_code == 404
-    assert "profile.yml" not in response.text or "No such endpoint" in response.text
+    assert "planner:" not in response.text or "No such endpoint" in response.text
 
 
 def test_unknown_api_path_is_a_json_404(client):

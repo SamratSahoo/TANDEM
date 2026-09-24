@@ -85,37 +85,64 @@ def isolated_env(tmp_path, monkeypatch):
     for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
         monkeypatch.delenv(name, raising=False)
 
-    # These modules cache the loaded settings; a stale cache leaks one test's config into
-    # the next.
+    # These modules cache what they loaded (the settings, the rig) and say some things once per
+    # process; a stale cache leaks one test's config into the next.
+    from tandem.core import rig as rig_mod
     from tandem.core import settings as settings_mod
 
-    settings_mod._cache = None
+    def forget() -> None:
+        settings_mod._cache = None
+        rig_mod._cache = None
+        rig_mod._stamp = None
+        rig_mod._noticed.clear()
+
+    forget()
     yield tmp_path
-    settings_mod._cache = None
+    forget()
+
+
+#: The rig's cameras in every test that collects: a wrist and a third-person ZED, perception reading the latter.
+RIG_CAMERAS = {"hand": "14846828", "external": "32439448"}
 
 
 @pytest.fixture
-def profile(isolated_env):
-    """A saved profile named `test`, built from the shipped template.
+def machine_rig(isolated_env):
+    """This machine's rig, as a workstation that collects has it: rig.yml with a wrist and an external
+    camera, and extrinsics for both in its calibration.json.
 
-    Extrinsics are filled in for every configured camera: collection refuses to start without
-    them (a serial with no entry aborts at warmup), so a fixture missing them would make every
-    session test fail for a reason that has nothing to do with what it is testing.
+    Extrinsics are filled in for every camera: collection refuses to start without them (a serial with no
+    entry aborts at warmup), so a fixture missing them would make every session test fail for a reason
+    that has nothing to do with what it is testing. Named machine_rig, not rig: a test module has a
+    rig() helper of its own.
     """
-    from tandem import resources
-    from tandem.core import profiles
+    from tandem.core import rig as rig_mod
 
-    prof = profiles.load_file(resources.path("profile_template.yml"), name="test")
-    profiles.save(prof)
-    prof.calibration_file().write_text(
+    rig = rig_mod.update(
+        {
+            "cameras.perception": "external",
+            **{f"cameras.{role}": {"serial": serial} for role, serial in RIG_CAMERAS.items()},
+        }
+    )
+    rig.calibration_file().write_text(
         json.dumps(
-            {
-                camera.serial: {"pose": [0.4, 0.0, 0.6, 0.0, 0.0, 0.0], "timestamp": 0}
-                for camera in prof.cameras.configured().values()
-            },
+            {serial: {"pose": [0.4, 0.0, 0.6, 0.0, 0.0, 0.0], "timestamp": 0} for serial in RIG_CAMERAS.values()},
             indent=2,
         )
     )
+    return rig_mod.load(force=True)
+
+
+@pytest.fixture
+def profile(machine_rig):
+    """A saved profile named `test` (tests/fixtures/profiles/test_v3.yml), on the `machine_rig` rig.
+
+    Not built from the shipped template: that holds whatever settings new profiles should start with, and
+    a test's premises (phase planning off, four TAMP overrides) must not move when it does.
+    """
+    from tandem.core import profiles
+
+    prof = profiles.load_file(Path(__file__).parent / "fixtures" / "profiles" / "test_v3.yml", name="test")
+    profiles.save(prof)
     return prof
 
 

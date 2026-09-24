@@ -1,4 +1,4 @@
-"""Profile loading, validation and the TAMP-key contract.
+"""Profile loading, validation, the one-file-per-profile layout, and the TAMP-key contract.
 
 The validation tests are the important ones. A TAMP setting that is silently ignored is the
 failure mode that looks exactly like success — a whole dataset collected with the knob you
@@ -14,19 +14,23 @@ from pydantic import ValidationError
 
 from tandem import resources
 from tandem.core import profiles
-from tandem.core.errors import ProfileError
+from tandem.core.errors import ProfileError, ProfileInvalid
 from tandem.core.profiles import Profile
 from tandem.planners.tiptop import render
-from tandem.planners.tiptop.options import options_of, validate_tamp
+from tandem.planners.tiptop.options import resolve_profile, validate_tamp
 
 
 def test_template_is_valid():
     """The shipped template must load, or `tandem init` fails on a fresh machine."""
     profile = profiles.load_file(resources.path("profile_template.yml"), name="default")
     assert profile.name == "default"
-    assert options_of(profile).robot.dof == 7
+    assert profile.version == profiles.LAYOUT_VERSION == 3
     assert profile.planner.backend == "tiptop"
-    assert profile.cameras.perception in {"hand", "external"}
+    # The task's settings only: the machine's are the rig's.
+    assert set(profile.planner.options) == {"tamp"}
+    text = resources.read("profile_template.yml")
+    for section in ("\ncameras:", "\nrobot:", "\nperception:", "\n    robot:", "\n    perception:", "fps:"):
+        assert section not in text
 
 
 def test_save_and_load_roundtrip(profile):
@@ -98,32 +102,19 @@ def test_profile_name_must_be_a_safe_path_segment():
         Profile.model_validate({"name": "Has Spaces"})
 
 
-def test_joint_vector_length_must_match_dof():
+def test_the_robot_is_the_rigs_not_a_profiles():
+    """TiPToP's robot and perception settings are this machine's: a profile holding them is told where they go."""
     with pytest.raises(ValidationError) as excinfo:
         Profile.model_validate({"name": "x", "planner": {"options": {"robot": {"dof": 7, "q_home": [0.0, 0.0]}}}})
-    assert "options.robot: q_home has 2 values" in str(excinfo.value)
+    message = str(excinfo.value)
+    assert "machine setting" in message
+    assert "tandem rig set planners.tiptop.robot" in message
 
 
-def test_perception_camera_must_be_configured_when_there_are_cameras():
-    with pytest.raises(ValidationError) as excinfo:
-        Profile.model_validate({
-            "name": "x",
-            "cameras": {"perception": "external", "hand": {"serial": "1"}},
-        })
-    assert "cameras.external is not configured" in str(excinfo.value)
-
-
-def test_a_profile_with_no_cameras_is_valid():
-    """On a laptop a profile is just a folder of trajectories collected elsewhere. Collection
-    refuses separately, where the message can be specific."""
-    assert Profile.model_validate({"name": "viz-only"}).cameras.configured() == {}
-
-
-def test_time_dilation_factor_bounds():
-    with pytest.raises(ValidationError):
-        Profile.model_validate({"name": "x", "planner": {"options": {"robot": {"time_dilation_factor": 0.0}}}})
-    with pytest.raises(ValidationError):
-        Profile.model_validate({"name": "x", "planner": {"options": {"robot": {"time_dilation_factor": 2.0}}}})
+def test_a_profile_has_no_cameras():
+    """The cameras are the rig's. Not a key a profile has, at the top or anywhere."""
+    assert "cameras" not in Profile.model_fields
+    assert "cameras" not in Profile.model_validate({"name": "viz-only"}).model_dump()
 
 
 def test_missing_profile_names_the_alternatives(profile):
@@ -132,59 +123,190 @@ def test_missing_profile_names_the_alternatives(profile):
     assert "test" in (excinfo.value.hint or "")
 
 
-def test_missing_calibration_is_reported(profile):
-    """Extrinsics are keyed by serial, and a serial with no entry aborts at warmup — so a
-    swapped camera has to be caught before a session starts, not minutes in."""
-    assert profiles.missing_calibration(profile) == []
-
-    profile.cameras.external.serial = "99999999"  # a camera was swapped for another unit
-    assert profiles.missing_calibration(profile) == ["99999999"]
-
-
-def test_render_env_sets_the_contract_variables(profile, tmp_path):
+def test_render_env_sets_the_contract_variables(profile, machine_rig, tmp_path):
     events = tmp_path / "events.jsonl"
-    env = render.render_env(profile, events_file=events, task="do the thing", base={})
+    options = resolve_profile(profile, machine_rig)
+    env = render.render_env(profile, machine_rig, options, events_file=events, task="do the thing", base={})
     assert env["TIPTOP_TASK"] == "do the thing"
     assert env["TIPTOP_EVENTS_FILE"] == str(events)
-    assert env["TIPTOP_STATE_PORT"] == str(options_of(profile).robot.state_port)
-    assert env["TIPTOP_CALIBRATION"] == str(profile.calibration_file())
+    assert env["TIPTOP_STATE_PORT"] == str(options.robot.state_port)
+    # The rig's extrinsics: every profile on this machine reads the one file.
+    assert env["TIPTOP_CALIBRATION"] == str(machine_rig.calibration_file())
     assert env["DC_WORKSPACE"] == profile.name
     # opencv's LAPACK and torch share one libmkl_core; the threaded path corrupts a pivot
     # array and cuRobo dies inside torch.inverse.
     assert env["MKL_NUM_THREADS"] == "1"
 
 
-def test_render_env_only_splits_instruction_when_the_goal_differs(profile, tmp_path):
+def test_render_env_only_splits_instruction_when_the_goal_differs(profile, machine_rig, tmp_path):
     events = tmp_path / "events.jsonl"
-    env = render.render_env(profile, events_file=events, base={})
+    options = resolve_profile(profile, machine_rig)
+    env = render.render_env(profile, machine_rig, options, events_file=events, base={})
     assert "TIPTOP_INSTRUCTION" not in env
 
     profile.task.goal = "a reduced goal the planner can express"
-    env = render.render_env(profile, events_file=events, base={})
+    env = render.render_env(profile, machine_rig, options, events_file=events, base={})
     assert env["TIPTOP_INSTRUCTION"] == profile.task.prompt
     assert env["TIPTOP_TASK"] == profile.task.goal
 
 
-def test_render_tiptop_config_shape(profile):
-    config = render.render_tiptop_config(profile)
+def test_render_tiptop_config_shape(profile, machine_rig):
+    config = render.render_tiptop_config(machine_rig, resolve_profile(profile, machine_rig))
     assert set(config) == {"robot", "cameras", "perception"}
-    assert config["robot"]["type"] == options_of(profile).robot.type
-    assert config["cameras"]["perception"] == profile.cameras.perception
+    assert config["robot"]["type"] == machine_rig.robot.type
+    assert config["robot"]["host"] == machine_rig.robot.host
+    assert config["cameras"]["perception"] == machine_rig.cameras.perception
     assert "depth_smoothing" in config["perception"]
 
 
-def test_no_overrides_file_when_the_profile_sets_nothing(profile, tmp_path):
+def test_no_overrides_file_when_the_profile_sets_nothing(profile, machine_rig, tmp_path):
     """Passing an empty --curobo-overrides is not the same as passing none; stock behaviour
     must stay exactly stock."""
     profile.planner.options["tamp"] = {}
-    assert render.write_tamp_overrides(profile, tmp_path / "o.json") is None
+    options = resolve_profile(profile, machine_rig)
+    assert render.write_tamp_overrides(profile, tmp_path / "o.json", options) is None
 
 
-def test_overrides_json_is_written_when_set(profile, tmp_path):
+def test_overrides_json_is_written_when_set(profile, machine_rig, tmp_path):
     import json
 
     profile.planner.options["tamp"] = {"num_particles": 64, "traj_length_norm": "inf"}
-    path = render.write_tamp_overrides(profile, tmp_path / "o.json")
+    path = render.write_tamp_overrides(profile, tmp_path / "o.json", resolve_profile(profile, machine_rig))
     assert path is not None
     written = json.loads(path.read_text())
     assert written == {"num_particles": 64, "traj_length_norm": "inf"}
+
+
+# --------------------------------------------------------------------------- the layout (version 3)
+
+
+def test_a_profile_is_one_file_and_its_trajectories_are_under_trajectories(profile, isolated_env):
+    data = isolated_env / "data"
+    assert profile.file() == data / "profiles" / "test.yml"
+    assert profile.file().is_file()
+    assert profile.trajectories_dir() == data / "trajectories" / "test"
+    for status in profiles.STATUSES:
+        assert (data / "trajectories" / "test" / status).is_dir()
+    # Nothing in profiles/ but the file: no directory per profile, no calibration of its own.
+    assert sorted(p.name for p in (data / "profiles").iterdir()) == ["test.yml"]
+
+
+def test_the_name_is_the_files_and_is_never_written(profile):
+    text = profile.file().read_text()
+    assert "\nname:" not in f"\n{text}"
+    assert "version: 3" in text
+    # A stale name inside a copied file does not rename the profile.
+    profile.file().write_text("name: somebody-else\n" + text)
+    assert profiles.load("test").name == "test"
+
+
+@pytest.mark.parametrize(
+    "text, found",
+    [
+        ("version: 2\ntask: {prompt: x}\n", "version 2"),
+        ("version: 3\ncameras: {perception: external}\n", "cameras"),
+        ("robot: {host: 10.0.0.5}\n", "robot"),
+    ],
+)
+def test_the_layout_before_version_3_is_refused_with_the_way_out(isolated_env, text, found):
+    root = isolated_env / "data" / "profiles"
+    root.mkdir(parents=True)
+    (root / "old.yml").write_text(text)
+    with pytest.raises(ProfileInvalid) as excinfo:
+        profiles.load("old")
+    message = excinfo.value.message
+    assert found in message
+    assert "rig.yml" in message
+
+
+def test_a_newer_layout_is_refused_as_one(isolated_env):
+    root = isolated_env / "data" / "profiles"
+    root.mkdir(parents=True)
+    (root / "future.yml").write_text("version: 4\n")
+    with pytest.raises(ProfileInvalid, match="newer tandem"):
+        profiles.load("future")
+
+
+def test_recording_fps_is_refused_as_the_setting_nothing_read(isolated_env):
+    with pytest.raises(ValidationError, match="nothing ever read it"):
+        Profile.model_validate({"name": "x", "recording": {"enabled": True, "fps": 15}})
+
+
+def test_list_names_is_the_valid_yml_files_only(profile, isolated_env):
+    root = isolated_env / "data" / "profiles"
+    (root / "second.yml").write_text("version: 3\n")
+    (root / ".hidden.yml").write_text("version: 3\n")
+    (root / "Not A Name.yml").write_text("version: 3\n")
+    (root / "notes.txt").write_text("")
+    (root / "test.yml.bak").write_text("")
+    (root / ".planner-options").mkdir()
+    (root / ".migrated").mkdir()
+    assert profiles.list_names() == ["second", "test"]
+
+
+def test_an_old_layout_profile_directory_is_not_a_profile(isolated_env):
+    root = isolated_env / "data" / "profiles"
+    (root / "legacy").mkdir(parents=True)
+    (root / "legacy" / "profile.yml").write_text("version: 2\n")
+    assert profiles.list_names() == []
+    with pytest.raises(ProfileError, match="not found"):
+        profiles.load("legacy")
+
+
+def test_delete_keeps_the_trajectories_and_purge_removes_them(profile):
+    (profile.status_dir("success") / "20260101-000000").mkdir()
+    profiles.delete("test")
+    assert not profile.file().exists()
+    assert (profile.status_dir("success") / "20260101-000000").is_dir()
+    assert not profiles.exists("test")
+    # Soft-deleted: its data can still be purged, and nothing but it goes.
+    profiles.delete("test", keep_data=False)
+    assert not profile.trajectories_dir().exists()
+    assert profile.trajectories_dir().parent.is_dir()
+    with pytest.raises(ProfileError, match="does not exist"):
+        profiles.delete("test")
+
+
+def test_purge_refuses_anything_but_a_trajectories_directory(profile, tmp_path):
+    with pytest.raises(ProfileError, match="not a profile name"):
+        profiles.delete("..", keep_data=False)
+    # A symlinked trajectories directory is not purged through: its target is somebody else's data.
+    elsewhere = tmp_path / "precious"
+    elsewhere.mkdir()
+    (elsewhere / "keep.txt").write_text("x")
+    import shutil
+
+    shutil.rmtree(profile.trajectories_dir())
+    profile.trajectories_dir().symlink_to(elsewhere, target_is_directory=True)
+    with pytest.raises(ProfileError, match="Refusing to purge"):
+        profiles.delete("test", keep_data=False)
+    assert (elsewhere / "keep.txt").is_file()
+    assert profile.file().is_file(), "a refused purge deletes nothing, the file included"
+
+
+def test_a_previous_planners_options_are_set_aside_in_a_hidden_directory(profile, isolated_env):
+    assert profiles.stash_file("test", "tiptop") == (
+        isolated_env / "data" / "profiles" / ".planner-options" / "test.tiptop.yml"
+    )
+    with pytest.raises(ProfileError):
+        profiles.stash_file("../x", "tiptop")
+
+
+def test_a_relative_path_is_read_beside_the_profiles_file(profile, isolated_env):
+    profile.hitl.cache_path = "cache/proposals.sqlite"
+    assert profiles.resolve_cache_path(profile) == str(
+        (isolated_env / "data" / "profiles" / "cache" / "proposals.sqlite").resolve()
+    )
+    profile.hitl.cache_path = "/abs/proposals.sqlite"
+    assert profiles.resolve_cache_path(profile) == "/abs/proposals.sqlite"
+
+
+def test_a_pinned_profile_keeps_its_data_root(profile, isolated_env, monkeypatch, tmp_path):
+    pinned = profile.pinned()
+    monkeypatch.setenv("TANDEM_DATA_ROOT", str(tmp_path / "elsewhere"))
+    from tandem.core import settings as settings_mod
+
+    settings_mod._cache = None
+    assert pinned.file() == isolated_env / "data" / "profiles" / "test.yml"
+    assert pinned.trajectories_dir() == isolated_env / "data" / "trajectories" / "test"
+    assert profile.file() == tmp_path / "elsewhere" / "profiles" / "test.yml"

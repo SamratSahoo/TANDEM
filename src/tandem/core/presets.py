@@ -2,8 +2,8 @@
 
 A preset is part of a profile, written the way a profile writes it. Its settings are laid over the
 profile being created, and whatever it leaves out stays as the base had it: the template, or a cloned
-profile (``--from``). So a preset can say "collect the way the paper did" without also saying which
-robot and which cameras, which belong to the rig and not to the experiment.
+profile (``--from``). A preset says "collect the way the paper did"; which robot and which cameras is
+the rig's (rig.yml), which no profile states.
 
 Presets ship in two places, split the same way a profile is:
 

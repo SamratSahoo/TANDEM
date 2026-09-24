@@ -201,7 +201,7 @@ def profile_option_keys(profile_name: str | None) -> list[str]:
     if not profiles_exists(profile_name):
         return []
     try:
-        data, _ = profiles.migrate(profiles.read_data(profiles.profiles_root() / str(profile_name) / "profile.yml"))
+        data = profiles.read_data(profiles.path_of(str(profile_name)))
     except (ProfileError, ValueError, OSError):
         return []
     planner = data.get("planner") if isinstance(data.get("planner"), dict) else {}
@@ -316,8 +316,9 @@ def use_planner(
     first profile will be created with.
 
     ``planner.options`` are the old planner's own settings, which the new one would refuse (a planner
-    refuses an option it does not read, rather than ignore it), so they leave profile.yml -- set aside
-    beside it, and restored by a switch back (``profiles.switch_planner``) -- and the result says which.
+    refuses an option it does not read, rather than ignore it), so they leave the profile -- set aside in
+    profiles/.planner-options/, and restored by a switch back (``profiles.switch_planner``) -- and the
+    result says which. A planner's machine settings are the rig's, and a switch leaves them where they are.
     ``options`` are given to the new planner, for one that needs a setting no default can supply.
     Not installing the planner is not a reason to refuse: see the module docstring.
 
@@ -712,7 +713,8 @@ def describe_switch(result: Mapping[str, Any]) -> None:
     """What a switch did to planner.options, said the same way by `planners use` and `tandem init`."""
     if result.get("dropped_options"):
         keys = ", ".join(sorted(map(str, result["dropped_options"])))
-        where = Path(result["saved_to"]).name if result.get("saved_to") else "beside the profile"
+        saved = Path(result["saved_to"]) if result.get("saved_to") else None
+        where = f"{saved.parent.name}/{saved.name}" if saved else "beside the profile"
         theme.warn(
             f"Removed planner.options {keys}",
             f"they were {result['previous']}'s own settings, which {result['planner']} would refuse; kept in "

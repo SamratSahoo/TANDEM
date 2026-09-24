@@ -12,7 +12,10 @@ from tandem.core import paths, secrets
 from tandem.core import settings as settings_mod
 from tandem.core.errors import TandemError
 
-app = typer.Typer(no_args_is_help=True, help="Global settings and credentials.")
+app = typer.Typer(
+    no_args_is_help=True,
+    help="Global settings and credentials. This machine's robot and cameras are `tandem rig`.",
+)
 
 
 @app.command("list", help="Show every setting and where credentials come from.")
@@ -30,6 +33,7 @@ def list_settings(
                 "runtime_dir": str(cfg.resolved_runtime_dir()),
                 "config_file": str(paths.config_file()),
                 "credentials_file": str(paths.credentials_file()),
+                "rig_file": str(paths.rig_file()),
             },
             "credentials": {
                 "gemini_api_key": {
@@ -55,6 +59,8 @@ def list_settings(
             ("data root", cfg.resolved_data_root()),
             ("runtime", cfg.resolved_runtime_dir()),
             ("profiles", cfg.profiles_root()),
+            ("trajectories", cfg.trajectories_root()),
+            ("rig", f"{paths.rig_file()}  (`tandem rig` changes it)"),
         ]
     )
 

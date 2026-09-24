@@ -1,18 +1,17 @@
 # ─────────────────────────────────────────────────────────────────────────────────────────
 #  tandem profile
 #
-#  A profile is one collection setup — the task, the cameras, the planner and its settings —
-#  together with every trajectory collected under it. Trajectories live beside this file in
-#  trajectories/{eval,success,failure}/<timestamp>/.
+#  A profile is a task — what to do, how to plan it, and the planner's settings for it —
+#  and every trajectory collected for it, in trajectories/<name>/{eval,success,failure}/.
+#  This machine's robot, cameras and calibration are not here: they are the rig
+#  (`tandem rig show`), which every profile shares.
 #
 #  Edit with `tandem profile edit <name>`; it re-validates on save and refuses to write a
 #  file that would fail at session start.
 # ─────────────────────────────────────────────────────────────────────────────────────────
-# 2: the planner's own settings are under planner.options. A version-1 profile (robot:,
-# perception: and tamp: at the top level) still loads, and `tandem profile migrate` rewrites it.
-version: 2
-name: default
-description: Franka FR3 + Robotiq 2F-85
+# 3: one file per profile, the task's settings only.
+version: 3
+description: ''
 
 task:
   # The language label stored with every episode — what a policy trained on this data reads.
@@ -23,37 +22,6 @@ task:
   goal: null
   target_episodes: 20
 
-# The rig's cameras, by role. Every leg is recorded from them — the planner's and yours, when
-# you teleoperate — so they belong to the profile, not to any one planner.
-cameras:
-  # Which camera perception reads.
-  #   external  a static third-person camera. Its pose comes straight from calibration, so
-  #             the arm stays at q_home instead of driving into the shot.
-  #   hand      the wrist camera. Its pose is only known through the arm, so the arm first
-  #             drives to q_capture and the pose is recomputed by forward kinematics.
-  # Either way both cameras are opened and recorded.
-  perception: external
-  hand:
-    serial: '14846828'
-    type: zed
-    resolution: HD720
-    # 15, not 30 — three ZEDs at HD720@30 exceed the USB bandwidth budget and fail to open.
-    # The export resamples to 15 Hz anyway, so nothing is lost.
-    fps: 15
-  external:
-    serial: '32439448'
-    type: zed
-    resolution: HD720
-    fps: 15
-  # A second exterior camera, recorded as DROID exterior_2. Leave it out for a deliberate
-  # two-camera rig: when it IS listed but fails to open, collection aborts before any
-  # rollout rather than quietly record an episode with a camera missing.
-  # external_2:
-  #   serial: '31425515'
-  #   type: zed
-  #   resolution: HD720
-  #   fps: 15
-
 # ─────────────────────────────────────────────────────────────────────────────────────────
 #  planner  —  which task and motion planner tandem calls, and its own settings
 #
@@ -63,48 +31,15 @@ cameras:
 #  fallback, because a dataset collected against a different planner from the one the config
 #  named is a dataset nobody can interpret afterwards. `tandem planners list` shows them all.
 #
-#  `options` is the planner's own block, and the planner checks it when the profile loads:
-#  a key it does not read is refused, not ignored. `tandem planners info <name>` lists what
-#  a planner reads; `tandem profile show <name> --planner` shows what it will receive.
+#  `options` is the planner's own settings for this task, and the planner checks them when
+#  the profile loads: a key it does not read is refused, not ignored. What it needs of the
+#  machine (the robot's ports, a grasp server) is the rig's. `tandem planners info <name>`
+#  lists both; `tandem profile show <name> --planner` shows what it will receive.
 #  The options below are TiPToP's. Switching planner (`tandem planners use`) replaces them.
 # ─────────────────────────────────────────────────────────────────────────────────────────
 planner:
   backend: tiptop
   options:
-    robot:
-      type: fr3_robotiq           # fr3_robotiq | panda_robotiq | panda | ur5
-      dof: 7
-      host: 172.16.0.2            # the NUC running the bamboo-polymetis shim
-      port: 5555                  # control
-      gripper_port: 5559
-      # The shim's --state-port. Encoders are read here while the control thread is parked
-      # in a blocking move; without it, capture aborts rather than falling back to plan
-      # positions.
-      state_port: 5557
-      # BE CAUTIOUS. 0.2 is 20% speed. Raise it only once you trust the setup.
-      time_dilation_factor: 0.2
-      q_home: [0.0, -0.628, 0.0, -2.513, 0.0, 1.885, 0.0]
-      q_capture: [-0.034, 0.09, 0.08, -1.319, -0.003, 1.253, 0.03]
-
-    perception:
-      gemini:
-        model: gemini-robotics-er-2-preview
-        temperature: null
-      m2t2:
-        url: http://localhost:8123
-        apply_bounds: true
-      sam_mode: local             # local | remote (then set sam_url: http://<host>:8000)
-      # Frames grabbed back-to-back at the capture pose and per-pixel median-fused to suppress
-      # depth noise. 1 disables smoothing.
-      depth_smoothing_frames: 5
-      # Padding on the robot's collision spheres before they are projected out of a
-      # third-person point cloud. Raise it if a rim of arm survives in the cloud.
-      robot_mask_margin_m: 0.02
-      depth_trunc_m: 5.0
-      voxel_downsample_size: 0.0075
-      contact_threshold_m: 0.01
-      mask_erosion_pixels: 3
-
     # ── TAMP settings ────────────────────────────────────────────────────────────────────
     # Passed straight through to cuTAMP and cuRobo. The key names are tiptop's own, so
     # anything documented upstream works here verbatim and an existing cfg/tamp/*.yml can be
@@ -246,10 +181,9 @@ hitl:
   # grounding or verification.
   cache_path: null
 
-# recording: whether camera video is captured during execution, and at what rate.
+# recording: whether camera video is captured during execution (at each camera's rate, the rig's).
 recording:
   enabled: true
-  fps: 15
 
 # Where `tandem export lerobot` pushes. Leave hf_repo blank until you need it.
 export:

@@ -132,7 +132,7 @@ def init(
     # a preset's settings, the rig's cameras), and rebuilding it from the template to repair a runtime
     # would lose all of it without a word. It is only pointed at the planner init was asked to set up.
     if profiles.exists(profile_name):
-        theme.ok(f"Profile {profile_name!r} already exists", str(profiles.profiles_root() / profile_name))
+        theme.ok(f"Profile {profile_name!r} already exists", str(profiles.path_of(profile_name)))
         if planner is not None:
             _switch_planner(profile_name, planner)
         if preset:
@@ -359,10 +359,7 @@ def _create_profile(
     profile = profiles.load_file(resources.path("profile_template.yml"), name=name)
     origin = "from the built-in template"
     if viz_only:
-        # On a laptop a profile is just a folder of trajectories collected elsewhere. Keeping
-        # the template's cameras would mean warning about extrinsics for hardware that is not
-        # here and never will be.
-        profile.cameras = profiles.CamerasSpec()
+        # On a laptop a profile is just a folder of trajectories collected elsewhere.
         profile.description = profile.description or "trajectories collected elsewhere"
 
     typed = None
@@ -441,6 +438,7 @@ def _summary(*, viz_only: bool, profile_name: str) -> None:
             ("profile", profile_name),
             ("planner", planner),
             ("data root", cfg.resolved_data_root()),
+            ("rig", paths.rig_file() if not viz_only else "none (visualization only)"),
             ("runtime", "not installed (visualization only)" if viz_only else where),
             ("config", paths.config_file()),
         ]

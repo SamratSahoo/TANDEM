@@ -1,0 +1,15 @@
+# ─────────────────────────────────────────────────────────────────────────────────────────
+#  This machine's rig: the robot, the cameras and their calibration. Every profile shares it.
+#  `tandem init` writes it; `tandem rig set KEY VALUE` or `tandem rig edit` change it.
+# ─────────────────────────────────────────────────────────────────────────────────────────
+version: 1
+robot:
+  type: fr3_robotiq      # the arm, as the planner names it (TiPToP: fr3_robotiq, panda_robotiq, panda, ur5)
+  host: 172.16.0.2       # the robot computer: the NUC
+cameras:
+  perception: external   # which camera perception reads: external (the arm stays home) or hand
+  # hand:       {serial: 'SERIAL'}    # the wrist camera (type zed, HD720, 15 fps unless set)
+  # external:   {serial: 'SERIAL'}    # a third-person camera
+  # external_2: {serial: 'SERIAL'}    # an optional second one (recorded as DROID exterior_2)
+calibration: calibration.json   # extrinsics by serial, beside this file
+planners: {}             # each planner's machine settings; `tandem planners info NAME` lists them

@@ -2,12 +2,13 @@
 
 Everything TiPToP-specific about STARTING a session lives here, and nowhere in tandem's core: which
 runtime it runs in, the ``TIPTOP_*`` environment its sidecar reads, the ``tiptop.yml`` and cuRobo
-cost overrides rendered from the profile, and the checks that catch a broken asset before a
-twenty-second warm-up does. The session only hands over a ``BackendContext`` and gets a backend back.
+cost overrides rendered from the rig and the profile, and the checks that catch a broken asset before
+a twenty-second warm-up does. The session only hands over a ``BackendContext`` and gets a backend back.
 
-So is everything else tandem asks of TiPToP by name: its ``planner.options`` checked and shown
-(``options.py``, ``doctor.py``), its rows in `tandem doctor`, a leg replayed in tiptop's own viewer,
-and the presets it ships (``presets/``).
+So is everything else tandem asks of TiPToP by name: its settings checked and shown -- the task's
+``planner.options`` (``OPTIONS``: tamp) and this machine's ``planners.tiptop`` in rig.yml
+(``RIG_OPTIONS``: robot, perception; ``options.py``, ``doctor.py``) -- its rows in `tandem doctor`, a
+leg replayed in tiptop's own viewer, and the presets it ships (``presets/``).
 
 This module is imported to list planners and to read TiPToP's capabilities, both of which happen on a
 laptop. So it imports the declarations -- capabilities, runtime recipe -- and the protocol types and
@@ -77,7 +78,7 @@ INFO = PlannerInfo(
         # the schema accepts and no other.
         arms.requirement(),
         "2-3 ZED cameras and the ZED SDK",
-        "an M2T2 grasp server",
+        "an M2T2 grasp server (rig: planners.tiptop.perception.m2t2.url)",
         # tiptop estimates the ZEDs' depth with it; render.py always points tiptop at this address.
         "a FoundationStereo depth server at http://localhost:1234",
         "a Gemini API key",
@@ -90,12 +91,15 @@ class TiptopFactory:
     """The registry's handle on TiPToP. Stateless: one instance serves every session."""
 
     info = INFO
-    #: The planner.options TiPToP reads, as a catalog lists them. Their schema is ``options.py``.
+    #: What a profile's planner.options may set for TiPToP: the task's. Their schema is ``options.py``.
     OPTIONS = {
-        "robot": "the arm: type, its host and ports (the bamboo-polymetis shim's, or a UR5's), speed, home "
-        "and capture poses",
-        "perception": "the Gemini detector, the M2T2 grasp server, SAM-2 and the depth pipeline",
         "tamp": "cuTAMP / cuRobo overrides, by tiptop's own key names; unknown keys are refused",
+    }
+    #: What rig.yml's planners.tiptop may set: this machine's, which every profile shares.
+    RIG_OPTIONS = {
+        "robot": "the arm's shim ports, speed, joint count, home and capture poses (its address and type are "
+        "the rig's robot.host and robot.type)",
+        "perception": "the Gemini detector, the M2T2 grasp server, SAM-2 and the depth pipeline",
     }
 
     def capabilities(self) -> Capabilities:
@@ -105,14 +109,23 @@ class TiptopFactory:
         return TiptopRuntime(_settings(settings).resolved_runtime_dir())
 
     def validate_options(self, options: Mapping[str, Any] | None) -> dict[str, Any]:
-        """``planner.options`` checked against TiPToP's schema, with every default filled in.
+        """A profile's ``planner.options`` checked against TiPToP's task schema, with every default filled in.
 
-        Raises the pydantic ValidationError itself, whose locations (``tamp``, ``robot.q_home``) the
-        profile loader reads as paths under ``planner.options``.
+        Raises the pydantic ValidationError itself, whose locations (``tamp``) the profile loader reads as
+        paths under ``planner.options``.
         """
-        from tandem.planners.tiptop.options import parse
+        from tandem.planners.tiptop.options import TiptopTaskOptions
 
-        return parse(options).to_options()
+        return TiptopTaskOptions.model_validate(dict(options or {})).to_options()
+
+    def validate_rig_options(self, options: Mapping[str, Any] | None) -> dict[str, Any]:
+        """rig.yml's ``planners.tiptop`` checked against TiPToP's machine schema, with every default filled in.
+
+        Raises the pydantic ValidationError itself, located (``robot.q_home``) under ``planners.tiptop``.
+        """
+        from tandem.planners.tiptop.options import TiptopRigOptions
+
+        return TiptopRigOptions.model_validate(dict(options or {})).to_options()
 
     def describe_options(self, profile: Any, *, settings: Any = None):
         from tandem.planners.tiptop import doctor
@@ -169,11 +182,16 @@ class TiptopFactory:
         What ``Session._build_backend`` and part of ``Session.start`` used to do inline, moved here
         unchanged so the session no longer knows any of it is TiPToP's.
         """
+        from tandem.core import rig as rig_mod
         from tandem.core import secrets
         from tandem.planners.tiptop import render
         from tandem.planners.tiptop.backend import TiptopBackend
 
-        options = _parse(ctx.options)
+        # The session hands over the rig and its planners.tiptop block, checked; a context built by hand
+        # without a rig gets this machine's.
+        rig = ctx.rig if ctx.rig is not None else rig_mod.load()
+        rig_options = ctx.rig_options if ctx.rig is not None else rig_mod.planner_options(rig, "tiptop")
+        options = _resolve(rig, rig_options, ctx.options)
 
         # TiPToP's perception is a Gemini call every rollout: the detector turns the instruction into
         # objects and goal atoms. Asked for here, by the planner that needs it, rather than by the
@@ -194,28 +212,30 @@ class TiptopFactory:
         # cost loads lazily, a blending key that does nothing. Two are fatal, because tiptop raises
         # for them at warm-up, the first with the arm already moving to its capture pose: missing
         # extrinsics, and a camera tiptop opens that the profile does not configure.
-        problems = render.check_assets(profile, options, runtime_dir=runtime.root)
+        problems = render.check_assets(profile, rig, options, runtime_dir=runtime.root)
         cameras = [p for p in problems if p.startswith(render.MISSING_CAMERA)]
         if cameras:
             raise TandemError(
                 "\n".join(cameras),
-                hint="Add the missing camera to the profile (`tandem profile edit`). TiPToP needs both a hand "
-                "and an external camera, even though perception reads only one of them.",
+                hint="Add the missing camera to this machine's rig (`tandem rig set cameras.ROLE.serial SERIAL`). "
+                "TiPToP needs both a hand and an external camera, even though perception reads only one of them.",
             )
         fatal = [p for p in problems if p.startswith(render.MISSING_EXTRINSICS)]
         if fatal:
             raise TandemError(
                 "\n".join(fatal),
-                hint="Extrinsics are keyed by camera serial; add them before collecting.",
+                hint="Extrinsics are keyed by camera serial; add them before collecting "
+                "(`tandem rig path --calibration` is the file).",
             )
         for problem in problems:
             ctx.log(f"warning: {problem}")
 
         # tiptop.yml (per profile, where $TIPTOP_CONFIG points) and the cuRobo cost overrides (in the
         # session's own directory).
-        files = render.prepare_session_files(profile, ctx.session_dir, options, runtime_dir=runtime.root)
+        files = render.prepare_session_files(profile, rig, ctx.session_dir, options, runtime_dir=runtime.root)
         env = render.render_env(
             profile,
+            rig,
             options,
             events_file=ctx.events_file if ctx.events_file is not None else files["events_file"],
             task=ctx.task or None,
@@ -232,23 +252,30 @@ class TiptopFactory:
         )
 
 
-def _parse(options: Mapping[str, Any] | None):
-    """TiPToP's options, or a TandemError saying which one is wrong -- for a context built by hand."""
+def _resolve(rig: Any, rig_options: Mapping[str, Any] | None, options: Mapping[str, Any] | None):
+    """TiPToP's whole configuration, or a TandemError saying which setting is wrong -- for a context built by
+    hand, whose options nothing has checked yet."""
     from pydantic import ValidationError
 
-    from tandem.planners.tiptop.options import parse
+    from tandem.planners.tiptop.options import TiptopRigOptions, TiptopTaskOptions, resolve
 
-    try:
-        return parse(options)
-    except ValidationError as exc:
-        lines = [
-            f"  planner.options.{'.'.join(map(str, err['loc']))}: {str(err['msg']).removeprefix('Value error, ')}"
-            for err in exc.errors()
-        ]
-        raise TandemError(
-            "TiPToP's planner.options are not valid:\n" + "\n".join(lines),
-            hint="`tandem planners info tiptop` lists what TiPToP reads.",
-        ) from None
+    for model, block, where in (
+        (TiptopRigOptions, rig_options, "planners.tiptop"),
+        (TiptopTaskOptions, options, "planner.options"),
+    ):
+        try:
+            model.model_validate(dict(block or {}))
+        except ValidationError as exc:
+            lines = [
+                f"  {'.'.join((where, *map(str, err['loc'])))}: {str(err['msg']).removeprefix('Value error, ')}"
+                for err in exc.errors()
+            ]
+            owner = "this machine's rig.yml" if where == "planners.tiptop" else "the profile"
+            raise TandemError(
+                f"TiPToP's settings in {owner} are not valid:\n" + "\n".join(lines),
+                hint="`tandem planners info tiptop` lists what TiPToP reads, and where.",
+            ) from None
+    return resolve(rig, rig_options, options)
 
 
 def _settings(settings: Any):

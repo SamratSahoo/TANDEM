@@ -7,8 +7,8 @@
 #  TAMP-generated motions with human teleoperation, we use example pretraining trajectories
 #  to guide autonomous motion generation with DATAFARM."
 #
-#  It sets no robot, perception or cameras. Those belong to the rig, not to the experiment:
-#  combine it with --from to keep a rig's.
+#  It sets no robot, perception or cameras. Those belong to the rig (rig.yml), not to the
+#  experiment; combine it with --from to keep another profile's task.
 #
 #  [v3] marks a value from the `tamp_overrides:` of hitl-tamp-vla's five
 #  data-collection/cfg/tamp/*_v3.yml (commit 41cf4ac). Every key here is set, and set the

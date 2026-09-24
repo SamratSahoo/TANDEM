@@ -1,21 +1,29 @@
-"""TiPToP's ``planner.options``: the arm it drives, how it perceives, and its solver overrides.
+"""TiPToP's settings: the arm it drives and how it perceives (this machine's), and its solver overrides (a task's).
 
-    planner:
-      backend: tiptop
-      options:
-        robot:       the arm (arms.py) and how it is reached: the bamboo-polymetis shim, or a UR5 directly
-        perception:  Gemini detection, the M2T2 grasp server, SAM-2 and the depth pipeline
-        tamp:        cuTAMP / cuRobo overrides, by tiptop's own key names (tamp_keys.py)
+    rig.yml                                 this machine's, every profile shares them (RIG_OPTIONS)
+      robot: {type, host}                   tandem's own: the arm, and the NUC it is reached through
+      planners:
+        tiptop:
+          robot:       the shim's ports, the speed, the joint count, the home and capture poses
+          perception:  the Gemini detector, the M2T2 grasp server, SAM-2, the depth pipeline
 
-These three were top-level sections of every profile while TiPToP was the only planner. Nothing in
-tandem reads them but TiPToP -- the teleop executor, the merge and the export do not -- so they are
-TiPToP's to define and to validate, and a planner that is not TiPToP never sees them. The profile's
-``cameras`` block stays tandem's: the teleop executor records from those cameras, and the dataset's
-camera layout (hand, external, external_2) is tandem's recording format, not the planner's.
+    <profile>.yml                           the task's (OPTIONS)
+      planner:
+        backend: tiptop
+        options:
+          tamp:        cuTAMP / cuRobo overrides, by tiptop's own key names (tamp_keys.py)
 
-Validated when a profile naming TiPToP loads (``FACTORY.validate_options``), with the same loud
-errors these sections always had -- an unknown TAMP key names the nearest real one -- and again when
-the factory builds a session's backend from them.
+All three were one ``planner.options`` block of every profile, which put a robot's address and a grasp
+server's URL into every task and left the other profiles stale whenever one was edited. The robot and
+perception settings describe the machine, so they are the rig's; the TAMP overrides are what a task was
+collected with, so they are the profile's. A task that needs its own perception numbers still has
+them: the tamp PERCEPTION_KEYS (voxel size, contact threshold, grasp threshold, M2T2 passes) override
+the rig's for that task.
+
+``resolve`` puts the two halves back together, with the rig's robot type and host, into the one
+``TiptopOptions`` everything that renders tiptop's config reads. Each half is validated where it is
+stored -- the task's when a profile naming TiPToP loads (``FACTORY.validate_options``), the machine's
+when rig.yml is read (``validate_rig_options``) -- with the same loud errors these sections always had.
 """
 
 from __future__ import annotations
@@ -44,12 +52,12 @@ _ROBOT_ALIASES = {
 }
 
 
-class RobotSpec(BaseModel):
+class _RobotSettings(BaseModel):
+    """The arm's settings that are TiPToP's own: how its shim is reached, how fast it moves, where it parks."""
+
     model_config = {"extra": "forbid"}
 
-    type: str = "fr3_robotiq"
     dof: int = 7
-    host: str = "172.16.0.2"
     port: int = 5555
     gripper_port: int = 5559
     # The bamboo shim's --state-port. JointSampler reads encoders here while the control
@@ -60,16 +68,6 @@ class RobotSpec(BaseModel):
     q_capture: list[float] = Field(
         default_factory=lambda: [-0.034, 0.090, 0.080, -1.319, -0.003, 1.253, 0.030]
     )
-
-    @field_validator("type")
-    @classmethod
-    def _known_robot(cls, v: str) -> str:
-        if v not in ROBOT_TYPES:
-            known = " | ".join(sorted(ROBOT_TYPES))
-            meant = _ROBOT_ALIASES.get(v) or next(iter(difflib.get_close_matches(v, sorted(ROBOT_TYPES), n=1)), "")
-            hint = f"; did you mean {meant}?" if meant else ""
-            raise ValueError(f"unsupported robot type {v!r} ({known}){hint}")
-        return v
 
     @field_validator("time_dilation_factor")
     @classmethod
@@ -85,6 +83,40 @@ class RobotSpec(BaseModel):
             if len(vals) != self.dof:
                 raise ValueError(f"{field} has {len(vals)} values but robot.dof is {self.dof}")
         return self
+
+
+class RobotSpec(_RobotSettings):
+    """rig.yml's ``planners.tiptop.robot``. The arm's type and address are not here: they are the rig's own
+    ``robot.type`` and ``robot.host``, which every planner reads."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _address_is_the_rigs(cls, data: Any) -> Any:
+        if isinstance(data, Mapping):
+            for key in ("host", "type"):
+                if key in data:
+                    raise ValueError(
+                        f"robot.{key} is the rig's own robot.{key} (at the top of rig.yml), shared by every "
+                        f"planner: `tandem rig set robot.{key} VALUE`"
+                    )
+        return data
+
+
+def check_robot_type(v: str) -> str:
+    """``v`` if TiPToP drives that arm; a ValueError naming the arms it does, and the one meant, if not."""
+    if v not in ROBOT_TYPES:
+        known = " | ".join(sorted(ROBOT_TYPES))
+        meant = _ROBOT_ALIASES.get(v) or next(iter(difflib.get_close_matches(v, sorted(ROBOT_TYPES), n=1)), "")
+        hint = f"; did you mean {meant}?" if meant else ""
+        raise ValueError(f"unsupported robot type {v!r} ({known}){hint}")
+    return v
+
+
+class ResolvedRobot(_RobotSettings):
+    """The arm as tiptop's config states it: TiPToP's robot settings, with the rig's type and address."""
+
+    type: str = "fr3_robotiq"
+    host: str = "172.16.0.2"
 
 
 # --------------------------------------------------------------------------- perception
@@ -179,20 +211,53 @@ class PerceptionSpec(BaseModel):
         return self
 
 
-# --------------------------------------------------------------------------- the whole block
+# --------------------------------------------------------------------------- the two halves, and the whole
 
 
-class TiptopOptions(BaseModel):
-    """Everything TiPToP is configured with beyond the profile's task and cameras."""
+class TiptopRigOptions(BaseModel):
+    """rig.yml's ``planners.tiptop``: what TiPToP needs of this machine."""
 
     model_config = {"extra": "forbid"}
 
     robot: RobotSpec = Field(default_factory=RobotSpec)
     perception: PerceptionSpec = Field(default_factory=PerceptionSpec)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _not_the_tasks(cls, data: Any) -> Any:
+        if isinstance(data, Mapping) and "tamp" in data:
+            raise ValueError(
+                "tamp is a task setting, a profile's planner.options.tamp, not this machine's: "
+                "`tandem profile edit NAME`"
+            )
+        return data
+
+    def to_options(self) -> dict[str, Any]:
+        """As rig.yml stores it: plain containers, unset optionals left out so the file stays readable."""
+        return self.model_dump(mode="python", exclude_none=True)
+
+
+class TiptopTaskOptions(BaseModel):
+    """A profile's ``planner.options`` for TiPToP: what a task is collected with."""
+
+    model_config = {"extra": "forbid"}
+
     # Flat, using tiptop's own key names -- see tamp_keys.py for why. Deliberately NOT where phase
     # planning is configured: that is the profile's `hitl:` block, tandem's own, because it changes
     # what a dataset CONTAINS rather than how the arm moves.
     tamp: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _not_the_machines(cls, data: Any) -> Any:
+        if isinstance(data, Mapping):
+            for key in ("robot", "perception"):
+                if key in data:
+                    raise ValueError(
+                        f"{key} is a machine setting, rig.yml's planners.tiptop.{key}, which every profile "
+                        f"shares: `tandem rig set planners.tiptop.{key}.KEY VALUE`"
+                    )
+        return data
 
     @field_validator("tamp", mode="before")
     @classmethod
@@ -204,16 +269,68 @@ class TiptopOptions(BaseModel):
         return self.model_dump(mode="python", exclude_none=True)
 
 
-def parse(options: Mapping[str, Any] | None) -> TiptopOptions:
-    """``planner.options`` as TiPToP reads them. A pydantic ``ValidationError`` names what is wrong."""
-    if isinstance(options, TiptopOptions):
-        return options
-    return TiptopOptions.model_validate(dict(options or {}))
+class TiptopOptions(BaseModel):
+    """Everything TiPToP is configured with, both halves together: what tiptop.yml and the overrides are
+    rendered from. Built by ``resolve``, never stored."""
+
+    model_config = {"extra": "forbid"}
+
+    robot: ResolvedRobot = Field(default_factory=ResolvedRobot)
+    perception: PerceptionSpec = Field(default_factory=PerceptionSpec)
+    tamp: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("tamp", mode="before")
+    @classmethod
+    def _valid_tamp(cls, v: Any) -> dict:
+        return validate_tamp(v)
 
 
-def options_of(profile: Any) -> TiptopOptions:
-    """The options of a profile that plans with TiPToP."""
-    return parse(profile.planner.options)
+def resolve(
+    rig: Any,
+    rig_options: Mapping[str, Any] | None = None,
+    task_options: Mapping[str, Any] | None = None,
+    *,
+    check_type: bool = True,
+) -> TiptopOptions:
+    """TiPToP's whole configuration: the rig's arm and address, its ``planners.tiptop`` block, a task's tamp.
+
+    A pydantic ``ValidationError`` names a bad setting in either block. An arm TiPToP does not drive is a
+    ``TandemError`` naming rig.yml's ``robot.type``, which is where it is fixed; ``check_type=False`` lets
+    doctor say so in a row of its own and still check everything else.
+    """
+    from tandem.core.errors import TandemError
+
+    machine = TiptopRigOptions.model_validate(dict(rig_options or {}))
+    task = TiptopTaskOptions.model_validate(dict(task_options or {}))
+    robot_type = rig.robot.type
+    if check_type:
+        try:
+            check_robot_type(robot_type)
+        except ValueError as exc:
+            raise TandemError(
+                f"rig.yml's robot.type: {exc}",
+                hint="`tandem rig set robot.type fr3_robotiq` (or another arm TiPToP drives).",
+            ) from None
+    return TiptopOptions.model_validate(
+        {
+            "robot": {**machine.robot.model_dump(mode="python"), "type": robot_type, "host": rig.robot.host},
+            "perception": machine.perception.model_dump(mode="python"),
+            "tamp": task.tamp,
+        }
+    )
+
+
+def resolve_profile(profile: Any, rig: Any = None, *, check_type: bool = True) -> TiptopOptions:
+    """TiPToP's configuration for a profile that plans with it, on this machine's rig (loaded when not given)."""
+    from tandem.core import rig as rig_mod
+
+    rig = rig if rig is not None else rig_mod.load()
+    return resolve(
+        rig,
+        rig_mod.planner_options(rig, "tiptop"),
+        getattr(getattr(profile, "planner", None), "options", None),
+        check_type=check_type,
+    )
 
 
 # --------------------------------------------------------------------------- tamp validation

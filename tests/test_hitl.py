@@ -109,7 +109,8 @@ def test_a_relative_cache_path_reads_the_same_from_every_command(profile):
 
     resolved = profiles_mod.resolve_cache_path(profile)
     assert Path(resolved).is_absolute()
-    assert Path(resolved).parent.parent == profile.dir()
+    # Beside the profile's file, in profiles/.
+    assert Path(resolved).parent.parent == profile.file().parent
     assert profile.hitl.to_planning_config(cache_path=resolved).cache_path == resolved
     assert profiles_mod.resolve_cache_path(Profile(name="none")) is None
 

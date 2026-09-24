@@ -1,16 +1,21 @@
-"""Profile and TiPToP's options → the three things a tiptop subprocess actually consumes.
+"""The rig, a profile and TiPToP's options → the three things a tiptop subprocess actually consumes.
 
-    render_tiptop_config(profile)   -> the YAML tiptop_cfg() loads   ($TIPTOP_CONFIG)
-    render_tamp_overrides(profile)  -> the JSON --curobo-overrides reads
-    render_env(profile, ...)        -> the environment the child runs in
+    render_tiptop_config(rig, options)            -> the YAML tiptop_cfg() loads   ($TIPTOP_CONFIG)
+    render_tamp_overrides(profile, options)       -> the JSON --curobo-overrides reads
+    render_env(profile, rig, options, ...)        -> the environment the child runs in
 
-Keeping this in one small, unit-testable module is deliberate: it is the seam where a
-profile stops being tandem's concern and becomes tiptop's, and it is where "did my override
-actually apply?" is decided.
+Keeping this in one small, unit-testable module is deliberate: it is the seam where tandem's settings
+stop being tandem's concern and become tiptop's, and it is where "did my override actually apply?" is
+decided.
 
-Every function takes the profile -- for the task, the cameras and the calibration, which are
-tandem's -- and ``options``, TiPToP's own settings (``options.TiptopOptions``). Left out, they are
-the profile's ``planner.options``; the factory passes the ones the session handed it.
+The rig is this machine's (``tandem.core.rig``): the arm's type and address, the cameras and their
+calibration. The profile is the task: its prompt, and where a relative path in it is read from.
+``options`` is TiPToP's whole configuration, both halves resolved (``options.resolve``): the rig's
+``planners.tiptop`` and the profile's tamp overrides.
+
+The extrinsics file tiptop reads ($TIPTOP_CALIBRATION) is the rig's ``calibration.json``, beside
+rig.yml. Patch 0001's prose still says a profile owns its extrinsics; it is left as it is, because the
+runtime records every patch's digest and an edit would rebuild every installed tree for a comment.
 """
 
 from __future__ import annotations
@@ -24,10 +29,11 @@ from typing import Any
 from ruamel.yaml import YAML
 
 from tandem.core import paths, profiles, secrets
-from tandem.core.errors import ProfileError
+from tandem.core.errors import TandemError
 from tandem.core.profiles import Profile
+from tandem.core.rig import Rig
 from tandem.planners.tiptop import tamp_keys
-from tandem.planners.tiptop.options import DETECTOR_MODEL, TiptopOptions, options_of, parse
+from tandem.planners.tiptop.options import DETECTOR_MODEL, TiptopOptions
 
 
 def _new_yaml() -> YAML:
@@ -43,7 +49,7 @@ def _new_yaml() -> YAML:
 
 
 # How check_assets starts the two problems that stop a session before it starts, rather than warn:
-# a camera with no extrinsics, and a camera the pinned tiptop opens that the profile does not have.
+# a camera with no extrinsics, and a camera the pinned tiptop opens that the rig does not have.
 # The factory refuses on either; doctor shows each as a FAIL row of its own.
 MISSING_EXTRINSICS = "no camera extrinsics"
 MISSING_CAMERA = "no cameras."
@@ -52,24 +58,24 @@ MISSING_CAMERA = "no cameras."
 # --------------------------------------------------------------------------- tiptop.yml
 
 
-def _options(profile: Profile, options: Any) -> TiptopOptions:
-    return options_of(profile) if options is None else parse(options)
+def _options(options: Any) -> TiptopOptions:
+    return options if isinstance(options, TiptopOptions) else TiptopOptions.model_validate(dict(options or {}))
 
 
-def render_tiptop_config(profile: Profile, options: Any = None) -> dict:
+def render_tiptop_config(rig: Rig, options: Any) -> dict:
     """The dict tiptop's ``tiptop_cfg()`` expects (robot / cameras / perception).
 
     The perception knobs a ``tamp:`` block may set (``tamp_keys.PERCEPTION_KEYS``: M2T2's grasp
     threshold and pass count, the voxel size, the contact threshold) are written where tiptop reads
     them -- ``perception.m2t2.num_runs`` and ``perception.m2t2.grasp_threshold`` for the M2T2 pair
-    (perception_wrapper.predict_depth_and_grasps) -- overriding the profile's ``perception:`` value
-    where both are set, as tiptop's own override does. Unset, they are left out, so tiptop's own
-    defaults (5 passes, 0.035) apply rather than a copy of them that could go stale.
+    (perception_wrapper.predict_depth_and_grasps) -- overriding the rig's ``perception:`` value where
+    both are set, as tiptop's own override does. A task's number wins over the machine's. Unset, they
+    are left out, so tiptop's own defaults (5 passes, 0.035) apply rather than a copy of them that could
+    go stale.
     """
-    p = profile
-    o = _options(profile, options)
-    cameras: dict[str, Any] = {"perception": p.cameras.perception}
-    for key, cam in p.cameras.configured().items():
+    o = _options(options)
+    cameras: dict[str, Any] = {"perception": rig.cameras.perception}
+    for key, cam in rig.cameras.configured().items():
         cameras[key] = {
             "serial": cam.serial,
             "type": cam.type,
@@ -92,7 +98,7 @@ def render_tiptop_config(profile: Profile, options: Any = None) -> dict:
         "perception": {
             # Used: tiptop estimates a ZED's depth by sending its stereo pair to FoundationStereo
             # (perception/cameras get_depth_estimator -> zed_infer_depth_async), and the sidecar passes
-            # that estimator to run_perception. Not a profile setting, so the server has to be here.
+            # that estimator to run_perception. Not a setting, so the server has to be here.
             "foundation_stereo": {"url": "http://localhost:1234"},
             "m2t2": {
                 "url": o.perception.m2t2.url,
@@ -121,54 +127,62 @@ def render_tiptop_config(profile: Profile, options: Any = None) -> dict:
     return rendered
 
 
-def write_tiptop_config(profile: Profile, dest: Path, options: Any = None) -> Path:
+def write_tiptop_config(rig: Rig, dest: Path, options: Any) -> Path:
     # Rendered in full before the file is opened, so a render or a dump that raises leaves the last
     # good config in place rather than a truncated one.
     buf = io.StringIO()
-    _new_yaml().dump(render_tiptop_config(profile, options), buf)
+    _new_yaml().dump(render_tiptop_config(rig, options), buf)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text("# Generated by tandem from the profile — edits here are overwritten.\n" + buf.getvalue())
+    dest.write_text(
+        "# Generated by tandem from this machine's rig and the profile — edits here are overwritten.\n"
+        + buf.getvalue()
+    )
     return dest
 
 
 # --------------------------------------------------------------------------- overrides
 
 
-def render_tamp_overrides(profile: Profile, options: Any = None, *, runtime_dir: Path | None = None) -> dict:
+def render_tamp_overrides(
+    profile: Profile | None, options: Any, *, runtime_dir: Path | None = None
+) -> dict:
     """The flat dict of solver-cost knobs the planner backend is built with.
 
     Path-valued knobs are resolved to absolute paths here rather than left for tiptop to
-    interpret against a repo root, so "relative" means "relative to the profile" — the only
-    reading a profile author can reasonably expect.
+    interpret against a repo root, so "relative" means "relative to the profile's file" — the only
+    reading a profile author can reasonably expect. With no profile, relative to the runtime.
     """
-    out: dict[str, Any] = dict(_options(profile, options).tamp)
+    out: dict[str, Any] = dict(_options(options).tamp)
     for key in tamp_keys.PATH_KEYS:
         if key in out:
             out[key] = str(_resolve_asset(profile, str(out[key]), key, runtime_dir))
     return out
 
 
-def _resolve_asset(profile: Profile, value: str, key: str, runtime_dir: Path | None) -> Path:
-    """Resolve a checkpoint path: absolute wins, then the profile dir, then the runtime dir.
+def _resolve_asset(profile: Profile | None, value: str, key: str, runtime_dir: Path | None) -> Path:
+    """Resolve a checkpoint path: absolute wins, then beside the profile's file, then the runtime dir.
 
     The runtime dir is included because TiPToP's runtime recipe puts the DATAFARM checkpoints there
     under the same relative layout the source monorepo used (vae/checkpoints/...,
-    rnd/checkpoints/...), so an imported legacy config keeps working unchanged.
+    rnd/checkpoints/...), so the paper's settings name them as its configs did.
     """
     candidate = Path(os.path.expanduser(value))
     if candidate.is_absolute():
         return candidate
-    for base in filter(None, (profile.dir(), runtime_dir)):
+    beside = profile.file().parent if profile is not None else None
+    for base in filter(None, (beside, runtime_dir)):
         resolved = base / candidate
         if resolved.exists():
             return resolved.resolve()
     # Nothing on disk yet. Return the profile-relative interpretation so the error message
     # names the place the user most likely meant.
-    return profiles.resolve_path(profile, value)
+    if profile is not None:
+        return profiles.resolve_path(profile, value)
+    return (runtime_dir / candidate) if runtime_dir is not None else candidate.resolve()
 
 
 def write_tamp_overrides(
-    profile: Profile, dest: Path, options: Any = None, *, runtime_dir: Path | None = None
+    profile: Profile | None, dest: Path, options: Any, *, runtime_dir: Path | None = None
 ) -> Path | None:
     """Write the overrides JSON, or return None when the profile sets nothing.
 
@@ -183,14 +197,16 @@ def write_tamp_overrides(
     return dest
 
 
-def check_assets(profile: Profile, options: Any = None, *, runtime_dir: Path | None = None) -> list[str]:
+def check_assets(
+    profile: Profile | None, rig: Rig, options: Any, *, runtime_dir: Path | None = None
+) -> list[str]:
     """Problems that would only surface minutes into a warmed session. Cheap to check now.
 
     The VAE manifold cost torch.loads its checkpoint lazily, so a missing file does not fail
     until the first plan — after cuRobo, SAM2 and the cameras have all warmed up.
     """
     problems: list[str] = []
-    o = _options(profile, options)
+    o = _options(options)
     tamp = o.tamp
 
     if tamp.get("vae_manifold_weight") and tamp.get("vae_path"):
@@ -274,12 +290,12 @@ def check_assets(profile: Profile, options: Any = None, *, runtime_dir: Path | N
             "default, so this changes nothing; set it to null"
         )
 
-    # tandem's camera block asks only for the camera perception reads, which is right for teleop and
-    # for another planner. The pinned tiptop opens BOTH of these at every warm-up (get_demo_container:
+    # tandem's rig asks only for the camera perception reads, which is right for teleop and for another
+    # planner. The pinned tiptop opens BOTH of these at every warm-up (get_demo_container:
     # get_hand_camera(), get_external_camera()), whichever one perception reads, and the tiptop.yml
-    # rendered here names only the cameras the profile has -- so a missing one is an OmegaConf
-    # missing-key error tens of seconds into the warm-up.
-    configured = profile.cameras.configured()
+    # rendered here names only the cameras the rig has -- so a missing one is an OmegaConf missing-key
+    # error tens of seconds into the warm-up.
+    configured = rig.cameras.configured()
     for slot in ("hand", "external"):
         if slot not in configured:
             problems.append(
@@ -287,10 +303,10 @@ def check_assets(profile: Profile, options: Any = None, *, runtime_dir: Path | N
                 "warm-up, whichever one perception reads"
             )
 
-    missing = profiles.missing_calibration(profile)
+    missing = rig.missing_calibration()
     if missing:
         problems.append(
-            f"{MISSING_EXTRINSICS} for serial(s) " + ", ".join(missing) + f" in {profile.calibration_file()}"
+            f"{MISSING_EXTRINSICS} for serial(s) " + ", ".join(missing) + f" in {rig.calibration_file()}"
         )
     return problems
 
@@ -300,7 +316,8 @@ def check_assets(profile: Profile, options: Any = None, *, runtime_dir: Path | N
 
 def render_env(
     profile: Profile,
-    options: Any = None,
+    rig: Rig,
+    options: Any,
     *,
     events_file: Path,
     task: str | None = None,
@@ -315,7 +332,7 @@ def render_env(
     variables.
     """
     env = dict(base if base is not None else os.environ)
-    o = _options(profile, options)
+    o = _options(options)
 
     # First task; later ones are typed at the child's stdin prompt.
     env["TIPTOP_TASK"] = task or profile.goal_or_prompt()
@@ -331,7 +348,8 @@ def render_env(
     env["TIPTOP_EVENTS_FILE"] = str(events_file)
     env["TIPTOP_STATE_PORT"] = str(o.robot.state_port)
     env["TIPTOP_CONFIG"] = str(_session_config_path(profile))
-    env["TIPTOP_CALIBRATION"] = str(profile.calibration_file())
+    # The rig's: extrinsics belong to the mounted cameras, which every profile on this machine shares.
+    env["TIPTOP_CALIBRATION"] = str(rig.calibration_file())
     # The source scoped per-robot data with DC_WORKSPACE and keyed extrinsics off it; a
     # tandem profile plays that role, and setting it keeps the planner's own
     # workspace-aware paths pointing somewhere sane.
@@ -339,7 +357,7 @@ def render_env(
     env["TANDEM_PROFILE"] = profile.name
 
     # Camera serial overrides tiptop and droid both read.
-    cams = profile.cameras.configured()
+    cams = rig.cameras.configured()
     for key, var in (
         ("hand", "TIPTOP_HAND_CAMERA_ID"),
         ("external", "TIPTOP_EXTERNAL_CAMERA_ID"),
@@ -380,7 +398,7 @@ def _session_config_path(profile: Profile) -> Path:
 
 
 def prepare_session_files(
-    profile: Profile, session_dir: Path, options: Any = None, *, runtime_dir: Path | None = None
+    profile: Profile, rig: Rig, session_dir: Path, options: Any, *, runtime_dir: Path | None = None
 ) -> dict:
     """Materialise everything a session needs before the child is spawned, in the session's own directory.
 
@@ -391,7 +409,7 @@ def prepare_session_files(
     session_dir = Path(session_dir)
     session_dir.mkdir(parents=True, exist_ok=True)
 
-    config_file = write_tiptop_config(profile, _session_config_path(profile), options)
+    config_file = write_tiptop_config(rig, _session_config_path(profile), options)
     overrides_file = write_tamp_overrides(
         profile, session_dir / "curobo-overrides.json", options, runtime_dir=runtime_dir
     )
@@ -400,10 +418,11 @@ def prepare_session_files(
     # Pre-create so the tailer can attach before the child writes its first line.
     events_file.touch()
 
-    if not profile.calibration_file().is_file():
-        raise ProfileError(
-            f"Profile {profile.name!r} has no calibration file at {profile.calibration_file()}.",
-            hint="Run `tandem profile create` again, or create the file with `{}` and calibrate.",
+    if not rig.calibration_file().is_file():
+        raise TandemError(
+            f"This machine's rig has no calibration file at {rig.calibration_file()}.",
+            hint="`tandem init` creates it (so does any `tandem rig set`); or create it holding `{}`, and "
+            "calibrate.",
         )
 
     return {

@@ -27,7 +27,7 @@ from tandem.core.profiles import HitlSpec, Profile
 from tandem.planners import registry
 from tandem.planners.testing import ConformanceError, check_presets
 from tandem.planners.tiptop import tamp_keys
-from tandem.planners.tiptop.options import options_of, validate_tamp
+from tandem.planners.tiptop.options import validate_tamp
 from tandem.planners.tiptop.recipe import RECIPE
 
 FIXTURES = Path(__file__).parent / "fixtures" / "cfg_tamp"
@@ -109,9 +109,7 @@ def test_the_paper_preset_differs_from_the_template_only_where_it_says():
     }
     assert {path: new for path, (_, new) in changes.items()} == {**intended, **dict.fromkeys(removed)}
     assert all(path.startswith(("hitl.", "planner.options.tamp.")) for path in changes)
-    for untouched in ("robot", "perception"):
-        assert options_of(_paper()).model_dump()[untouched] == options_of(template).model_dump()[untouched]
-    for section in ("task", "cameras", "recording", "export", "name", "description"):
+    for section in ("task", "recording", "export", "name", "description"):
         assert getattr(_paper(), section) == getattr(template, section), section
 
 
@@ -146,9 +144,9 @@ def test_the_tamp_half_is_what_all_five_v3_configs_share_plus_what_their_tiptop_
     blocks = [_raw(path)["tamp_overrides"] for path in V3]
     shared = {k: v for k, v in blocks[0].items() if all(k in b and b[k] == v for b in blocks[1:])}
     shared = {k: v for k, v in shared.items() if k not in tamp_keys.REFUSED}
-    assert options_of(_paper()).tamp == validate_tamp({**shared, **LJ_ON})
+    assert _tamp(_paper()) == validate_tamp({**shared, **LJ_ON})
     # The DATAFARM alignment the paper describes, spelled out.
-    tamp = options_of(_paper()).tamp
+    tamp = _tamp(_paper())
     assert tamp["vae_manifold_weight"] == 25000 and tamp["blend_mode"] == "vae" and tamp["blend_trajectory"]
     assert tamp["vae_path"] == "vae/checkpoints/vae_full_v2.pt"
 
@@ -174,36 +172,38 @@ def test_each_v3_config_is_the_paper_preset_plus_that_tasks_own_settings(path):
 
 
 def test_the_vae_checkpoint_is_the_one_tandem_ships_where_the_runtime_puts_it(tmp_path):
+    from tandem.core.rig import Rig
     from tandem.planners.tiptop import render
+    from tandem.planners.tiptop.options import resolve
 
     vae = next(asset for asset in RECIPE.assets if asset.source.name == "vae_full_v2.pt")
-    assert options_of(_paper()).tamp["vae_path"] == vae.dest
+    assert _tamp(_paper())["vae_path"] == vae.dest
     runtime = tmp_path / "runtime"
     (runtime / vae.dest).parent.mkdir(parents=True)
     (runtime / vae.dest).write_bytes(b"")
     profile = _paper()
-    assert render.render_tamp_overrides(profile, runtime_dir=runtime)["vae_path"] == str(
+    options = resolve(Rig(), {}, profile.planner.options)
+    assert render.render_tamp_overrides(profile, options, runtime_dir=runtime)["vae_path"] == str(
         (runtime / vae.dest).resolve()
     )
 
 
-def test_the_paper_preset_raises_none_of_tiptops_warnings(profile):
+def test_the_paper_preset_raises_none_of_tiptops_warnings(profile, machine_rig):
     # None of check_assets' "this knob does nothing without that one" warnings: the preset is
     # internally consistent. (The checkpoint is only in a built runtime.)
     from tandem.planners.tiptop import render
+    from tandem.planners.tiptop.options import resolve_profile
 
-    problems = render.check_assets(presets.apply(profile, "paper"))
+    laid = presets.apply(profile, "paper")
+    problems = render.check_assets(laid, machine_rig, resolve_profile(laid, machine_rig))
     assert [p for p in problems if "vae_path does not exist" not in p] == []
 
 
 # --- laid over a profile that already has settings --------------------------------------------------
 
 
-def test_the_preset_keeps_the_rig_and_replaces_the_experiment():
+def test_the_preset_keeps_the_task_and_replaces_the_experiment():
     base = _template("rig")
-    base.planner.options["robot"]["host"] = "10.0.0.9"
-    base.planner.options["perception"]["sam_mode"] = "remote"
-    base.planner.options["perception"]["sam_url"] = "http://10.0.0.9:8000"
     base.planner.options["tamp"]["grasp_center_weight"] = 5.0
     base.hitl.on_robot_phase_failure = "teleop"
     base.hitl.cache_path = "proposals.sqlite"
@@ -211,11 +211,9 @@ def test_the_preset_keeps_the_rig_and_replaces_the_experiment():
     base = Profile.model_validate(base.model_dump())
 
     laid = presets.apply(base, "paper")
-    assert options_of(laid).robot.host == "10.0.0.9" and options_of(laid).perception.sam_mode == "remote"
-    assert options_of(laid).perception.sam_url == "http://10.0.0.9:8000"
-    assert laid.cameras == base.cameras and laid.task.prompt == "stack the cups"
+    assert laid.task.prompt == "stack the cups"
     # The experiment is the paper's, whatever the clone had.
-    assert "grasp_center_weight" not in options_of(laid).tamp
+    assert "grasp_center_weight" not in _tamp(laid)
     assert laid.hitl == _paper().hitl
     assert base.hitl.on_robot_phase_failure == "teleop", "the profile passed in is not changed"
 
@@ -370,7 +368,7 @@ def test_profile_create_with_the_paper_preset_says_what_it_changed():
     assert "! Planned motions run at the pace blending gives them" in output
     assert "ships no" not in output
     saved = profiles.load("paper-run")
-    assert saved.hitl == _paper().hitl and options_of(saved).tamp == options_of(_paper()).tamp
+    assert saved.hitl == _paper().hitl and _tamp(saved) == _tamp(_paper())
 
 
 def test_a_prompt_given_with_the_preset_is_the_profiles_own():
@@ -381,14 +379,13 @@ def test_a_prompt_given_with_the_preset_is_the_profiles_own():
     assert profiles.load("p").task.prompt == "open the box"
 
 
-def test_profile_create_clones_a_rig_and_lays_the_preset_over_it(profile):
-    profile.planner.options["robot"]["host"] = "10.0.0.9"
+def test_profile_create_clones_a_profile_and_lays_the_preset_over_it(profile):
+    profile.task.prompt = "stack the cups"
     profiles.save(profile)
     result = CliRunner().invoke(app, ["profile", "create", "p", "--from", profile.name, "--preset", "paper"])
     assert result.exit_code == 0, result.output
     saved = profiles.load("p")
-    assert options_of(saved).robot.host == "10.0.0.9" and saved.hitl.enabled
-    assert profiles.calibration(saved) == profiles.calibration(profile), "the rig's extrinsics come along"
+    assert saved.task.prompt == "stack the cups" and saved.hitl.enabled
 
 
 def test_profile_create_on_another_planner_says_only_tandems_half_was_applied():

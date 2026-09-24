@@ -3,7 +3,7 @@
 - The options refuse what the pinned tiptop and cuTAMP refuse later, with the arm already moving: a
   speed override outside (0, 1], a trajectory norm below 1, an arm neither knows, a remote SAM-2 with
   no address.
-- The factory and doctor refuse a profile without both of the cameras tiptop opens at every warm-up.
+- The factory and doctor refuse a rig without both of the cameras tiptop opens at every warm-up.
 - A leg tandem recorded with TiPToP can be replayed in tiptop's own viewer (`tandem traj open`): the
   sidecar leaves what the viewer reads, and tandem's wrapper gets it past the viewer's stale version gate.
 - The SAM-2 checkpoint tiptop downloads into its own tree is kept out of it.
@@ -80,16 +80,22 @@ def test_the_pinned_cutamp_refuses_a_norm_below_one_in_the_words_tandem_uses():
 
 
 def test_the_arms_tandem_accepts_are_the_ones_the_pinned_planner_knows():
-    from tandem.planners.tiptop.options import ROBOT_TYPES, TiptopOptions
+    from tandem.core.rig import Rig
+    from tandem.planners.tiptop.options import ROBOT_TYPES, resolve
+
+    def arm(name):
+        return Rig.model_validate({"robot": {"type": name}})
 
     for known in ROBOT_TYPES:
-        assert TiptopOptions.model_validate({"robot": {"type": known}}).robot.type == known
-    with pytest.raises(ValidationError, match=r"unsupported robot type 'franka' .*did you mean panda"):
-        TiptopOptions.model_validate({"robot": {"type": "franka"}})
-    with pytest.raises(ValidationError, match="Franka Hand is not supported"):
-        TiptopOptions.model_validate({"robot": {"type": "fr3"}})
-    with pytest.raises(ValidationError, match="did you mean ur5"):
-        TiptopOptions.model_validate({"robot": {"type": "ur6"}})
+        assert resolve(arm(known)).robot.type == known
+    # The rig names the arm; TiPToP says whether it drives it, and where to change it.
+    with pytest.raises(TandemError, match=r"unsupported robot type 'franka' .*did you mean panda") as caught:
+        resolve(arm("franka"))
+    assert "rig.yml's robot.type" in caught.value.message and "tandem rig set robot.type" in caught.value.hint
+    with pytest.raises(TandemError, match="Franka Hand is not supported"):
+        resolve(arm("fr3"))
+    with pytest.raises(TandemError, match="did you mean ur5"):
+        resolve(arm("ur6"))
 
 
 def _compared_constants(fn: ast.AST, attr: str) -> set[str]:
@@ -125,23 +131,38 @@ def test_the_robot_types_are_read_out_of_the_pinned_tiptop_and_cutamp():
     assert tiptop_types & cutamp_types == ROBOT_TYPES
 
 
-def test_a_remote_sam_needs_an_address_and_gets_it_rendered(profile):
+def test_a_remote_sam_needs_an_address_and_gets_it_rendered(profile, machine_rig):
     from tandem.planners.tiptop import render
-    from tandem.planners.tiptop.options import TiptopOptions
+    from tandem.planners.tiptop.options import TiptopRigOptions, resolve
 
     with pytest.raises(ValidationError, match="sam_url is not set"):
-        TiptopOptions.model_validate({"perception": {"sam_mode": "remote"}})
+        TiptopRigOptions.model_validate({"perception": {"sam_mode": "remote"}})
     with pytest.raises(ValidationError, match="sam_mode"):
-        TiptopOptions.model_validate({"perception": {"sam_mode": "Local"}})
+        TiptopRigOptions.model_validate({"perception": {"sam_mode": "Local"}})
     with pytest.raises(ValidationError, match="needs a scheme and a host"):
-        TiptopOptions.model_validate({"perception": {"sam_mode": "remote", "sam_url": "localhost"}})
+        TiptopRigOptions.model_validate({"perception": {"sam_mode": "remote", "sam_url": "localhost"}})
 
-    options = {**profile.planner.options, "perception": {"sam_mode": "remote", "sam_url": "http://h:8000"}}
-    assert render.render_tiptop_config(profile, options)["perception"]["sam"] == {
+    remote = {"perception": {"sam_mode": "remote", "sam_url": "http://h:8000"}}
+    options = resolve(machine_rig, remote, profile.planner.options)
+    assert render.render_tiptop_config(machine_rig, options)["perception"]["sam"] == {
         "mode": "remote",
         "url": "http://h:8000",
     }
-    assert render.render_tiptop_config(profile)["perception"]["sam"] == {"mode": "local"}
+    local = resolve(machine_rig, {}, profile.planner.options)
+    assert render.render_tiptop_config(machine_rig, local)["perception"]["sam"] == {"mode": "local"}
+
+
+def test_a_rigs_sam_server_keeps_its_address(machine_rig):
+    """A SAM-2 server is this machine's: set once in the rig, and every profile's session renders it."""
+    from tandem.core import rig as rig_mod
+    from tandem.core.profiles import Profile
+    from tandem.planners.tiptop.options import resolve_profile
+
+    rig = rig_mod.update(
+        {"planners.tiptop.perception.sam_mode": "remote", "planners.tiptop.perception.sam_url": "http://sam-box:8124"}
+    )
+    perception = resolve_profile(Profile(name="any"), rig).perception
+    assert perception.sam_mode == "remote" and perception.sam_url == "http://sam-box:8124"
 
 
 def test_the_pinned_tiptop_reads_the_sam_keys_tandem_renders():
@@ -187,25 +208,25 @@ def test_tiptop_refuses_a_profile_without_both_cameras_before_writing_anything(
     profile, tmp_path, gemini_key, keep, missing
 ):
     from tandem.core import paths
-    from tandem.core.profiles import CamerasSpec
+    from tandem.core import rig as rig_mod
     from tandem.planners.tiptop import FACTORY
 
-    profile.cameras = CamerasSpec(perception=keep, **{keep: getattr(profile.cameras, keep)})
+    rig_mod.update({"cameras.perception": keep, f"cameras.{missing}": None})
     with pytest.raises(TandemError, match=rf"no cameras\.{missing}: the pinned tiptop opens") as caught:
         FACTORY.create(_tiptop_context(profile, tmp_path))
-    assert "tandem profile edit" in caught.value.hint
+    assert "tandem rig set cameras.ROLE.serial" in caught.value.hint
     assert not (paths.session_scratch_dir() / profile.name / "tiptop.yml").exists()
 
 
-def test_doctor_fails_a_tiptop_profile_without_both_cameras(profile):
+def test_doctor_fails_a_tiptop_rig_without_both_cameras(profile):
     from tandem.core import probe
-    from tandem.core.profiles import CamerasSpec
+    from tandem.core import rig as rig_mod
     from tandem.planners.tiptop import doctor
 
     complete = doctor.doctor_checks(profile, settings=None, runtime_ready=True, probe_hardware=False)
     assert [c.state for c in complete if c.name == "tiptop cameras"] == [probe.OK]
 
-    profile.cameras = CamerasSpec(perception="external", external=profile.cameras.external)
+    rig_mod.update({"cameras.hand": None})
     checks = doctor.doctor_checks(profile, settings=None, runtime_ready=True, probe_hardware=False)
     (row,) = [c for c in checks if c.name == "tiptop cameras"]
     assert row.state == probe.FAIL and "cameras.hand" in row.detail

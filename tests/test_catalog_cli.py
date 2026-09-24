@@ -259,7 +259,9 @@ def test_info_says_what_a_planner_is_needs_and_can_be_asked_for(active):
         "skeleton_reuse": False,
     }
     # The planner.options TiPToP reads, each with a line: what `tandem planners info` lists.
-    assert set(payload["options"]) == {"robot", "perception", "tamp"}
+    # The task's settings, a profile's; the machine's, the rig's.
+    assert set(payload["options"]) == {"tamp"}
+    assert set(payload["rig_options"]) == {"robot", "perception"}
 
     shown = _run("planners", "info", "tiptop")
     assert shown.exit_code == 0, shown.output
@@ -313,7 +315,7 @@ def test_use_switches_the_profile_and_says_when_the_planner_is_not_installed(act
     assert switched.planner.backend == "solver"
     # The old planner's own settings would be refused by the new one, so they go -- and it is said.
     assert switched.planner.options == {}
-    assert "Removed planner.options perception, robot, tamp" in result.output
+    assert "Removed planner.options tamp" in result.output
     assert "not installed" in result.output and "tandem planners install solver" in result.output
     assert settings_mod.load(force=True).default_planner == "tiptop", "--default was not asked for"
 

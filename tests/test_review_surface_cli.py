@@ -134,7 +134,7 @@ def test_init_repair_leaves_an_existing_profile_as_it_was(isolated_env):
     assert result.exit_code == 0, result.output
     after = profiles.load("p1")
     assert after.hitl.enabled and after.task.prompt == "fold it"
-    assert after.cameras == before.cameras and after.planner == before.planner
+    assert after.planner == before.planner
     assert "Created profile" not in result.output
 
 
@@ -172,6 +172,10 @@ def test_the_web_creates_a_profile_with_a_preset_and_lists_them(profile):
 
 
 def test_profile_create_warns_about_extrinsics_only_for_a_planner_that_reads_them(isolated_env):
+    from tandem.core import rig as rig_mod
+
+    # This machine's cameras, not yet calibrated.
+    rig_mod.update({"cameras.hand": {"serial": "111"}, "cameras.external": {"serial": "222"}})
     registry.register_backend("toy", ToyPlanner)
     toy = _run("profile", "create", "shelf1", "--planner", "toy")
     assert toy.exit_code == 0, toy.output
@@ -182,55 +186,12 @@ def test_profile_create_warns_about_extrinsics_only_for_a_planner_that_reads_the
     assert "no extrinsics" in tiptop.output
 
 
-# --- profile migrate ------------------------------------------------------------------------------------------
-
-
-def _write(name: str, text: str) -> Path:
-    path = profiles.profiles_root() / name / "profile.yml"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text)
-    return path
-
-
-def test_migrate_names_the_known_profiles_for_an_unknown_one(profile):
-    result = _run("profile", "migrate", "nope")
-    assert result.exit_code == 1
-    assert isinstance(result.exception, ProfileError), "not a FileNotFoundError traceback"
-    assert "Known profiles" in result.exception.hint
-
-
-def test_migrate_leaves_a_current_profile_byte_for_byte(profile, monkeypatch):
-    text = profile.profile_file().read_text()
-    text = text.replace("target_episodes: 20", "target_episodes: 20   # the lab's weekly quota")
-    assert "the lab's weekly quota" in text
-    text += "# a note at the end\n"
-    path = _write("ctrl", text)
-    before = path.read_bytes()
-    monkeypatch.setenv("X_PORT", "9999")
-    result = _run("profile", "migrate", "ctrl")
-    assert result.exit_code == 0, result.output
-    assert "already current" in result.output
-    assert path.read_bytes() == before
-
-
-def test_migrate_goes_on_past_a_broken_profile_and_keeps_a_backup(isolated_env):
-    legacy = (FIXTURES / "v1_ef1411f.yml").read_text()
-    a, z = _write("legacy_a", legacy), _write("legacy_z", legacy)
-    _write("broken", "version: 2\ntask:\n  bogus_key: 1\n")
-    result = _run("profile", "migrate")
-    assert result.exit_code != 0
-    assert "broken" in result.output
-    for path in (a, z):
-        assert "robot:" not in path.read_text().split("planner:")[0], "migrated"
-        assert (path.parent / "profile.yml.v1.bak").read_text() == legacy
-
-
 # --- $EDITOR with arguments -------------------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("command", [["profile", "edit", "test"], ["config", "edit"]])
 def test_an_editor_with_arguments_is_run_and_a_missing_one_is_an_error(profile, monkeypatch, command):
-    backup = profile.profile_file().with_suffix(".yml.bak")
+    backup = profile.file().with_suffix(".yml.bak")
     monkeypatch.setenv("EDITOR", "true --wait")
     ok = _run(*command)
     assert ok.exit_code == 0, ok.output
@@ -448,7 +409,7 @@ def test_planners_new_names_the_install_for_how_tandem_is_installed(tmp_path, mo
 # --- a planner's preset states planner.options and nothing else -----------------------------------------------------
 
 
-def test_a_planner_preset_may_not_override_tandems_phase_planning_or_the_rigs_cameras(tmp_path):
+def test_a_planner_preset_may_not_override_tandems_phase_planning_or_state_cameras(tmp_path):
     from tandem.core import presets
     from tandem.planners.testing import ConformanceError, check_presets
 
@@ -462,7 +423,8 @@ def test_a_planner_preset_may_not_override_tandems_phase_planning_or_the_rigs_ca
     registry.register_backend("toy", type("Toy", (ToyPlanner,), {"__module__": __name__, "presets_dir": directory}))
     with pytest.raises(TandemError) as caught:
         presets.load(path, origin="toy")
-    assert "'hitl'" in caught.value.message and "'cameras'" in caught.value.message
+    # Cameras are no profile's at all now: the rig's.
+    assert "'hitl'" in caught.value.message and "profile.cameras is not a profile setting" in caught.value.message
     with pytest.raises(TandemError):
         presets.available("toy")
     with pytest.raises(ConformanceError):

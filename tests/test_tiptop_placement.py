@@ -31,9 +31,15 @@ import pytest
 from planner_sources import planner_sources
 from ruamel.yaml import YAML
 
+from tandem.core import rig as rig_mod
 from tandem.planners.tiptop import render, tamp_keys
 from tandem.planners.tiptop.backend import sidecar_path
-from tandem.planners.tiptop.options import validate_tamp
+from tandem.planners.tiptop.options import resolve_profile, validate_tamp
+
+
+def _opts(profile):
+    """TiPToP's whole configuration for ``profile``, on this machine's rig (the ``machine_rig`` fixture's)."""
+    return resolve_profile(profile, rig_mod.load())
 
 FIXTURES = Path(__file__).parent / "fixtures" / "cfg_tamp"
 _yaml = YAML(typ="safe")
@@ -167,21 +173,21 @@ def test_the_perception_switches_land_in_the_rendered_tiptop_yml(profile):
     profile.planner.options["tamp"] = validate_tamp(
         {"table_plane_support_vote": True, "disjoint_object_masks": False}
     )
-    perception = render.render_tiptop_config(profile)["perception"]
+    perception = render.render_tiptop_config(rig_mod.load(), _opts(profile))["perception"]
     assert perception["table_plane_support_vote"] is True and perception["disjoint_object_masks"] is False
     # And they are still passed on with the rest, where the sidecar's apply_perception_overrides reads them.
-    assert render.render_tamp_overrides(profile)["table_plane_support_vote"] is True
+    assert render.render_tamp_overrides(profile, _opts(profile))["table_plane_support_vote"] is True
 
 
 def test_unset_switches_leave_tiptops_defaults_in_force(profile):
     profile.planner.options["tamp"] = {}
-    perception = render.render_tiptop_config(profile)["perception"]
+    perception = render.render_tiptop_config(rig_mod.load(), _opts(profile))["perception"]
     assert "table_plane_support_vote" not in perception and "disjoint_object_masks" not in perception
 
 
 def test_the_placement_keys_reach_the_planner_as_they_are(profile):
     profile.planner.options["tamp"] = validate_tamp(_overrides("4_bread_box_v3.yml"))
-    rendered = render.render_tamp_overrides(profile)
+    rendered = render.render_tamp_overrides(profile, _opts(profile))
     assert {k: rendered[k] for k in PLACEMENT} == {k: _overrides("4_bread_box_v3.yml")[k] for k in PLACEMENT}
 
 
@@ -191,23 +197,23 @@ def test_a_placement_key_without_placement_support_is_said_to_do_nothing(profile
     value = {bool: True, float: 0.5}[tamp_keys.SCALAR_KEYS[key]]
     tamp = {key: value} if gate is None else {"placement_support": gate, key: value}
     profile.planner.options["tamp"] = validate_tamp(tamp)
-    problems = render.check_assets(profile)
+    problems = render.check_assets(profile, rig_mod.load(), _opts(profile))
     assert f"{key} only applies when placement_support is true; it is ignored here" in problems
 
 
 def test_blend_stretch_to_caps_without_blending_is_said_to_do_nothing(profile):
     profile.planner.options["tamp"] = validate_tamp({"blend_stretch_to_caps": True})
     assert any(
-        "blend_stretch_to_caps only applies when blend_trajectory" in p for p in render.check_assets(profile)
+        "blend_stretch_to_caps only applies when blend_trajectory" in p for p in render.check_assets(profile, rig_mod.load(), _opts(profile))
     )
     profile.planner.options["tamp"] = validate_tamp({"blend_stretch_to_caps": True, "blend_trajectory": True})
-    assert not any("blend_stretch_to_caps" in p for p in render.check_assets(profile))
+    assert not any("blend_stretch_to_caps" in p for p in render.check_assets(profile, rig_mod.load(), _opts(profile)))
 
 
 @pytest.mark.parametrize("name", ["1_toy_puzzle_v3.yml", "4_bread_box.yml", "4_bread_box_v3.yml"])
 def test_the_two_tasks_with_all_three_switches_raise_no_warning(profile, name):
     profile.planner.options["tamp"] = validate_tamp({**_overrides(name), **dict.fromkeys(SWITCHES, True)})
-    problems = [p for p in render.check_assets(profile) if "vae_path does not exist" not in p]
+    problems = [p for p in render.check_assets(profile, rig_mod.load(), _opts(profile)) if "vae_path does not exist" not in p]
     assert not [p for p in problems if "only applies" in p], problems
 
 

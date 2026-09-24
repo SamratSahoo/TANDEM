@@ -71,6 +71,7 @@ from typing import Any
 
 from tandem import executors
 from tandem.core import episodes, paths, profiles, secrets
+from tandem.core import rig as rig_mod
 from tandem.core import settings as settings_mod
 from tandem.core.errors import SessionConflict, TandemError
 from tandem.core.phase_loop import TELEOP, HumanPhase, PhaseLoop, TrialOutcome
@@ -176,6 +177,7 @@ class Session:
         record: bool | None = None,
         max_episodes: int | None = None,
         session_id: str | None = None,
+        rig: Any = None,
     ) -> None:
         self.id = session_id or uuid.uuid4().hex[:12]
         # Where everything this session writes goes, fixed now, on the thread that made it. Its legs are
@@ -270,6 +272,8 @@ class Session:
         # for the same reason the profile is pinned.
         self._settings = None
         self._tools_dir: Path | None = None
+        # This machine's rig (its robot, cameras and calibration): the one given, else read at start().
+        self.rig = rig
 
         # The lineage id the legs of the task in progress share, and the plan they were walking.
         # Both are tandem's now; they used to live inside the planner's process, where tandem could
@@ -315,13 +319,22 @@ class Session:
                 hint="Run `tandem config set-gemini-key`, or turn hitl.enabled off.",
             )
 
-        # The teleop legs record from these as well, so they are the session's to insist on.
-        if not self.profile.cameras.configured():
+        # The cameras are this machine's rig, not the profile's. The teleop legs record from them whichever
+        # planner runs, so they are the session's to insist on.
+        if self.rig is None:
+            self.rig = rig_mod.load()
+        if not self.rig.cameras.configured():
             raise TandemError(
-                f"Profile {self.profile.name!r} has no cameras configured, so nothing can be "
+                f"This machine's rig has no cameras configured ({self.rig.file()}), so nothing can be "
                 "perceived or recorded.",
-                hint="Add them with `tandem profile edit`, or import a rig with "
-                "`tandem profile create <name> --import-from <checkout>`.",
+                hint="`tandem rig set cameras.external.serial SERIAL` (and cameras.hand.serial), or `tandem init`.",
+            )
+        missing = self.rig.cameras.perception_missing()
+        if missing:
+            raise TandemError(
+                f"{missing}, so perception has no camera to read ({self.rig.file()}).",
+                hint=f"`tandem rig set cameras.{self.rig.cameras.perception}.serial SERIAL`, or `tandem rig set "
+                "cameras.perception ROLE` to read another camera.",
             )
 
         if self.hitl_enabled:
@@ -374,6 +387,9 @@ class Session:
         from tandem.planners.base import BackendContext
 
         spec = self.profile.planner
+        # The planner's machine settings (rig.yml's planners.<name>), checked by the planner now: a bad one
+        # is refused here, before anything is warmed.
+        rig_options = rig_mod.planner_options(self.rig, spec.backend)
         return registry.create(
             spec.backend,
             BackendContext(
@@ -391,6 +407,8 @@ class Session:
                 # Normally left to the factory: it resolves its own runtime from the settings, as
                 # every command that asks the registry for this planner's runtime does.
                 runtime_dir=self._runtime_dir,
+                rig=self.rig,
+                rig_options=rig_options,
             ),
         )
 
@@ -643,6 +661,7 @@ class Session:
         """
         return ExecutorContext(
             profile=self.profile,
+            rig=self.rig,
             session_dir=self._files["session_dir"],
             on_log=self._log,
             on_emit=self._emit,

@@ -3,9 +3,10 @@
 Three roots, each overridable by an environment variable so a whole install can be
 relocated (CI, a shared workstation account, a scratch disk):
 
-    config    ~/.config/tandem                $TANDEM_CONFIG_DIR    config.toml, credentials.toml
+    config    ~/.config/tandem                $TANDEM_CONFIG_DIR    config.toml, credentials.toml, and the
+                                                                    rig: rig.yml, calibration.json
     state     ~/.local/state/tandem           $TANDEM_STATE_DIR     logs, session scratch
-    data      ~/tandem-data                   $TANDEM_DATA_ROOT     profiles/ and their trajectories
+    data      ~/tandem-data                   $TANDEM_DATA_ROOT     profiles/<name>.yml, trajectories/<name>/
     runtime   ~/.local/share/tandem/runtime   $TANDEM_RUNTIME_DIR   TiPToP's runtime: its sources + pixi env
     runtimes  ~/.local/share/tandem/runtimes  $TANDEM_RUNTIMES_DIR  every other planner's, one directory each
 
@@ -53,6 +54,11 @@ def credentials_file() -> Path:
     return config_dir() / "credentials.toml"
 
 
+def rig_file() -> Path:
+    """This machine's rig: its robot, its cameras and their calibration, shared by every profile."""
+    return config_dir() / "rig.yml"
+
+
 def log_dir() -> Path:
     return state_dir() / "logs"
 
@@ -93,3 +99,20 @@ def ensure_dir(path: Path, *, mode: int | None = None) -> Path:
     if mode is not None:
         os.chmod(path, mode)
     return path
+
+
+def write_atomic(path: Path, text: str) -> None:
+    """Replace ``path`` with ``text`` whole or not at all: written beside it, then renamed over it.
+
+    Truncating a settings file before a write that could fail -- a value that cannot be serialised, a
+    Ctrl-C, a full disk -- once left an empty profile that then loaded, silently, as one of defaults.
+    """
+    partial = path.with_name(f".{path.name}.partial")
+    try:
+        with partial.open("w") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(partial, path)
+    finally:
+        partial.unlink(missing_ok=True)

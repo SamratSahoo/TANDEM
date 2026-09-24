@@ -4,8 +4,8 @@
   loaded it first, and a profile naming a planner or executor this machine no longer has does not load.
 - A planner whose ``validate_options`` requires a setting crashed `planners use` and `profile create
   --planner` with a pydantic traceback, and the web with a 500; and nothing could supply the setting.
-- A switch threw the old planner's options away for good -- the rig's robot address, a preset's TAMP
-  settings -- and the web asked nothing and said nothing.
+- A switch threw the old planner's options away for good -- a task's TAMP settings, a preset's -- and
+  the web asked nothing and said nothing.
 - `planners use NAME --default` was the hint for "set the default", and also switched and emptied the
   active profile.
 - Every listing said only "<path> is not a valid profile:", with the reason cut off.
@@ -63,11 +63,11 @@ def _rewrite(profile, change) -> None:
     """Edit a profile's file as written, the way a person or an uninstall leaves it."""
     import io
 
-    data = profiles.read_data(profile.profile_file())
+    data = profiles.read_data(profile.file(), name=profile.name)
     change(data)
     buf = io.StringIO()
     profiles._new_yaml().dump(data, buf)
-    profile.profile_file().write_text(buf.getvalue())
+    profile.file().write_text(buf.getvalue())
 
 
 # --- `use` is the repair ---------------------------------------------------------------------------
@@ -111,7 +111,7 @@ def test_use_still_refuses_a_profile_broken_somewhere_else(active):
         planners_cli.use_planner("pure")
     with pytest.raises(ProfileError, match="max_attempts"):
         executors_cli.use_executor("teleop")
-    assert "max_attempts: 0" in active.profile_file().read_text(), "nothing was written"
+    assert "max_attempts: 0" in active.file().read_text(), "nothing was written"
 
 
 def test_executors_use_repairs_a_profile_whose_executor_was_uninstalled(active):
@@ -179,13 +179,13 @@ class _NeedsHost(FakeFactory):
 
 def test_a_planner_that_requires_a_setting_is_refused_loudly_and_given_it_with_option(active):
     registry.register_backend("req", _NeedsHost())
-    before = active.profile_file().read_text()
+    before = active.file().read_text()
 
     refused = _run("planners", "use", "req")
     assert refused.exit_code == 1
     assert isinstance(refused.exception, TandemError), "not a pydantic traceback"
     assert "robot_ip" in refused.exception.message and "--option" in refused.exception.hint
-    assert active.profile_file().read_text() == before
+    assert active.file().read_text() == before
 
     given = _run("planners", "use", "req", "--option", "robot_ip=10.0.0.2")
     assert given.exit_code == 0, given.output
@@ -244,26 +244,25 @@ def test_the_conformance_kit_accepts_a_required_setting_said_as_an_error_but_not
 
 
 def _customised(profile) -> None:
-    profile.planner = profiles.PlannerSpec(
-        backend="tiptop", options={"robot": {"host": "10.1.2.3"}, "tamp": {"num_particles": 999}}
-    )
+    profile.planner = profiles.PlannerSpec(backend="tiptop", options={"tamp": {"num_particles": 999}})
     profiles.save(profile)
 
 
-def test_switching_away_and_back_restores_the_rigs_settings(active):
+def test_switching_away_and_back_restores_the_tasks_settings(active):
     registry.register_backend("toy", FakeFactory("toy"))
     _customised(active)
 
     away = planners_cli.use_planner("toy")
-    assert set(away["dropped_options"]) >= {"robot", "tamp"}
+    assert set(away["dropped_options"]) == {"tamp"}
     stash = Path(away["saved_to"])
-    assert stash.name == "planner-options.tiptop.yml" and stash.parent == active.dir()
+    assert stash.name == f"{active.name}.tiptop.yml" and stash.parent.name == ".planner-options"
+    assert stash.parent.parent == active.file().parent
     assert profiles.load(active.name).planner.options == {}
 
     back = planners_cli.use_planner("tiptop")
     restored = profiles.load(active.name).planner.options
-    assert restored["robot"]["host"] == "10.1.2.3" and restored["tamp"]["num_particles"] == 999
-    assert set(back["restored_options"]) >= {"robot", "tamp"}
+    assert restored["tamp"]["num_particles"] == 999
+    assert set(back["restored_options"]) == {"tamp"}
     assert not stash.exists(), "restored, so no longer set aside"
 
 
@@ -280,7 +279,7 @@ def test_a_stash_the_planner_no_longer_accepts_is_kept_and_said_not_raised(activ
     registry.register_backend("toy", FakeFactory("toy"))
     _customised(active)
     planners_cli.use_planner("toy")
-    stash = profiles.stash_file(active.dir(), "tiptop")
+    stash = profiles.stash_file(active.name, "tiptop")
     stash.write_text("tamp:\n  not_a_tamp_key: 1\n")
 
     back = planners_cli.use_planner("tiptop")
@@ -294,8 +293,9 @@ def test_the_cli_says_where_the_options_went_and_how_they_come_back(active):
     _customised(active)
     shown = _run("planners", "use", "toy")
     assert shown.exit_code == 0, shown.output
-    assert "Removed planner.options" in shown.output and "planner-options.tiptop.yml" in shown.output
-    assert "tandem planners use tiptop" in shown.output
+    output = " ".join(shown.output.split())
+    assert "Removed planner.options" in output and f".planner-options/{active.name}.tiptop.yml" in output
+    assert "tandem planners use tiptop" in output
 
 
 def test_the_settings_page_asks_first_and_says_what_was_set_aside(active):
@@ -304,9 +304,9 @@ def test_the_settings_page_asks_first_and_says_what_was_set_aside(active):
         assert needle in page, needle
     registry.register_backend("pure", FakeFactory("pure"))
     payload = TestClient(create_app()).get("/api/planners").json()
-    assert payload["profile_options"] == ["perception", "robot", "tamp"]
+    assert payload["profile_options"] == ["tamp"]
     result = TestClient(create_app()).post("/api/planners/pure/use", json={}).json()
-    assert set(result["dropped_options"]) == {"perception", "robot", "tamp"}
+    assert set(result["dropped_options"]) == {"tamp"}
 
 
 # --- the default, on its own ----------------------------------------------------------------------------
@@ -315,11 +315,11 @@ def test_the_settings_page_asks_first_and_says_what_was_set_aside(active):
 def test_planners_default_changes_only_the_default(active):
     registry.register_backend("ready", FakeFactory("ready"))
     _customised(active)
-    before = active.profile_file().read_text()
+    before = active.file().read_text()
     result = _run("planners", "default", "ready")
     assert result.exit_code == 0, result.output
     assert settings_mod.load(force=True).default_planner == "ready"
-    assert active.profile_file().read_text() == before, "no profile was touched"
+    assert active.file().read_text() == before, "no profile was touched"
 
 
 def test_planners_default_works_while_the_active_profile_does_not_load(active):

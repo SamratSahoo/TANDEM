@@ -1,6 +1,7 @@
-"""Global settings — everything that is NOT per-profile.
+"""Global settings — tandem's own preferences and state, which are neither a task's nor the rig's.
 
-Lives in ``~/.config/tandem/config.toml``. Read on demand and cached; ``save()`` rewrites it
+Lives in ``~/.config/tandem/config.toml``. The robot, the cameras and their calibration are the rig's
+(``tandem.core.rig``, rig.yml beside this file); a task's settings are its profile's. Read on demand and cached; ``save()`` rewrites it
 with tomlkit so hand-written comments survive a programmatic edit.
 
 The cache is only as good as the file it came from: it is dropped whenever config.toml changes on
@@ -91,6 +92,9 @@ class Settings(BaseModel):
 
     def profiles_root(self) -> Path:
         return self.resolved_data_root() / "profiles"
+
+    def trajectories_root(self) -> Path:
+        return self.resolved_data_root() / "trajectories"
 
 
 _cache: Settings | None = None

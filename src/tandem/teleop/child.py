@@ -6,8 +6,9 @@ the prompts the driver raises over stdin, and follows the driver's events file. 
 teleop executor knows when a leg was recorded and how many frames it has.
 
 A `TeleopChild` is given a host and reads from it: the scratch directory (``_files["session_dir"]``),
-the trajectory id it stamps the leg with (``_trajectory_id``, falling back to ``current.dir``), the
-profile's trajectories directory and cameras, and the language label (``instruction``). It reports
+the trajectory id it stamps the leg with (``_trajectory_id``, falling back to ``current.dir``), where
+legs are written (``profile.trajectories_dir()``), the cameras (``profile.cameras``: the rig's, which the
+executor's view hands over), and the language label (``instruction``). It reports
 back through ``_log``, ``_emit``, ``_pump`` and ``handoff_error``. The host was once the session; it is
 now ``executors.teleop._ChildHost``, which supplies exactly those attributes from the executor's
 context and one leg, with a scratch directory of its own per leg, so no hand-off reads another's

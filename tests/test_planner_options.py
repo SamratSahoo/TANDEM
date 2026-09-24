@@ -2,9 +2,11 @@
 
 Until profile version 2 TiPToP's settings were top-level sections of every profile (robot:,
 perception:, tamp:) and core validated them against TiPToP's schema, so every profile -- whichever
-planner it named -- was a TiPToP profile. These tests hold the other side of that move:
+planner it named -- was a TiPToP profile. Since version 3 the task's half of them is the profile's and
+the machine's half is the rig's (tests/test_planner_rig_options.py, tests/test_tiptop_rig.py). These
+tests hold:
 
-- a profile written in the older layout still loads, says so once, and is written in the new one;
+- TiPToP's settings in a profile are its task settings, and what they were before is refused or flagged;
 - a planner that is not TiPToP has its options checked by itself, never by TiPToP's schema;
 - nothing outside planners/tiptop imports TiPToP, so every one of those answers has to come
   through the registry;
@@ -16,7 +18,6 @@ from __future__ import annotations
 
 import ast
 import json
-import logging
 from pathlib import Path
 
 import pytest
@@ -32,7 +33,7 @@ from tandem.core.profiles import Profile
 from tandem.planners import registry
 from tandem.planners.base import OptionsSection, OptionsView
 from tandem.planners.tiptop import FACTORY as TIPTOP
-from tandem.planners.tiptop.options import TiptopOptions, options_of
+from tandem.planners.tiptop.options import TiptopTaskOptions, resolve_profile
 
 FIXTURES = Path(__file__).parent / "fixtures" / "profiles"
 SRC = Path(__file__).resolve().parents[1] / "src" / "tandem"
@@ -42,106 +43,66 @@ _yaml = YAML(typ="safe")
 @pytest.fixture(autouse=True)
 def _registry(monkeypatch):
     isolate_registry(monkeypatch)
-    # Every notice is said once per process; each test starts from a process that has said none.
-    monkeypatch.setattr(profiles, "_noticed", set())
 
 
 def _write_profile(name: str, text: str) -> Path:
-    directory = profiles.profiles_root() / name
-    (directory / "trajectories").mkdir(parents=True, exist_ok=True)
-    path = directory / "profile.yml"
+    path = profiles.path_of(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
-    (directory / "calibration.json").write_text("{}\n")
     return path
-
-
-def _notices(caplog) -> list[str]:
-    return [r.getMessage() for r in caplog.records if r.name == "tandem.core.profiles"]
 
 
 # --- (a) the older layout ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("fixture", ["v1_ef1411f.yml", "v1_68076df.yml"])
-def test_a_profile_in_the_older_layout_loads_says_so_once_and_saves_in_the_new_one(
-    isolated_env, caplog, fixture
-):
-    """Two real version-1 profiles: the template as it shipped at ef1411f (hitl and planner blocks) and
-    at the first commit (neither). Each loads with its settings under planner.options, unchanged."""
-    old_text = (FIXTURES / fixture).read_text()
-    old = _yaml.load(old_text)
-    path = _write_profile("legacy", old_text)
-
-    with caplog.at_level(logging.WARNING, logger="tandem.core.profiles"):
-        loaded = profiles.load("legacy")
-        again = profiles.load("legacy")
-
-    # One line, naming the file, what moved, and the command that rewrites it -- and only once.
-    (notice,) = _notices(caplog)
-    assert str(path) in notice and "tandem profile migrate legacy" in notice
-    assert "robot under planner.options" in notice and "tamp under planner.options" in notice
-    assert "\n" not in notice
-
-    assert loaded.version == profiles.LAYOUT_VERSION
-    assert loaded.planner.backend == "tiptop"
-    options = options_of(loaded)
-    assert options.robot.host == old["robot"]["host"] and options.robot.q_home == old["robot"]["q_home"]
-    assert options.perception.gemini.model == old["perception"]["gemini"]["model"]
-    assert options.perception.m2t2.url == old["perception"]["m2t2"]["url"]
-    assert options.tamp["num_particles"] == old["tamp"]["num_particles"]
-    assert options.tamp["traj_length_norm"] == "inf", "normalised by TiPToP's own rules, as before"
-    # tandem's own sections stay where they were.
-    assert loaded.cameras.external.serial == str(old["cameras"]["external"]["serial"])
-    assert loaded.task.prompt == old["task"]["prompt"]
-    assert again.model_dump() == loaded.model_dump()
-
-    profiles.save(loaded)
-    written = _yaml.load(path.read_text())
-    assert not {"robot", "perception", "tamp"} & set(written), "saved in the new layout"
-    assert set(written["planner"]["options"]) == {"robot", "perception", "tamp"}
-    assert written["version"] == profiles.LAYOUT_VERSION
-
-    caplog.clear()
-    with caplog.at_level(logging.WARNING, logger="tandem.core.profiles"):
-        profiles._noticed.clear()
-        round_tripped = profiles.load("legacy")
-    assert _notices(caplog) == [], "a profile in the new layout is read without a notice"
-    assert round_tripped.model_dump() == loaded.model_dump()
+def test_a_profile_file_in_a_layout_before_version_3_is_refused_with_the_way_out(isolated_env, fixture):
+    """A real profile of an older layout, put where a profile file goes: refused -- its robot and cameras
+    would otherwise be read as a task's -- saying where they go now."""
+    _write_profile("legacy", (FIXTURES / fixture).read_text())
+    with pytest.raises(ProfileError) as excinfo:
+        profiles.load("legacy")
+    assert "rig.yml" in excinfo.value.message
 
 
-def test_an_old_profiles_detector_setting_still_loads_and_is_said_to_change_nothing(
-    isolated_env, monkeypatch
-):
+def test_an_old_detector_setting_in_the_rig_still_loads_and_is_said_to_change_nothing(machine_rig, monkeypatch):
     """perception.gemini is a statement, not a choice: the pinned tiptop reads neither key. Every
-    version-1 profile names er-1.6, so refusing it would stop them loading; it is kept, and flagged."""
+    version-1 profile names er-1.6, and a rig migrated from one carries it; refusing it would stop the rig
+    loading, so it is kept, and flagged -- as the rig's, not the task's."""
     from tandem.cli.doctor import collect_checks
+    from tandem.core import rig as rig_mod
     from tandem.planners.tiptop import render
     from tandem.planners.tiptop.options import DETECTOR_MODEL
 
     monkeypatch.setattr(secrets, "gemini_api_key", lambda: "test-key")
-    _write_profile("legacy", (FIXTURES / "v1_ef1411f.yml").read_text())
-    loaded = profiles.load("legacy")
-    assert options_of(loaded).perception.gemini.model == "gemini-robotics-er-1.6-preview"
+    profiles.save(profiles.load_file(FIXTURES / "test_v3.yml", name="fresh"))
+    rig = rig_mod.update({"planners.tiptop.perception.gemini.model": "gemini-robotics-er-1.6-preview"})
+    loaded = profiles.load("fresh")
+    options = resolve_profile(loaded, rig)
+    assert options.perception.gemini.model == "gemini-robotics-er-1.6-preview"
 
-    problems = render.check_assets(loaded)
+    problems = render.check_assets(loaded, rig, options)
     assert any(
         p.startswith("perception.gemini.model is 'gemini-robotics-er-1.6-preview'") and DETECTOR_MODEL in p
         for p in problems
     ), problems
-    checks = collect_checks(profile_name="legacy", probe_hardware=False)
+    checks = collect_checks(profile_name="fresh", probe_hardware=False)
     (row,) = [c for c in checks if c.name == "perception settings"]
-    assert row.state == probe.WARN and "changes nothing" in row.detail
+    assert row.state == probe.WARN and "changes nothing" in row.detail and row.group == "rig"
     assert [c.state for c in checks if c.name == "tamp settings"] == [probe.OK], "not a TAMP finding"
 
-    # The template states what runs, so it says nothing; a temperature is as dead as the model.
-    template = Profile.model_validate({"name": "fresh"})
-    assert not [p for p in render.check_assets(template) if p.startswith("perception.")]
-    template.planner.options["perception"]["gemini"]["temperature"] = 0.2
-    assert any(p.startswith("perception.gemini.temperature is set") for p in render.check_assets(template))
+    # The defaults state what runs, so they say nothing; a temperature is as dead as the model.
+    rig = rig_mod.update({"planners.tiptop.perception.gemini": None})
+    assert not [p for p in render.check_assets(loaded, rig, resolve_profile(loaded, rig)) if p.startswith("perception.")]
+    rig = rig_mod.update({"planners.tiptop.perception.gemini.temperature": 0.2})
+    assert any(
+        p.startswith("perception.gemini.temperature is set")
+        for p in render.check_assets(loaded, rig, resolve_profile(loaded, rig))
+    )
 
 
-def test_a_bad_tamp_key_in_an_old_profile_is_still_refused_with_the_nearest_real_one(isolated_env):
-    text = (FIXTURES / "v1_ef1411f.yml").read_text().replace("num_particles: 256", "num_particle: 256")
+def test_a_bad_tamp_key_is_refused_with_the_nearest_real_one(isolated_env):
+    text = (FIXTURES / "test_v3.yml").read_text().replace("num_particles: 256", "num_particle: 256")
     _write_profile("typo", text)
     with pytest.raises(ProfileError) as excinfo:
         profiles.load("typo")
@@ -150,54 +111,12 @@ def test_a_bad_tamp_key_in_an_old_profile_is_still_refused_with_the_nearest_real
     assert "Did you mean: num_particles" in message
 
 
-def test_a_setting_in_both_places_is_refused_rather_than_one_silently_winning():
-    with pytest.raises(ValidationError, match="tamp is set both at the top level"):
-        Profile.model_validate(
-            {"name": "x", "tamp": {}, "planner": {"backend": "tiptop", "options": {"tamp": {}}}}
-        )
-
-
-def test_old_sections_of_a_profile_that_plans_with_another_planner_are_dropped_and_said_to_be(caplog):
-    ToyPlanner_ = _toy()
-    registry.register_backend("toy", ToyPlanner_)
-    with caplog.at_level(logging.WARNING, logger="tandem.core.profiles"):
-        profile = Profile.model_validate(
-            {
-                "name": "x",
-                "robot": {"host": "10.0.0.9"},
-                "tamp": {"num_particles": 8},
-                "planner": {"backend": "toy"},
-            }
-        )
-    assert profile.planner.options == {}, "TiPToP's settings configure nothing the toy planner reads"
-    (notice,) = _notices(caplog)
-    assert "robot dropped (tiptop's setting; this profile plans with toy)" in notice
-    assert "tamp dropped" in notice
-
-
-def test_tandem_profile_migrate_rewrites_old_profiles_and_leaves_current_ones(isolated_env):
-    from tandem.cli.app import app
-
-    _write_profile("legacy", (FIXTURES / "v1_ef1411f.yml").read_text())
-    profiles.save(
-        profiles.load_file(
-            Path(__file__).parents[1] / "src/tandem/resources/profile_template.yml", name="fresh"
-        )
-    )
-
-    result = CliRunner().invoke(app, ["profile", "migrate"])
-    assert result.exit_code == 0, result.output
-    assert "legacy: rewritten in the current layout" in result.output
-    assert "fresh: already current" in result.output
-    assert "robot" not in _yaml.load((profiles.profiles_root() / "legacy" / "profile.yml").read_text())
-
-
 def test_the_shipped_template_is_in_the_current_layout():
     data = _yaml.load((SRC / "resources" / "profile_template.yml").read_text())
     assert data["version"] == profiles.LAYOUT_VERSION
-    assert not {"robot", "perception", "tamp"} & set(data)
+    assert not {"robot", "perception", "tamp", "cameras", "name"} & set(data)
     assert data["planner"]["backend"] == "tiptop"
-    TiptopOptions.model_validate(data["planner"]["options"])  # TiPToP's own schema accepts it as written
+    TiptopTaskOptions.model_validate(data["planner"]["options"])  # TiPToP's own schema accepts it as written
 
 
 # --- (b) a planner's options are checked by that planner -------------------------------------------------
@@ -215,7 +134,7 @@ def test_a_toy_planners_options_are_checked_by_the_toy_planner_not_by_tiptops_sc
     spec = profiles.PlannerSpec(backend="toy", options={"items": ["duck", "ball"]})
     assert spec.options == {"items": ["duck", "ball"]}
     with pytest.raises(ValidationError):
-        TiptopOptions.model_validate({"items": ["duck"]})
+        TiptopTaskOptions.model_validate({"items": ["duck"]})
 
     # And what TiPToP reads is refused by the toy planner, in the toy planner's words.
     with pytest.raises(ValidationError) as excinfo:
@@ -270,11 +189,14 @@ def test_a_factory_without_the_hook_takes_its_options_as_written():
 
 def test_tiptops_options_are_tiptops_schema_with_its_defaults_filled_in():
     options = registry.validate_options("tiptop", {"tamp": {"traj_length_norm": float("inf")}})
-    assert set(options) == {"robot", "perception", "tamp"}
-    assert options["robot"]["type"] == "fr3_robotiq" and options["tamp"] == {"traj_length_norm": "inf"}
+    assert options == {"tamp": {"traj_length_norm": "inf"}}, "the task's: the machine's are the rig's"
     assert registry.validate_options("tiptop", options) == options, "its own output is accepted unchanged"
     with pytest.raises(ValidationError):
         registry.validate_options("tiptop", {"speed": 2})
+    machine = registry.validate_rig_options("tiptop", {})
+    assert set(machine) == {"robot", "perception"}
+    assert machine["robot"]["port"] == 5555 and "host" not in machine["robot"]
+    assert registry.validate_rig_options("tiptop", machine) == machine
 
 
 # --- (c) nothing outside planners/tiptop reaches into TiPToP ------------------------------------------------
@@ -379,6 +301,8 @@ TIPTOP_ROWS = {
     "zed sdk",
     "gemini for perception",
     "camera calibration",
+    "tiptop cameras",
+    "robot type",
     "tamp settings",
     "robot control",
     "robot state port",
@@ -414,8 +338,11 @@ def test_doctor_asks_tiptop_for_tiptops_rows(profile, monkeypatch):
 
     monkeypatch.setattr(secrets, "gemini_api_key", lambda: "test-key")
     checks = {c.name: c for c in collect_checks(profile_name=profile.name, probe_hardware=False)}
-    assert {"nvidia driver", "gemini for perception", "camera calibration", "tamp settings"} <= set(checks)
+    assert {"nvidia driver", "gemini for perception", "camera calibration", "tamp settings", "robot type"} <= set(
+        checks
+    )
     assert checks["camera calibration"].state == probe.OK
+    assert checks["camera calibration"].group == checks["robot type"].group == "rig"
     assert not {"robot control", "m2t2 grasp server", "zed sdk"} & set(checks), (
         "--no-hardware touches nothing"
     )

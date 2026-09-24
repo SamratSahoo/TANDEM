@@ -47,8 +47,8 @@ def _card(name: str, active: str) -> dict:
         "planner_summary": _view(profile).summary,
         "target": profile.task.target_episodes,
         "counts": counts,
-        "cameras": list(profile.cameras.configured()),
-        "dir": str(profile.dir()),
+        "file": str(profile.file()),
+        "trajectories": str(profile.trajectories_dir()),
     }
 
 
@@ -86,8 +86,6 @@ async def get_profile(name: str) -> dict:
         "profile": profile.model_dump(mode="json"),
         "planner_view": view.to_dict(),
         "warnings": list(view.warnings),
-        "calibration": profiles_mod.calibration(profile),
-        "missing_calibration": profiles_mod.missing_calibration(profile),
     }
 
 
@@ -101,7 +99,7 @@ async def update_profile(name: str, body: dict[str, Any] = Body(...)) -> dict:
     A planner or executor the file already named may be absent from this machine and stay; a name the
     edit introduces must be installed.
     """
-    path = profiles_mod.profiles_root() / name / "profile.yml"
+    path = profiles_mod.path_of(name)
     if not profiles_mod.exists(name):
         raise ProfileError(f"Profile {name!r} does not exist.")
     try:
@@ -109,7 +107,7 @@ async def update_profile(name: str, body: dict[str, Any] = Body(...)) -> dict:
     except ProfileError:
         previous_prompt = None
     payload = dict(body)
-    payload["name"] = name  # the directory is the identity
+    payload["name"] = name  # the file's name is the identity
     try:
         updated = profiles_mod.Profile.model_validate(
             payload, context={profiles_mod.ABSENT_OK: profiles_mod.names_in_file(path)}
@@ -190,7 +188,6 @@ async def create_profile(body: dict[str, Any] = Body(...)) -> dict:
         profile = base.model_copy(deep=True)
         profile.name = name
         profile.description = f"copied from {source}"
-        calibration = profiles_mod.calibration(base)
     else:
         from tandem.cli import planners as planners_cli
 
@@ -205,7 +202,6 @@ async def create_profile(body: dict[str, Any] = Body(...)) -> dict:
                 profile.planner = profiles_mod.PlannerSpec.model_construct(backend=chosen, options={})
             else:
                 profile.planner = profiles_mod.planner_spec(chosen, profile=name)
-        calibration = {}
 
     # As `tandem profile create --preset` lays one: after the base and its planner are settled, before the
     # prompt, which is this profile's own. An unknown name is a TandemError (400) naming the nearest.
@@ -222,10 +218,6 @@ async def create_profile(body: dict[str, Any] = Body(...)) -> dict:
         profile.task.prompt = str(body["prompt"])
 
     profiles_mod.save(profile)
-    if calibration:
-        import json
-
-        profile.calibration_file().write_text(json.dumps(calibration, indent=2) + "\n")
 
     cfg = settings_mod.load()
     card = _card(name, cfg.active_profile)

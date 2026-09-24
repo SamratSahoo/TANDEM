@@ -44,6 +44,10 @@ def one_line(message: str) -> str:
     return lines[0]
 
 
+class RigInvalid(TandemError):
+    """This machine's rig.yml (its robot, cameras and calibration) does not validate."""
+
+
 class RuntimeNotReady(TandemError):
     """A planner's runtime (`tandem planners install`, which `tandem init` runs) is absent or incomplete."""
 

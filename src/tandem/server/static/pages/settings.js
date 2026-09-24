@@ -55,7 +55,8 @@ async function choose(path, body, done, failed) {
 }
 
 // What a planner switch did to the profile's planner.options, said as `tandem planners use` says it:
-// the old planner's settings leave profile.yml, kept beside it and restored by a switch back.
+// the old planner's settings leave the profile, set aside in profiles/.planner-options/ and restored by a
+// switch back.
 function switchDetail(result) {
   const parts = [];
   const dropped = Object.keys(result.dropped_options || {}).sort();

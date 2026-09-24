@@ -73,7 +73,7 @@ def collect(
         [
             ("task", task or profile.goal_or_prompt()),
             ("planner", "  ·  ".join(filter(None, (registry.info(backend).title, view.summary)))),
-            ("cameras", ", ".join(profile.cameras.configured())),
+            ("cameras", ", ".join(_rig_cameras()) or "none (this machine's rig has none)"),
             ("execute", "no — planning only" if no_execute else "yes"),
             ("output", profile.trajectories_dir()),
         ]
@@ -469,6 +469,16 @@ def _hms(seconds: float) -> str:
     if seconds < 3600:
         return f"{seconds // 60:02d}:{seconds % 60:02d}"
     return f"{seconds // 3600}:{(seconds % 3600) // 60:02d}:{seconds % 60:02d}"
+
+
+def _rig_cameras() -> list[str]:
+    """The camera roles this machine's rig has. A rig that does not load is the session's to refuse."""
+    from tandem.core import rig as rig_mod
+
+    try:
+        return list(rig_mod.load().cameras.configured())
+    except TandemError:
+        return []
 
 
 def _final_summary(session, profile, log_path) -> None:

@@ -58,7 +58,6 @@ function card(profile, state, refresh, editorHost) {
       h("span.faint.small", `${done}/${profile.target}`)),
     h("div.row", { style: { marginTop: "10px" } },
       h("span.chip", { title: profile.planner_summary || "" }, profile.planner),
-      h("span.chip", `${(profile.cameras || []).length} cams`),
       // A profile collected with a plugin this machine lacks: browsable here, collects where it is installed.
       ...(profile.missing || []).map((what) =>
         h("span.chip.eval", { title: "not installed on this machine" }, `${what} missing`)),
@@ -177,7 +176,7 @@ async function openEditor(host, name, refresh) {
     h("div.row",
       h("button.primary", { onclick: save }, "Save"),
       h("div.spacer"),
-      h("span.faint.small.mono", payload.dir))
+      h("span.faint.small.mono", payload.file))
   ));
 }
 

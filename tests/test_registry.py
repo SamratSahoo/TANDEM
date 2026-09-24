@@ -459,6 +459,10 @@ def gemini_key(monkeypatch):
 
 
 def _context(profile, tmp_path, **overrides) -> BackendContext:
+    """What a session hands TiPToP's factory: the profile's options, and this machine's rig with its block."""
+    from tandem.core import rig as rig_mod
+
+    rig = rig_mod.load()
     session_dir = paths.session_scratch_dir() / profile.name / "s1"
     session_dir.mkdir(parents=True, exist_ok=True)
     events = session_dir / "events.jsonl"
@@ -474,6 +478,8 @@ def _context(profile, tmp_path, **overrides) -> BackendContext:
         events_file=events,
         runtime_dir=tmp_path / "runtime",
         options=dict(profile.planner.options),
+        rig=rig,
+        rig_options=rig_mod.planner_options(rig, "tiptop"),
     )
     fields.update(overrides)
     return BackendContext(**fields)
@@ -498,7 +504,8 @@ def test_the_tiptop_factory_builds_what_the_session_used_to_build_inline(profile
     assert backend._execute is False and backend._record is True
     assert backend._env["TIPTOP_EVENTS_FILE"] == str(ctx.events_file)
     assert backend._env["TIPTOP_TASK"] == "stack the cups"
-    assert backend._env["TIPTOP_CALIBRATION"] == str(profile.calibration_file())
+    # The rig's extrinsics, which every profile on this machine shares.
+    assert backend._env["TIPTOP_CALIBRATION"] == str(ctx.rig.calibration_file())
     assert Path(backend._env["TIPTOP_CONFIG"]).is_file(), "tiptop.yml is written where $TIPTOP_CONFIG points"
     assert backend._cost_overrides_file == ctx.session_dir / "curobo-overrides.json"
     assert json.loads(backend._cost_overrides_file.read_text()) == {"num_particles": 256}
@@ -514,8 +521,10 @@ def test_tiptop_refuses_options_it_does_not_read(profile, tmp_path):
         TIPTOP.create(_context(profile, tmp_path, options={"speed": 2}))
 
 
-def test_tiptop_refuses_a_camera_with_no_extrinsics_before_writing_anything(profile, tmp_path, gemini_key):
-    profile.calibration_file().write_text("{}\n")
+def test_tiptop_refuses_a_camera_with_no_extrinsics_before_writing_anything(
+    profile, machine_rig, tmp_path, gemini_key
+):
+    machine_rig.calibration_file().write_text("{}\n")
     with pytest.raises(TandemError, match="no camera extrinsics"):
         TIPTOP.create(_context(profile, tmp_path))
     assert not (paths.session_scratch_dir() / profile.name / "tiptop.yml").exists()

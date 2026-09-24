@@ -338,6 +338,10 @@ def test_a_pass_that_records_nothing_leaves_no_phantom_episode(live_session, bac
     session.label(True)
     assert wait_for(lambda: session.labeled_count == 1)
 
+    # The label is counted before the merge that files the episode has run (it runs on a thread of its
+    # own), so what is on disk is looked at once that merge is done. A phantom never goes away, so this
+    # still fails on one; read the moment after the label, it once failed a CI run under load.
+    assert wait_for(lambda: len(trajectories.list_all(profile)) == 1)
     listed = trajectories.list_all(profile)
     assert len(listed) == 1, f"phantom episodes left behind: {[t.id for t in listed]}"
     # The perception dump is kept, just not in the dataset.

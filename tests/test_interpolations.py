@@ -9,12 +9,13 @@ importer's tests; the importer is gone, and reading a profile still resolves the
 from __future__ import annotations
 
 import pytest
-from pydantic import ValidationError
 
 from tandem.core import probe
-from tandem.core.profiles import Profile, resolve_interpolation
+from tandem.core import rig as rig_mod
+from tandem.core.errors import RigInvalid
+from tandem.core.profiles import resolve_interpolation
 from tandem.planners.tiptop import probe as tiptop_probe
-from tandem.planners.tiptop.options import options_of
+from tandem.planners.tiptop.options import resolve_profile
 
 
 class TestResolveInterpolation:
@@ -56,41 +57,37 @@ class TestResolveInterpolation:
 
 
 class TestUrlValidation:
-    """A URL that cannot be parsed is caught where it is set, not three layers down."""
+    """A URL that cannot be parsed is caught where it is set -- rig.yml, now -- not three layers down."""
+
+    def _rig(self, url: str) -> str:
+        return f"version: 1\nplanners:\n  tiptop:\n    perception:\n      m2t2: {{url: '{url}'}}\n"
 
     def test_an_unresolved_interpolation_is_rejected(self):
-        with pytest.raises(ValidationError) as excinfo:
-            Profile.model_validate({
-                "name": "x",
-                "planner": {
-                    "options": {"perception": {"m2t2": {"url": "http://localhost:${oc.env:TIPTOP_M2T2_PORT,8123}"}}}
-                },
-            })
-        message = str(excinfo.value)
-        assert "m2t2" in message
+        with pytest.raises(RigInvalid) as excinfo:
+            rig_mod.parse_text(self._rig("http://localhost:${oc.env:TIPTOP_M2T2_PORT,8123}"), source="rig.yml")
+        message = excinfo.value.message
+        assert "planners.tiptop.perception.m2t2.url" in message
         assert "8123" in message, "the message should show the value that failed"
 
     def test_a_url_without_a_host_is_rejected(self):
-        with pytest.raises(ValidationError):
-            Profile.model_validate(
-                {"name": "x", "planner": {"options": {"perception": {"m2t2": {"url": "not-a-url"}}}}}
-            )
+        with pytest.raises(RigInvalid, match="m2t2"):
+            rig_mod.parse_text(self._rig("not-a-url"), source="rig.yml")
 
-    def test_a_good_url_passes(self):
-        profile = Profile.model_validate({
-            "name": "x", "planner": {"options": {"perception": {"m2t2": {"url": "http://10.0.0.4:8123"}}}}
-        })
-        assert options_of(profile).perception.m2t2.url == "http://10.0.0.4:8123"
+    def test_a_good_url_passes(self, machine_rig):
+        rig = rig_mod.update({"planners.tiptop.perception.m2t2.url": "http://10.0.0.4:8123"})
+        from tandem.core.profiles import Profile
+
+        assert resolve_profile(Profile(name="x"), rig).perception.m2t2.url == "http://10.0.0.4:8123"
 
 
 class TestProbeRobustness:
     """`doctor` is what you run WHEN something is wrong, so no probe may crash the run."""
 
     def test_an_unparseable_url_is_a_failed_check_not_an_exception(self):
-        check = tiptop_probe.check_m2t2("http://localhost:${oc.env:TIPTOP_M2T2_PORT,8123}")
-        assert check.state == probe.FAIL
-        assert check.hint
-        assert "${" in check.detail
+        row = tiptop_probe.check_m2t2("http://localhost:${oc.env:TIPTOP_M2T2_PORT,8123}")
+        assert row.state == probe.FAIL
+        assert row.hint and "tandem rig set planners.tiptop.perception." in row.hint
+        assert "${" in row.detail
 
     def test_a_nonsense_url_is_a_failed_check(self):
         assert tiptop_probe.check_m2t2("").state == probe.FAIL
@@ -99,35 +96,34 @@ class TestProbeRobustness:
     def test_a_reachable_looking_url_still_probes(self):
         # Nothing is listening, so this warns rather than fails — the distinction being that
         # the URL is usable and the server merely is not up yet.
-        check = tiptop_probe.check_m2t2("http://127.0.0.1:1")
-        assert check.state == probe.WARN
+        assert tiptop_probe.check_m2t2("http://127.0.0.1:1").state == probe.WARN
 
 
 class TestStoredProfilesSelfHeal:
     """A profile file that still holds an interpolation, written from one of the monorepo's configs."""
 
-    def test_a_stored_interpolation_still_loads(self, profile):
+    def test_a_stored_interpolation_still_loads(self, profile, monkeypatch):
         """Turning a probe crash into a profile that cannot be opened at all would be a
         worse outcome, so reading resolves too — the file heals on the next save."""
         from tandem.core import profiles
 
-        text = profile.profile_file().read_text().replace(
-            "url: http://localhost:8123",
-            "url: http://localhost:${oc.env:TIPTOP_M2T2_PORT,8123}",
+        monkeypatch.delenv("TANDEM_TEST_PROPOSER", raising=False)
+        text = profile.file().read_text().replace(
+            "proposal_model: gemini-2.5-pro", "proposal_model: ${oc.env:TANDEM_TEST_PROPOSER,gemini-2.5-pro}"
         )
-        profile.profile_file().write_text(text)
+        assert "${oc.env" in text
+        profile.file().write_text(text)
 
-        loaded = profiles.load(profile.name)
-        assert options_of(loaded).perception.m2t2.url == "http://localhost:8123"
+        assert profiles.load(profile.name).hitl.proposal_model == "gemini-2.5-pro"
 
-    def test_saving_writes_the_resolved_value_back(self, profile):
+    def test_saving_writes_the_resolved_value_back(self, profile, monkeypatch):
         from tandem.core import profiles
 
-        text = profile.profile_file().read_text().replace(
-            "url: http://localhost:8123",
-            "url: http://localhost:${oc.env:TIPTOP_M2T2_PORT,8123}",
+        monkeypatch.delenv("TANDEM_TEST_PROPOSER", raising=False)
+        text = profile.file().read_text().replace(
+            "proposal_model: gemini-2.5-pro", "proposal_model: ${oc.env:TANDEM_TEST_PROPOSER,gemini-2.5-pro}"
         )
-        profile.profile_file().write_text(text)
+        profile.file().write_text(text)
 
         profiles.save(profiles.load(profile.name))
-        assert "${oc.env" not in profile.profile_file().read_text()
+        assert "${oc.env" not in profile.file().read_text()

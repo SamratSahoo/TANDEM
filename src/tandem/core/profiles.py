@@ -1,27 +1,26 @@
-"""Profiles — a named collection setup and the trajectories it produced.
+"""Profiles — a task, and the trajectories collected for it.
 
-One profile replaces three overlapping ideas from the source monorepo:
-
-  * ``cfg/tamp/<name>.yml``  — task prompt, TAMP overrides, episode target, HF slug
-  * ``DC_WORKSPACE``         — per-robot data scoping and camera extrinsics
-  * ``settings.json``        — robot host/ports, camera serials
+A profile is what a task is collected with: the prompt, phase planning, the planner and its TAMP
+settings, recording and export. It is one YAML file, named for the profile. What the machine it is
+collected on has -- the robot's address, the cameras, their extrinsics, a grasp server's URL -- is not a
+task's: it is the rig's (``tandem.core.rig``, rig.yml beside config.toml), which every profile shares.
 
 On disk::
 
-    <data_root>/profiles/<name>/
-        profile.yml
-        calibration.json          # camera extrinsics keyed by serial
-        trajectories/
-            eval/<ts>/            # collected, not yet labeled
-            success/<ts>/
-            failure/<ts>/
+    <data_root>/profiles/<name>.yml           the task's settings (the file's name is the profile's)
+    <data_root>/profiles/.planner-options/    a previous planner's options, set aside by `planners use`
+    <data_root>/trajectories/<name>/
+        eval/<ts>/            # collected, not yet labeled
+        success/<ts>/
+        failure/<ts>/
+
+Profiles written before version 3 were directories (``profiles/<name>/profile.yml``, with the cameras,
+the robot and a calibration.json of their own), and are not read as profiles.
 """
 
 from __future__ import annotations
 
 import io
-import json
-import logging
 import os
 import re
 from collections.abc import Collection, Mapping
@@ -40,8 +39,16 @@ NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 STATUSES = ("eval", "success", "failure")
 
-#: What each profile.yml is written as. 2: a planner's own settings are under planner.options.
-LAYOUT_VERSION = 2
+#: What each profile file is written as. 3: one file per profile, holding the task's settings only; the
+#: robot, cameras and calibration are the rig's. (2: a planner's settings under planner.options; 1: at the
+#: top level.)
+LAYOUT_VERSION = 3
+
+#: The top-level sections a profile had before version 3 that are not a task's. Refused in a profile file.
+OLD_SECTIONS = ("cameras", "robot", "perception", "tamp")
+
+#: Where a profile's previous planner's options are set aside (``stash_file``), inside profiles/.
+STASH_DIR = ".planner-options"
 
 # OmegaConf env interpolations: "${oc.env:VAR}" or "${oc.env:VAR,default}".
 #
@@ -64,8 +71,6 @@ def resolve_interpolation(value: Any) -> Any:
         return value
 
     def replace(match: re.Match) -> str:
-        import os
-
         name, default = match.group(1), match.group(2)
         env = os.environ.get(name)
         if env is not None and env.strip():
@@ -147,60 +152,6 @@ class TaskSpec(BaseModel):
         if v <= 0:
             raise ValueError("target_episodes must be > 0")
         return v
-
-
-class CameraSpec(BaseModel):
-    model_config = {"extra": "forbid"}
-
-    serial: str
-    type: str = "zed"
-    resolution: str = "HD720"
-    # 15, not 30: three ZEDs at HD720@30 exceed the USB bandwidth budget and fail to open.
-    # The LeRobot export resamples to 15 Hz anyway, so nothing is lost.
-    fps: int = 15
-
-
-class CamerasSpec(BaseModel):
-    model_config = {"extra": "forbid"}
-
-    # Which camera the perception pipeline reads. "external" leaves the arm at q_home (a
-    # static third-person pose comes straight from calibration); "hand" drives the arm to
-    # q_capture and recomputes the pose by forward kinematics each time.
-    perception: str = "external"
-    hand: CameraSpec | None = None
-    external: CameraSpec | None = None
-    # Recorded as DROID exterior_2. Omit for a deliberate two-camera rig: when it IS
-    # configured and fails to open, tiptop aborts before any rollout rather than collect an
-    # episode with a missing camera.
-    external_2: CameraSpec | None = None
-
-    @field_validator("perception")
-    @classmethod
-    def _perception_choice(cls, v: str) -> str:
-        if v not in {"hand", "external"}:
-            raise ValueError("cameras.perception must be 'hand' or 'external'")
-        return v
-
-    @model_validator(mode="after")
-    def _perception_camera_present(self):
-        # A profile with no cameras at all is legitimate: on a laptop it is just a folder of
-        # trajectories collected elsewhere. But a profile that HAS cameras and points
-        # perception at one it does not have would fail at warmup, minutes in, with a message
-        # about the wrong thing.
-        if not self.configured():
-            return self
-        if getattr(self, self.perception) is None:
-            raise ValueError(
-                f"cameras.perception is {self.perception!r} but cameras.{self.perception} is not configured"
-            )
-        return self
-
-    def configured(self) -> dict[str, CameraSpec]:
-        return {
-            key: cam
-            for key in ("hand", "external", "external_2")
-            if (cam := getattr(self, key)) is not None
-        }
 
 
 class HitlSpec(BaseModel):
@@ -412,13 +363,14 @@ class PlannerSpec(BaseModel):
     name is an error rather than a fallback, because a session that silently planned with a
     different planner from the one asked for produces a dataset nobody can interpret afterwards.
 
-    `options` is the named planner's own settings block: TiPToP's robot, perception and TAMP
-    overrides, a toy planner's list of items. Its keys are the planner's to define and to check, so
-    the planner checks them -- here, when the profile loads, through its ``validate_options`` -- and
-    what is stored is what the planner returned: normalised, defaults filled in. A mistake is then
-    found when the profile is edited, not when a session starts with the arm about to move. A planner
-    that cannot be loaded at all cannot check them; its options are kept as written, and the session
-    that tries to build it says why.
+    `options` is the named planner's own settings for this TASK: TiPToP's TAMP overrides, a toy
+    planner's list of items. What a planner needs of the MACHINE -- a robot shim's ports, a grasp
+    server -- is the rig's (``planners.<name>`` in rig.yml), and refused here with where it lives. Its
+    keys are the planner's to define and to check, so the planner checks them -- here, when the profile
+    loads, through its ``validate_options`` -- and what is stored is what the planner returned:
+    normalised, defaults filled in. A mistake is then found when the profile is edited, not when a
+    session starts with the arm about to move. A planner that cannot be loaded at all cannot check them;
+    its options are kept as written, and the session that tries to build it says why.
     """
 
     model_config = {"extra": "forbid"}
@@ -499,7 +451,7 @@ def planner_spec(backend: str, options: Mapping[str, Any] | None = None, *, prof
 
     Every command that points a profile at a planner builds one of these -- `planners use`, `profile
     create --planner`, `init`, the web's create and use buttons -- usually with no options at all. A
-    planner may require a setting that has no sensible default (a robot's address), and its
+    planner may require a task setting that has no sensible default (a scene file), and its
     ``validate_options`` then refuses the empty block; built bare, that refusal is a pydantic
     ValidationError, which the CLI shows as a traceback and the server as a 500. Here it is the planner's
     own complaint, located under planner.options, with the way to supply what it asked for.
@@ -521,7 +473,16 @@ class RecordingSpec(BaseModel):
     model_config = {"extra": "forbid"}
 
     enabled: bool = True
-    fps: int = 15
+
+    @model_validator(mode="before")
+    @classmethod
+    def _no_rate(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "fps" in data:
+            raise ValueError(
+                "recording.fps is gone: nothing ever read it. Each camera records at the rig's "
+                "cameras.<role>.fps; remove it from the profile"
+            )
+        return data
 
 
 class ExportSpec(BaseModel):
@@ -532,7 +493,7 @@ class ExportSpec(BaseModel):
 
 
 class Profile(BaseModel):
-    """A validated profile. `raw_dir` is where it came from; not part of the file."""
+    """A validated profile. Its name is its file's; it is never written into the file."""
 
     model_config = {"extra": "forbid"}
 
@@ -540,29 +501,44 @@ class Profile(BaseModel):
     name: str = "default"
     description: str = ""
     task: TaskSpec = Field(default_factory=TaskSpec)
-    # The rig's cameras, by role. tandem's, not the planner's: the teleop executor records from
-    # them, and their roles are the dataset's camera layout. A planner reads them from here too.
-    cameras: CamerasSpec = Field(default_factory=CamerasSpec)
     # Phase planning: tandem's own method, so its settings are tandem's whichever planner runs.
     hitl: HitlSpec = Field(default_factory=HitlSpec)
-    # Which planner, and everything that is only that planner's business (planner.options).
+    # Which planner, and its settings for this task (planner.options).
     planner: PlannerSpec = Field(default_factory=PlannerSpec)
     recording: RecordingSpec = Field(default_factory=RecordingSpec)
     export: ExportSpec = Field(default_factory=ExportSpec)
-    # The profiles root this profile's directory is under, fixed by `pinned`; None resolves it afresh
-    # on every call. Not a setting: it is never written into profile.yml.
+    # The data root this profile's file and trajectories are under, fixed by `pinned`; None resolves it
+    # afresh on every call. Not a setting: it is never written into the file.
     _root: Path | None = PrivateAttr(default=None)
 
     @model_validator(mode="before")
     @classmethod
-    def _current_layout(cls, data: Any, info: ValidationInfo) -> Any:
+    def _current_layout(cls, data: Any) -> Any:
         if not isinstance(data, dict):
             return data
-        data, moved = migrate(data)
-        if moved:
-            context = info.context if isinstance(info.context, dict) else {}
-            _notice_migrated(str(data.get("name") or "?"), moved, context.get("source"))
+        try:
+            version = int(data.get("version", LAYOUT_VERSION))
+        except (TypeError, ValueError):
+            return data  # the version field says what is wrong with it
+        older = [key for key in OLD_SECTIONS if key in data]
+        if version < LAYOUT_VERSION or older:
+            found = f" (it has {', '.join(older)} at the top)" if older else f" (version {version})"
+            raise ValueError(
+                f"this profile is in the layout before version {LAYOUT_VERSION}{found}: its robot and cameras "
+                "are this machine's rig now. Move those sections into rig.yml (`tandem rig edit`) and set "
+                f"version: {LAYOUT_VERSION}"
+            )
         return data
+
+    @field_validator("version")
+    @classmethod
+    def _readable(cls, v: int) -> int:
+        if v > LAYOUT_VERSION:
+            raise ValueError(
+                f"version {v} was written by a newer tandem (this one reads version {LAYOUT_VERSION}); "
+                "upgrade tandem"
+            )
+        return v
 
     @field_validator("name")
     @classmethod
@@ -577,13 +553,13 @@ class Profile(BaseModel):
 
     # ---- paths -------------------------------------------------------------
 
-    def dir(self) -> Path:
-        return (self._root if self._root is not None else profiles_root()) / self.name
+    def _data_root(self) -> Path:
+        return self._root if self._root is not None else settings_mod.load().resolved_data_root()
 
     def pinned(self) -> Profile:
-        """This profile, with its directory fixed where it resolves now.
+        """This profile, with its data root fixed where it resolves now.
 
-        ``dir()`` otherwise resolves the data root afresh on every call, from $TANDEM_DATA_ROOT, the
+        The paths below otherwise resolve the data root afresh on every call, from $TANDEM_DATA_ROOT, the
         settings and the home directory, whichever thread asks. A session's merge runs on a thread of
         its own, and can outlive the environment it was started in: one that outlived its test put a
         trajectory into the real ~/tandem-data, the test's own data root having been unset by then.
@@ -593,17 +569,14 @@ class Profile(BaseModel):
         ``model_dump()`` to ask whether two say the same thing.
         """
         copy = self.model_copy()
-        copy._root = self.dir().parent
+        copy._root = self._data_root()
         return copy
 
-    def profile_file(self) -> Path:
-        return self.dir() / "profile.yml"
-
-    def calibration_file(self) -> Path:
-        return self.dir() / "calibration.json"
+    def file(self) -> Path:
+        return self._data_root() / "profiles" / f"{self.name}.yml"
 
     def trajectories_dir(self) -> Path:
-        return self.dir() / "trajectories"
+        return self._data_root() / "trajectories" / self.name
 
     def status_dir(self, status: str) -> Path:
         if status not in STATUSES:
@@ -614,108 +587,6 @@ class Profile(BaseModel):
         return self.task.goal or self.task.prompt
 
 
-# --------------------------------------------------------------------------- the older layout
-#
-# Until profile version 2 a planner's settings sat at the top level of every profile -- `robot:`,
-# `perception:` and `tamp:`, beside `task:` and `cameras:`. They were TiPToP's, the only planner there
-# was, and they are TiPToP's `planner.options` now. A profile in the older layout still loads: it is
-# migrated as it is read, saying so once, and written in the current layout the next time it is saved.
-
-#: The top-level sections of the older layout that belong to a planner, and the planner they belong to.
-LEGACY_PLANNER_SECTIONS = ("robot", "perception", "tamp")
-LEGACY_PLANNER = "tiptop"
-
-_log = logging.getLogger(__name__)
-# Profiles already said to be in the older layout, so a command that loads one ten times says it once.
-_noticed: set[str] = set()
-
-
-def is_older_layout(data: Mapping[str, Any]) -> bool:
-    """Whether a profile's raw settings are in a layout before the current one, and so need rewriting."""
-    try:
-        version = int(data.get("version") or 0)
-    except (TypeError, ValueError):
-        version = 0
-    return version < LAYOUT_VERSION or any(key in data for key in LEGACY_PLANNER_SECTIONS)
-
-
-def migrate(data: dict) -> tuple[dict, list[str]]:
-    """``data`` in the current layout, and which of its top-level sections had to move to get there.
-
-    A planner's sections go under ``planner.options`` when the profile plans with the planner they
-    belong to. When it plans with another, nothing ever read them -- a planner is built from its own
-    options alone -- so they are dropped, and said to be: the one change that loses a setting is the
-    one that must not be quiet. A section set in both places is refused rather than one of them
-    silently winning.
-    """
-    older = int(data.get("version") or 0) < LAYOUT_VERSION
-    kept = _kept_from_version_1(data) if older else []
-    moved = [key for key in LEGACY_PLANNER_SECTIONS if key in data]
-    if not moved:
-        if older:
-            data = {**data, "version": LAYOUT_VERSION}
-        return data, kept
-    data = dict(data)
-    sections = {key: data.pop(key) for key in moved}
-    planner = dict(data.get("planner") or {})
-    backend = planner.get("backend") or LEGACY_PLANNER
-    if backend == LEGACY_PLANNER:
-        options = dict(planner.get("options") or {})
-        both = [key for key in moved if key in options]
-        if both:
-            raise ValueError(
-                f"{', '.join(both)} is set both at the top level (the layout before profile version "
-                f"{LAYOUT_VERSION}) and under planner.options; keep only the planner.options one"
-            )
-        planner["options"] = {**sections, **options}
-        planner["backend"] = backend
-        data["planner"] = planner
-        moved = [f"{key} under planner.options" for key in moved]
-    else:
-        moved = [f"{key} dropped ({LEGACY_PLANNER}'s setting; this profile plans with {backend})" for key in moved]
-    data["version"] = LAYOUT_VERSION
-    return data, moved + kept
-
-
-#: What version 1 wrote into every profile for on_robot_phase_failure: its default, and the template's.
-_VERSION_1_ROBOT_FAILURE = "teleop"
-
-
-def _kept_from_version_1(data: dict) -> list[str]:
-    """Settings a version-1 profile carries over unchanged that no longer mean what they meant.
-
-    Version 1 defaulted ``hitl.on_robot_phase_failure`` to teleop, stated it in the template, and wrote
-    every field on save -- so every version-1 profile on disk says teleop whether or not anyone chose
-    it. The default is now abort, the paper's rule (a planning failure is a trial failure; a teleop
-    fallback credits the method with trials it did not complete and understates the human effort).
-    The value is KEPT -- a migration cannot tell a deliberate choice from the old default, and silently
-    changing what a collection run does is worse -- but it is said, alongside the sections that moved.
-    """
-    hitl = data.get("hitl")
-    if isinstance(hitl, dict) and hitl.get("on_robot_phase_failure") == _VERSION_1_ROBOT_FAILURE:
-        return [
-            "hitl.on_robot_phase_failure kept at teleop (version 1's default; the default is now abort, "
-            "the paper's rule: set it to abort unless teleop was chosen on purpose)"
-        ]
-    return []
-
-
-def _notice_migrated(name: str, moved: list[str], source: str | None) -> None:
-    key = source or name
-    if key in _noticed:
-        return
-    _noticed.add(key)
-    where = source or f"profile {name!r}"
-    _log.warning(
-        "%s is in the layout before profile version %s, and was read with %s; "
-        "`tandem profile migrate %s` rewrites it",
-        where,
-        LAYOUT_VERSION,
-        ", ".join(moved),
-        name,
-    )
-
-
 # --------------------------------------------------------------------------- store
 
 
@@ -723,11 +594,16 @@ def profiles_root() -> Path:
     return settings_mod.load().profiles_root()
 
 
+def trajectories_root() -> Path:
+    return settings_mod.load().trajectories_root()
+
+
 def list_names() -> list[str]:
+    """Every profile here: the names of the ``<name>.yml`` files in profiles/, sorted."""
     root = profiles_root()
     if not root.is_dir():
         return []
-    return sorted(p.name for p in root.iterdir() if p.is_dir() and (p / "profile.yml").is_file())
+    return sorted(p.stem for p in root.iterdir() if p.suffix == ".yml" and is_name(p.stem) and p.is_file())
 
 
 def is_name(name: object) -> bool:
@@ -738,9 +614,9 @@ def is_name(name: object) -> bool:
 def _checked(name: object) -> str:
     """``name``, if it can be a profile's name; otherwise a ProfileError.
 
-    Every path under profiles/ is built from a name, and names arrive from URLs as well as from the
-    command line -- where ``%2E%2E`` decodes to ``..`` before any route sees it. A name that is not a
-    profile name never becomes a path.
+    Every path under profiles/ and trajectories/ is built from a name, and names arrive from URLs as well
+    as from the command line -- where ``%2E%2E`` decodes to ``..`` before any route sees it. A name that
+    is not a profile name never becomes a path.
     """
     if not is_name(name):
         known = list_names()
@@ -750,6 +626,11 @@ def _checked(name: object) -> str:
             + (f"Known profiles: {', '.join(known)}." if known else "No profiles exist yet."),
         )
     return str(name)
+
+
+def path_of(name: str) -> Path:
+    """The profile ``name``'s file, whether or not it exists. ``name`` is checked before it becomes a path."""
+    return profiles_root() / f"{_checked(name)}.yml"
 
 
 def _not_found(name: str, path: Path) -> ProfileError:
@@ -763,11 +644,11 @@ def _not_found(name: str, path: Path) -> ProfileError:
 
 
 def exists(name: str) -> bool:
-    return is_name(name) and (profiles_root() / name / "profile.yml").is_file()
+    return is_name(name) and path_of(name).is_file()
 
 
 def _existing_file(name: str) -> Path:
-    path = profiles_root() / _checked(name) / "profile.yml"
+    path = path_of(name)
     if not path.is_file():
         raise _not_found(name, path)
     return path
@@ -791,8 +672,8 @@ def read_data(path: Path, *, name: str | None = None) -> dict:
 
     What `load_file` validates, and what a command that must repair an invalid profile edits (see
     ``switch_planner``). An empty file, or one that is not a mapping, is refused here: read as "no
-    settings" it would load as a profile of pure defaults -- another planner, another robot address,
-    the template's task -- without a word.
+    settings" it would load as a profile of pure defaults -- another planner, the template's task --
+    without a word.
     """
     try:
         with path.open() as fh:
@@ -812,11 +693,9 @@ def read_data(path: Path, *, name: str | None = None) -> dict:
             hint="`tandem profile edit NAME` opens it.",
         )
     if name is not None:
-        data.setdefault("name", name)
-        if data.get("name") != name:
-            # The directory is the identity; a stale `name:` inside the file would make
-            # run dirs and HF slugs disagree with where the data actually lives.
-            data["name"] = name
+        # The file's name is the identity; a stale `name:` inside it would make run dirs and HF slugs
+        # disagree with where the data actually lives.
+        data["name"] = name
     return data
 
 
@@ -827,16 +706,18 @@ def load_file(
     require_installed: bool = True,
     keep_absent: Collection[str] = (),
 ) -> Profile:
-    """The profile in ``path``. ``keep_absent``: planner or executor names accepted though not installed
-    here -- the ones the file named before an edit, which an edit of something else must not be refused over."""
+    """The profile in ``path``, named ``name`` (default: the file's stem). ``keep_absent``: planner or
+    executor names accepted though not installed here -- the ones the file named before an edit, which an
+    edit of something else must not be refused over."""
     absent_ok: bool | frozenset[str] = True if not require_installed else frozenset(keep_absent)
+    name = name if name is not None else (Path(path).stem if is_name(Path(path).stem) else None)
     return _validate(read_data(path, name=name), source=path, absent_ok=absent_ok)
 
 
 def names_in_file(path: Path) -> frozenset[str]:
     """The planner and human executor ``path`` names, read as written. Empty when it cannot be read."""
     try:
-        return _names_in(migrate(read_data(path))[0])
+        return _names_in(read_data(path))
     except (ProfileError, ValueError, OSError):
         return frozenset()
 
@@ -852,7 +733,7 @@ def _names_in(data: Mapping[str, Any]) -> frozenset[str]:
     """The planner and human executor a raw profile names, defaulted as a profile would default them."""
     planner = data.get("planner") if isinstance(data.get("planner"), Mapping) else {}
     hitl = data.get("hitl") if isinstance(data.get("hitl"), Mapping) else {}
-    named = (planner.get("backend") or LEGACY_PLANNER, hitl.get("human_executor") or "teleop")
+    named = (planner.get("backend") or PlannerSpec().backend, hitl.get("human_executor") or "teleop")
     return frozenset(n for n in named if isinstance(n, str))
 
 
@@ -860,35 +741,33 @@ def _names_on_disk(name: str) -> frozenset[str]:
     """What the profile ``name`` names on disk now: the names a rewrite of it may keep though absent here."""
     if not exists(name):
         return frozenset()
-    return names_in_file(profiles_root() / name / "profile.yml")
+    return names_in_file(path_of(name))
 
 
 def save(profile: Profile) -> Path:
-    """Write a profile, creating its directory tree. Round-trips through validation first.
+    """Write a profile's file, and make its trajectories' directories. Round-trips through validation first.
 
     What is written is the validated copy, so a planner's options reach the file as the planner
-    normalised them, and a profile read in the older layout is written in the current one.
+    normalised them.
 
     A planner or executor the file ALREADY names may be absent from this machine: a profile collected on
     a workstation is rewritten on a laptop for reasons that have nothing to do with it (its prompt, a
     switch of the other one). A name being newly written must be installed.
 
-    The file is replaced whole or not at all: serialised first, written beside it, and renamed over it.
-    Truncating profile.yml before a dump that could fail -- over a value YAML cannot represent, a Ctrl-C,
-    a full disk -- once left an empty file that then loaded, silently, as a profile of defaults.
+    The file is replaced whole or not at all (``paths.write_atomic``): truncating it before a dump that
+    could fail -- over a value YAML cannot represent, a Ctrl-C, a full disk -- once left an empty file
+    that then loaded, silently, as a profile of defaults.
     """
+    # Where it goes, from the profile given: a pinned one keeps its data root through the copy below.
+    path, trajectories = profile.file(), profile.trajectories_dir()
     try:
         profile = Profile.model_validate(profile.model_dump(), context={ABSENT_OK: _names_on_disk(profile.name)})
     except Exception as exc:
         raise ProfileInvalid(f"Profile {profile.name!r} is not valid:\n{format_errors(exc)}") from exc
     text = _yaml_text(_dump_dict(profile), what=f"Profile {profile.name!r}")
-    pdir = profile.dir()
-    pdir.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
     for status in STATUSES:
-        (pdir / "trajectories" / status).mkdir(parents=True, exist_ok=True)
-    if not profile.calibration_file().is_file():
-        profile.calibration_file().write_text("{}\n")
-    path = profile.profile_file()
+        (trajectories / status).mkdir(parents=True, exist_ok=True)
     _write_atomic(path, text)
     return path
 
@@ -913,65 +792,59 @@ def _yaml_text(data: Any, *, what: str) -> str:
 
 
 def _write_atomic(path: Path, text: str) -> None:
-    partial = path.with_name(f".{path.name}.partial")
-    try:
-        with partial.open("w") as fh:
-            fh.write(text)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(partial, path)
-    finally:
-        partial.unlink(missing_ok=True)
+    from tandem.core import paths
+
+    paths.write_atomic(path, text)
 
 
 def _dump_dict(profile: Profile) -> dict:
-    """model_dump with None-valued optionals dropped, so the file stays readable."""
+    """model_dump with None-valued optionals dropped, so the file stays readable, and without the name:
+    the file's own name is the profile's."""
     data = profile.model_dump(mode="python", exclude_none=True)
-    cams = data.get("cameras", {})
-    for key in ("hand", "external", "external_2"):
-        if cams.get(key) is None:
-            cams.pop(key, None)
+    data.pop("name", None)
     return data
 
 
 def delete(name: str, *, keep_data: bool = True) -> Path:
-    """Remove a profile. By default the trajectories survive, mirroring the source's
+    """Remove a profile's file. By default its trajectories survive, mirroring the source's
     non-destructive workspace delete — re-creating the name brings the data back.
 
     ``name`` is checked before it becomes a path, and a purge removes only a directory directly inside
-    profiles/: this is reached from a URL, and ``DELETE /api/profiles/%2E%2E?purge=true`` once meant
-    ``rmtree(<data root>)``. A soft-deleted profile (profile.yml gone, data kept) can still be purged.
+    trajectories/: this is reached from a URL, and ``DELETE /api/profiles/%2E%2E?purge=true`` once meant
+    ``rmtree(<data root>)``. A soft-deleted profile (its file gone, its data kept) can still be purged.
     """
     import shutil
 
-    root = profiles_root()
-    pdir = root / _checked(name)
-    if not pdir.is_dir():
+    name = _checked(name)
+    path = path_of(name)
+    root = trajectories_root()
+    data = root / name
+    if not path.is_file() and not data.is_dir():
         raise ProfileError(f"Profile {name!r} does not exist.")
-    if keep_data:
-        pdir.joinpath("profile.yml").unlink(missing_ok=True)
-        return pdir
-    if pdir.is_symlink() or pdir.resolve().parent != root.resolve():
-        raise ProfileError(
-            f"Refusing to purge {pdir}: it is not a profile directory inside {root}.",
-            hint="`tandem profile delete NAME` without --purge removes the profile and keeps its data.",
-        )
-    shutil.rmtree(pdir)
-    return pdir
+    if not keep_data and data.exists():
+        if data.is_symlink() or data.resolve().parent != root.resolve():
+            raise ProfileError(
+                f"Refusing to purge {data}: it is not a profile's trajectories directory inside {root}.",
+                hint="`tandem profile delete NAME` without --purge removes the profile and keeps its data.",
+            )
+    path.unlink(missing_ok=True)
+    if not keep_data and data.exists():
+        shutil.rmtree(data)
+    return path
 
 
 # --------------------------------------------------------------------------- switching what a profile uses
 #
-# `tandem planners use` and `tandem executors use` (and the web's buttons, and `tandem init --planner`)
-# change one name in a profile. They work from the file as written rather than from a loaded profile,
-# because they are also how a profile is REPAIRED: one naming a planner or executor this machine no
-# longer has does not load, and the command every error points at must not refuse for that reason.
-# Everything else in the file is still validated, and a problem anywhere else still refuses.
+# `tandem planners use` and `tandem executors use` (and the web's buttons) change one name in a profile.
+# They work from the file as written rather than from a loaded profile, because they are also how a
+# profile is REPAIRED: one naming a planner or executor this machine no longer has does not load, and the
+# command every error points at must not refuse for that reason. Everything else in the file is still
+# validated, and a problem anywhere else still refuses.
 
 
-def stash_file(profile_dir: Path, backend: str) -> Path:
-    """Where a planner's options are set aside when its profile switches to another planner."""
-    return profile_dir / f"planner-options.{backend}.yml"
+def stash_file(name: str, backend: str) -> Path:
+    """Where the profile ``name``'s options for ``backend`` are set aside when it switches to another planner."""
+    return profiles_root() / STASH_DIR / f"{_checked(name)}.{backend}.yml"
 
 
 def switch_planner(name: str, backend: str, *, options: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -981,27 +854,28 @@ def switch_planner(name: str, backend: str, *, options: Mapping[str, Any] | None
     are laid over what the planner starts with -- for a planner that needs a setting no default can give.
 
     A planner's options are its own -- another planner refuses them rather than ignore them -- so they
-    cannot stay in profile.yml once it plans with another. They are not thrown away either: they are the
-    rig's robot address and home pose, a preset's TAMP settings, which a switch back to bare defaults
-    would lose without a word. They are set aside in ``planner-options.<planner>.yml`` beside the
-    profile, and switching back restores them, checked again by the planner. If it no longer accepts
-    them, the switch goes ahead with its defaults, the file is kept, and the result says why.
+    cannot stay in the profile once it plans with another. They are not thrown away either: they are a
+    task's TAMP settings, which a switch back to bare defaults would lose without a word. They are set
+    aside in ``profiles/.planner-options/<name>.<planner>.yml``, and switching back restores them,
+    checked again by the planner. If it no longer accepts them, the switch goes ahead with its defaults,
+    the file is kept, and the result says why. (A planner's machine settings are the rig's, and never
+    move: every profile shares them.)
 
-    Returns ``profile`` (as saved), ``previous``, ``changed``, ``dropped_options`` (what left
-    profile.yml), ``saved_to`` (where they went), ``restored_options`` and ``restore_problem``.
+    Returns ``profile`` (as saved), ``previous``, ``changed``, ``dropped_options`` (what left the
+    profile), ``saved_to`` (where they went), ``restored_options`` and ``restore_problem``.
     """
     from tandem.core.errors import one_line
 
     path = _existing_file(name)
-    data, _ = migrate(read_data(path, name=name))
+    data = read_data(path, name=name)
     planner = data.get("planner") if isinstance(data.get("planner"), dict) else {}
-    previous = str(planner.get("backend") or LEGACY_PLANNER)
+    previous = str(planner.get("backend") or PlannerSpec().backend)
     current = dict(planner.get("options") or {}) if isinstance(planner.get("options"), dict) else {}
     given = dict(options or {})
     changed = previous != backend
     restored: dict[str, Any] = {}
     problem: str | None = None
-    stash = stash_file(path.parent, backend)
+    stash = stash_file(name, backend)
 
     spec: PlannerSpec | None = None
     if not changed:
@@ -1023,7 +897,8 @@ def switch_planner(name: str, backend: str, *, options: Mapping[str, Any] | None
 
     saved_to: str | None = None
     if changed and current:
-        target = stash_file(path.parent, previous)
+        target = stash_file(name, previous)
+        target.parent.mkdir(parents=True, exist_ok=True)
         _write_atomic(target, _yaml_text(current, what=f"{previous}'s planner.options"))
         saved_to = str(target)
     if spec is not None:
@@ -1048,7 +923,7 @@ def set_human_executor(name: str, executor: str) -> dict[str, Any]:
     settings under hitl.human_executor_options stay where they are.
     """
     path = _existing_file(name)
-    data, _ = migrate(read_data(path, name=name))
+    data = read_data(path, name=name)
     hitl = dict(data["hitl"]) if isinstance(data.get("hitl"), dict) else {}
     previous = str(hitl.get("human_executor") or "teleop")
     hitl["human_executor"] = executor
@@ -1072,21 +947,21 @@ def _read_mapping(path: Path) -> dict[str, Any]:
 
 
 def resolve_path(profile: Profile, value: str) -> Path:
-    """A path a profile names, as the profile's author meant it: absolute as written, else beside the profile.
+    """A path a profile names, as its author meant it: absolute as written, else beside the profile's file.
 
-    One reading for every path a profile holds, so a relative path means "next to profile.yml" and not
-    "wherever the command happened to be started from".
+    One reading for every path a profile holds, so a relative path means "in profiles/, next to the
+    file" and not "wherever the command happened to be started from".
     """
     candidate = Path(os.path.expanduser(str(value)))
     if candidate.is_absolute():
         return candidate
-    return (profile.dir() / candidate).resolve()
+    return (profile.file().parent / candidate).resolve()
 
 
 def resolve_cache_path(profile: Profile) -> str | None:
     """The proposal cache's absolute path, or None when the profile sets none.
 
-    A relative cache path means "beside the profile" (``resolve_path``). One reading, because three
+    A relative cache path means "beside the profile's file" (``resolve_path``). One reading, because three
     different commands read this key: a collection session, `tandem plan --profile`, and `tandem
     doctor`. Resolving it differently in any of them means they open DIFFERENT SQLite files, so the
     cache never hits across them -- and since opening one creates its parent directories, the odd one
@@ -1095,26 +970,6 @@ def resolve_cache_path(profile: Profile) -> str | None:
     if not profile.hitl.cache_path:
         return None
     return str(resolve_path(profile, str(profile.hitl.cache_path)))
-
-
-def calibration(profile: Profile) -> dict:
-    path = profile.calibration_file()
-    if not path.is_file():
-        return {}
-    try:
-        return json.loads(path.read_text())
-    except json.JSONDecodeError as exc:
-        raise ProfileError(f"{path} is not valid JSON: {exc}") from exc
-
-
-def missing_calibration(profile: Profile) -> list[str]:
-    """Configured camera serials with no extrinsics entry.
-
-    Extrinsics are keyed by serial, and a planner that localises from them (TiPToP raises at warm-up
-    for a serial it cannot find) is better told before a session starts.
-    """
-    known = set(calibration(profile))
-    return [cam.serial for cam in profile.cameras.configured().values() if cam.serial not in known]
 
 
 # --------------------------------------------------------------------------- helpers
