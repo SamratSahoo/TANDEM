@@ -269,7 +269,7 @@ def _merge_tamp_config(data: dict, options: dict, raw: dict, notes: list[str]) -
             f"{'it' if one else 'them'}; check the task still works without {'it' if one else 'them'}."
         )
     if raw.get("tamp_overrides"):
-        _note_lj_behaviours(overrides, notes)
+        _add_lj_behaviours(overrides, notes)
         # Substituted, not merged: an upstream cfg/tamp file is a complete TAMP specification,
         # and folding the template's defaults into it would change the trajectories it
         # produces. Unknown keys fail loudly rather than import a knob that does nothing --
@@ -292,9 +292,9 @@ def _merge_tamp_config(data: dict, options: dict, raw: dict, notes: list[str]) -
         data["export"] = {"hf_repo": str(slug), "private": False}
 
 
-#: What LJ1356's tiptop did unconditionally, from the commits the monorepo's placement configs were
-#: tuned on (LJ1356/tiptop@37b9678 and @ffe370a), and the switch that does it in the pinned TiPToP, off
-#: by default there. The keys are ported under the same names (tamp_keys.py).
+#: What LJ1356's tiptop did unconditionally (LJ1356/tiptop@37b9678 and @ffe370a, both in the cf75a68
+#: hitl-tamp-vla pins), and the switch that does it in the pinned TiPToP, off by default there. The
+#: keys are ported under the same names (tamp_keys.py).
 LJ_BEHAVIOURS: dict[str, str] = {
     "table_plane_support_vote": "chose the table plane by the objects resting on it",
     "disjoint_object_masks": "built object meshes and point clouds from disjoint masks",
@@ -302,29 +302,31 @@ LJ_BEHAVIOURS: dict[str, str] = {
 }
 
 
-def _note_lj_behaviours(overrides: dict, notes: list[str]) -> None:
-    """Say what a placement config's runs had that its keys do not ask for, rather than turn it on.
+def _add_lj_behaviours(overrides: dict, notes: list[str]) -> None:
+    """Switch on what this config's own tiptop always did, so the profile plans as its runs did.
 
-    A config that sets ``placement_support`` came from LJ1356's tiptop, where the three behaviours in
-    ``LJ_BEHAVIOURS`` were not settings but the code, so the config never names them. The pinned TiPToP
-    has each behind a switch, off by default, so the placement keys import exactly (they are the same
-    keys) and still do not plan as those runs did. Adding the switches here would be the translation
-    layer this importer exists not to have -- a key in the profile the file never said -- so the
-    import names them instead, at the one moment someone is reading this config.
+    Every cfg/tamp file in hitl-tamp-vla runs on LJ1356's tiptop, where the three behaviours in
+    ``LJ_BEHAVIOURS`` are not settings but the code -- so no config names them, and a config imported
+    key for key would plan differently from the runs it made. That is a different task wearing the
+    config's name, which is the one thing an importer must not produce. The pinned TiPToP has each
+    behind a switch, off by default, so the import turns each on, for every config and not only the
+    placement ones (the paper's `paper` preset sets the same three, for the same reason). A config that
+    states a switch itself keeps its own value, and ``blend_stretch_to_caps`` is added only with
+    blending on, since there is nothing for it to stretch otherwise. The note names what was added,
+    so the key the file never said is never a surprise.
     """
-    if overrides.get("placement_support") is not True:
+    added = [key for key in LJ_BEHAVIOURS if key not in overrides]
+    if not overrides.get("blend_trajectory") and "blend_stretch_to_caps" in added:
+        added.remove("blend_stretch_to_caps")  # nothing to stretch with blending off
+    if not added:
         return
-    missing = [key for key in LJ_BEHAVIOURS if key not in overrides]
-    if not overrides.get("blend_trajectory") and "blend_stretch_to_caps" in missing:
-        missing.remove("blend_stretch_to_caps")  # nothing to stretch with blending off
-    if not missing:
-        return
-    did = "; ".join(LJ_BEHAVIOURS[key] for key in missing)
-    keys = missing[0] if len(missing) == 1 else f"{', '.join(missing[:-1])} and {missing[-1]}"
+    overrides.update({key: True for key in added})
+    did = "; ".join(LJ_BEHAVIOURS[key] for key in added)
+    keys = added[0] if len(added) == 1 else f"{', '.join(added[:-1])} and {added[-1]}"
     notes.append(
-        f"{WARNING_NOTE}this config's placement settings were tuned on LJ1356's tiptop, which always {did}. "
-        f"The pinned TiPToP does {'that' if len(missing) == 1 else 'each'} only when asked: to plan as those "
-        f"runs did, also set {keys} to true (`tandem profile edit`)."
+        f"set {keys} to true: this config ran on LJ1356's tiptop, which always {did}. The pinned TiPToP "
+        f"does {'that' if len(added) == 1 else 'each'} only when asked, so the import asks, to plan as "
+        "those runs did."
     )
 
 

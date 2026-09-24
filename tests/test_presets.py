@@ -169,10 +169,8 @@ def test_importing_a_v3_config_gives_the_paper_preset_plus_that_tasks_own_settin
     own = {"grasp_center_weight", "grasp_threshold", "voxel_downsample_size", "placement_support"}
     assert extra <= own | set(tamp_keys.PLACEMENT_GATED)
     shared = {k: v for k, v in options_of(imported).tamp.items() if k not in extra}
-    # A plain import keeps exactly what the file says, so it lacks only the preset's LJ switches
-    # (named in the import's notes instead -- test_import_hitl).
-    assert shared == {k: v for k, v in options_of(paper).tamp.items() if k not in LJ_ON}
-    assert set(options_of(paper).tamp) - set(options_of(imported).tamp) == set(LJ_ON)
+    # The import switches on LJ's three as the preset does (test_import_hitl), so the two agree exactly.
+    assert shared == options_of(paper).tamp
 
 
 def test_the_vae_checkpoint_is_the_one_tandem_ships_where_the_runtime_puts_it(tmp_path):

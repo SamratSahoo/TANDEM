@@ -220,9 +220,10 @@ What tandem cannot do is refused rather than swapped for something it can:
 - Settings only tiptop's own rollout loop reads (`auto_mode`, `reset_placement_region`,
   `clear_goal_surfaces`) are left out, with a warning.
 
-A config that sets `placement_support` also gets a warning naming what LJ1356's tiptop, which it was
-tuned on, always did and the pinned TiPToP does only when asked
-([below](#surface-fitted-placement-placement_)).
+Every imported config also gets three switches it never names: what LJ1356's tiptop, which it ran
+on, always did and the pinned TiPToP does only when asked
+([below](#surface-fitted-placement-placement_)). The import sets them, with a note saying so, so the
+profile plans as the config's runs did.
 
 ---
 
@@ -528,7 +529,9 @@ When no surface can hold the object, the leg is an ordinary plan failure, so
 `replan` asks for another plan, `teleop` hands the phase to the operator, as LJ1356's tiptop did.
 
 Those configs were tuned on LJ1356's tiptop, which also always did three things the pinned TiPToP
-does only when asked. Set them too to plan as those runs did:
+does only when asked. Importing a config (or `--preset paper`) sets all three, and a key the config
+states itself keeps its own value; set them by hand in any other profile that should plan as those
+runs did:
 
 | key | what it switches on |
 |---|---|
