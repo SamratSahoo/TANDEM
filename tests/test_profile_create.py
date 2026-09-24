@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import io
+
 import pytest
 from helpers import isolate_registry
 from ruamel.yaml import YAML
@@ -43,6 +45,9 @@ def test_a_new_profile_is_the_papers_settings_with_its_own_task():
     raw = _yaml.load(text)
     assert raw["version"] == 3 and raw["description"] == "" and "name" not in raw
     assert "goal: null" in text, "written as the template writes it, not as a bare `goal:`"
+    buf = io.StringIO()
+    YAML().dump({"goal": None}, buf)
+    assert buf.getvalue() == "goal:\n", "and every other dump in the process is left as it was"
     # The template's own comments come along; its header, which says what the TEMPLATE is, does not.
     assert "# DATAFARM: plan motions that look like the DROID teleoperation data" in text
     assert "starts every new profile from this file" not in text

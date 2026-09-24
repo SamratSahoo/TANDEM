@@ -37,6 +37,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, PrivateAttr, ValidationInfo, field_validator, model_validator
 from ruamel.yaml import YAML
+from ruamel.yaml.representer import RoundTripRepresenter
 
 from tandem.core import settings as settings_mod
 from tandem.core.errors import ProfileError, ProfileInvalid, TandemError
@@ -896,6 +897,14 @@ def builtin_path(name: str) -> Path:
     return resources.path(f"profiles/{name}.yml")
 
 
+def builtin_text(name: str) -> str:
+    """The packaged copy of one of the paper's five, as written. Read through the package, so a zipped
+    install reads it as well as an unpacked one."""
+    from tandem import resources
+
+    return resources.read(f"profiles/{name}.yml")
+
+
 def seed_builtins() -> list[str]:
     """Copy each of the paper's five that profiles/ does not have yet, word for word. Returns the names copied.
 
@@ -908,7 +917,7 @@ def seed_builtins() -> list[str]:
         if path.exists():
             continue
         path.parent.mkdir(parents=True, exist_ok=True)
-        _write_atomic(path, builtin_path(name).read_text())
+        _write_atomic(path, builtin_text(name))
         _make_trajectory_dirs(trajectories_root() / name)
         written.append(name)
     return written
@@ -927,7 +936,7 @@ def source_text(name: str) -> str:
     if path.is_file():
         return path.read_text()
     if name in BUILTIN:
-        return builtin_path(name).read_text()
+        return builtin_text(name)
     if (profiles_root() / name / "profile.yml").is_file():
         raise _not_found(name, path)  # in the old layout: it says how to move it
     close = difflib.get_close_matches(name, sorted({*list_names(), *BUILTIN}), n=1, cutoff=0.6)
@@ -1003,10 +1012,7 @@ def create(
     body = io.StringIO()
     yaml = _new_yaml()
     yaml.width = 4096  # lines as the source wrote them, not folded at 100 columns
-    # `goal: null` as written, not the bare `goal:` ruamel writes for None, which reads as a key left unfinished.
-    yaml.representer.add_representer(
-        type(None), lambda representer, _: representer.represent_scalar("tag:yaml.org,2002:null", "null")
-    )
+    yaml.Representer = _NullAsWritten
     yaml.dump(doc, body)
     data = _resolve_all(_plain(doc))
     data["name"] = name
@@ -1015,6 +1021,17 @@ def create(
     _write_atomic(path, header + body.getvalue())
     _make_trajectory_dirs(profile.trajectories_dir())
     return profile
+
+
+class _NullAsWritten(RoundTripRepresenter):
+    """Writes None as ``null``, as the template does, not as the bare ``goal:`` ruamel writes by default, which
+    reads as a key left unfinished. A subclass of its own: ``add_representer`` changes the class it is called
+    on, and on ruamel's own it would change every dump in the process."""
+
+
+_NullAsWritten.add_representer(
+    type(None), lambda representer, _: representer.represent_scalar("tag:yaml.org,2002:null", "null")
+)
 
 
 def _without_header(text: str) -> str:

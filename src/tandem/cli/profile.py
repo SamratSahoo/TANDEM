@@ -240,7 +240,8 @@ def create(
     from_profile: str = typer.Option(
         None,
         "--from",
-        help="Copy this profile instead: one of yours, or one of the paper's five (`tandem profile list`).",
+        help="Copy this profile instead: one of yours, or one of the paper's five, such as "
+        "store-bread-in-closed-box.",
     ),
     activate: bool = typer.Option(False, "--use", help="Make it the active profile."),
     force: bool = typer.Option(False, "--force", help="Replace a profile of that name (its trajectories are kept)."),
