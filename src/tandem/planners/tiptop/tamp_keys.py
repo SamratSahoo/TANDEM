@@ -198,8 +198,8 @@ ALL_KEYS: frozenset[str] = frozenset(
 # what any downstream cost can choose between, so a data-gen config sets them next to the solver
 # knobs. tandem writes them into the rendered tiptop.yml (render.py) as well as passing them on
 # with the rest, so the tiptop.yml copied into every leg states the values that were in force --
-# upstream's copy shows the file on disk, not the override. Where the profile's `perception:` block
-# has the same setting, the `tamp:` value wins, as it does in tiptop.
+# upstream's copy shows the file on disk, not the override. Where the rig's perception block (rig.yml,
+# planners.tiptop.perception) has the same setting, the profile's `tamp:` value wins, as it does in tiptop.
 PERCEPTION_KEYS: dict[str, tuple[str, ...]] = {
     "contact_threshold_m": ("perception", "contact_threshold_m"),
     "grasp_threshold": ("perception", "m2t2", "grasp_threshold"),

@@ -242,7 +242,7 @@ class TiptopFactory:
         # Problems that would otherwise surface minutes into a warmed session: a checkpoint the VAE
         # cost loads lazily, a blending key that does nothing. Two are fatal, because tiptop raises
         # for them at warm-up, the first with the arm already moving to its capture pose: missing
-        # extrinsics, and a camera tiptop opens that the profile does not configure.
+        # extrinsics, and a camera tiptop opens that this machine's rig does not configure.
         problems = render.check_assets(profile, rig, options, runtime_dir=runtime.root)
         cameras = [p for p in problems if p.startswith(render.MISSING_CAMERA)]
         if cameras:

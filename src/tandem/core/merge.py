@@ -611,7 +611,7 @@ def merge(
 
         # The primary leg's non-state artifacts (the backend's plan, perception output, the phase
         # record, …) are surfaced at the top so the merged directory reads like the rollout it grew
-        # from — `tandem traj replay` looks for the plan there. Copied from the leg where it still
+        # from — `tandem traj open` looks for the plan there. Copied from the leg where it still
         # is, BEFORE any leg moves, so a copy that fails (a full disk) fails with every leg in place.
         # Logs stay with the leg that produced them: the primary's is still being written when this
         # runs, so a copy would be truncated. Any `*.log`, whatever the planner calls its own.

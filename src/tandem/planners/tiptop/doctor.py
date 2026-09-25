@@ -19,7 +19,7 @@ from tandem.core.errors import RigInvalid, TandemError, one_line
 from tandem.planners.base import OptionsSection, OptionsView
 from tandem.planners.tiptop import probe as tiptop_probe
 from tandem.planners.tiptop import render
-from tandem.planners.tiptop.options import TiptopOptions, check_robot_type, resolve
+from tandem.planners.tiptop.options import TiptopOptions, check_robot_type, resolve, resolve_profile
 
 # check_assets findings that have rows of their own (camera calibration, tiptop cameras), and so are not
 # repeated among the TAMP ones.
@@ -169,15 +169,28 @@ def _calibration(rig: Any) -> probe.Check:
 def describe(profile: Any, *, settings: Any) -> OptionsView:
     """TiPToP's settings for a profile: this machine's robot and perception, the profile's TAMP overrides,
     and exactly what the planner receives."""
+    from tandem.core import settings as settings_mod
+
     rig = rig_mod.load()
-    options: TiptopOptions = resolve(
-        rig, rig_mod.planner_options(rig, "tiptop"), profile.planner.options, check_type=False
-    )
-    runtime_dir = settings.resolved_runtime_dir() if settings is not None else None
+    options: TiptopOptions = resolve_profile(profile, rig, check_type=False)
+    # The saved settings when none are given (a web card): a checkpoint that comes with the runtime is
+    # looked for where the runtime is, not beside the profile alone.
+    runtime_dir = (settings if settings is not None else settings_mod.load()).resolved_runtime_dir()
     overrides = render.render_tamp_overrides(profile, options, runtime_dir=runtime_dir)
     robot, perception = options.robot, options.perception
+    planned = planned_speed(options.tamp)
+    homing = f"{robot.time_dilation_factor:.0%}"
+    if planned is None:
+        summary_speed, speed = f"{homing} speed", f"{homing} (time_dilation_factor)"
+    else:
+        summary_speed = f"planned motions at {planned[0]}; homing and capture at {homing}"
+        speed = f"planned motions: {planned[0]} ({planned[1]}); homing and capture: {homing} (time_dilation_factor)"
+    warnings = render.check_assets(profile, rig, options, runtime_dir=runtime_dir)
+    if not rig_mod.exists():
+        # No rig on this machine (a laptop that browses): its cameras are not the task's to warn about.
+        warnings = [w for w in warnings if not w.startswith(render.MISSING_CAMERA)]
     return OptionsView(
-        summary=f"{robot.type} at {robot.host}  ·  {robot.time_dilation_factor:.0%} speed",
+        summary=f"{robot.type} at {robot.host}  ·  {summary_speed}",
         sections=(
             OptionsSection(
                 "robot",
@@ -185,7 +198,7 @@ def describe(profile: Any, *, settings: Any) -> OptionsView:
                     ("type", robot.type),
                     ("address", f"{robot.host}:{robot.port}"),
                     ("gripper / state", f"{robot.gripper_port} / {robot.state_port}"),
-                    ("speed", f"{robot.time_dilation_factor:.0%} (time_dilation_factor)"),
+                    ("speed", speed),
                 ),
                 "this machine's (rig.yml)",
             ),
@@ -211,8 +224,32 @@ def describe(profile: Any, *, settings: Any) -> OptionsView:
         ),
         receives=overrides,
         receives_note="the cuRobo cost overrides, passed as --curobo-overrides (paths made absolute)",
-        warnings=tuple(render.check_assets(profile, rig, options, runtime_dir=runtime_dir)),
+        warnings=tuple(warnings),
     )
+
+
+def planned_speed(tamp: dict) -> tuple[str, str] | None:
+    """How fast the planned motions run, and the setting that says so, when a profile's tamp settings make it
+    something other than the robot's own speed (``robot.time_dilation_factor``, which homing and the capture
+    pose always run at). None when they do not.
+
+    tiptop's resolve_time_dilation_factor, read for a person: the VAE's retiming owns the clock when it is
+    on; else ``time_dilation_factor_literal`` is taken as it is -- 1.0 meaning cuRobo's own pace, which
+    trajectory blending then retimes; else a ``time_dilation_factor`` other than 1.0. Every paper profile
+    sets the literal to 1.0, so "20% speed" would tell a person the arm moves slowly when it does not.
+    """
+    if tamp.get("vae_retiming") and tamp.get("vae_manifold_weight"):
+        return "the VAE's timing", "vae_retiming"
+    literal = tamp.get("time_dilation_factor_literal")
+    if literal is not None:
+        if float(literal) >= 1.0:
+            pace = "blending's pace" if tamp.get("blend_trajectory") else "full speed"
+            return pace, f"time_dilation_factor_literal {float(literal):g}"
+        return f"{float(literal):.0%}", "time_dilation_factor_literal"
+    tdf = tamp.get("time_dilation_factor")
+    if tdf is not None and abs(float(tdf) - 1.0) > 1e-6:
+        return f"{float(tdf):.0%}", "tamp.time_dilation_factor"
+    return None
 
 
 def _shown(value: Any) -> str:

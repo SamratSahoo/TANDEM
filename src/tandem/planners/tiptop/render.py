@@ -209,16 +209,31 @@ def check_assets(
     o = _options(options)
     tamp = o.tamp
 
+    def missing(key: str) -> Path | None:
+        """Where ``tamp[key]`` was looked for, when the file is not there to be found; None when it is, or
+        when it is a checkpoint the runtime installs (vae/checkpoints/..., as the paper's settings name it)
+        and there is no runtime here yet: doctor's runtime row says that already, and a warning naming a
+        path beside the profile sent people to put the file there themselves."""
+        from tandem.planners.tiptop.recipe import RECIPE
+
+        raw = str(tamp[key])
+        path = _resolve_asset(profile, raw, key, runtime_dir)
+        if path.is_file():
+            return None
+        installed = {str(asset.dest) for asset in RECIPE.assets}
+        if raw in installed and (runtime_dir is None or not runtime_dir.is_dir()):
+            return None
+        return path
+
     if tamp.get("vae_manifold_weight") and tamp.get("vae_path"):
-        path = _resolve_asset(profile, str(tamp["vae_path"]), "vae_path", runtime_dir)
-        if not path.is_file():
+        path = missing("vae_path")
+        if path is not None:
             problems.append(f"vae_manifold_weight is set but vae_path does not exist: {path}")
 
     if str(tamp.get("blend_mode", "")).lower() == "flow":
-        raw = tamp.get("blend_model_path")
-        if raw:
-            path = _resolve_asset(profile, str(raw), "blend_model_path", runtime_dir)
-            if not path.is_file():
+        if tamp.get("blend_model_path"):
+            path = missing("blend_model_path")
+            if path is not None:
                 problems.append(f"blend_mode is 'flow' but blend_model_path does not exist: {path}")
 
     if tamp.get("blend_ops") and not tamp.get("blend_trajectory"):
@@ -255,8 +270,8 @@ def check_assets(
             problems.append(f"{key} only applies when posture_selection_seeds is above 1; it is ignored here")
     if seeds > 1 and tamp.get("posture_ref"):
         # cuTAMP loads the prior at its first plan, well after warm-up.
-        path = _resolve_asset(profile, str(tamp["posture_ref"]), "posture_ref", runtime_dir)
-        if not path.is_file():
+        path = missing("posture_ref")
+        if path is not None:
             problems.append(f"posture_selection_seeds is set but posture_ref does not exist: {path}")
 
     if "transit_apex_min_dist" in tamp and not tamp.get("transit_apex_height"):
