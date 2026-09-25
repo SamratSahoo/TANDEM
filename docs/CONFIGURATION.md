@@ -69,13 +69,17 @@ prompt, `hitl:` block and `tamp_overrides` of its config in hitl-tamp-vla, plus
 Before version 3 a profile was a directory (`profiles/<name>/profile.yml`) with its own cameras, robot and
 `calibration.json`. Until moved they aren't listed; `tandem init`, or `tandem profile migrate`, moves each:
 
-- the task to `profiles/<name>.yml`, the trajectories to `trajectories/<name>/`;
-- the cameras, robot and extrinsics to [the rig](#the-rig), only if `rig.yml` doesn't exist yet (then from the
-  active profile, with every profile's extrinsics); otherwise a difference is noted;
+- the cameras and robot to [the rig](#the-rig), if `rig.yml` doesn't exist yet (from the active profile);
+  otherwise a difference is noted. Every profile's extrinsics go into the rig's `calibration.json` for the cameras
+  it has none for, never over one it has;
+- the task to `profiles/<name>.yml`, the trajectories to `trajectories/<name>/` (a symlink stays a symlink);
 - the old directory, whole, to `profiles/.migrated/<name>/`, with a `migration.json` of what was done.
 
-Nothing is deleted. A profile that can't be moved is left as it was, and the others still move. Version-1
-profiles' `hitl.on_robot_phase_failure: teleop` (the old default) is kept: set `abort` unless you chose teleop.
+Nothing is deleted. If the rig can't be set up from them (a bad setting in the active profile, named with its
+file), nothing moves. A profile that can't be moved is left as it was and the others still move; one moved
+part way says what was done, and running it again finishes it. Until the old profiles are moved, `tandem rig
+set` and `rig edit` wait for them. Version-1 profiles' `hitl.on_robot_phase_failure: teleop` (the old default)
+is kept: set `abort` unless you chose teleop.
 Older tandem can't read version 3.
 
 ## Phase planning (hitl)
