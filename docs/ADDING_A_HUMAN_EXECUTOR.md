@@ -121,10 +121,11 @@ Passed to `create`, once per session.
 
 | field | meaning |
 |---|---|
-| `profile`, `session_dir` | The validated profile; scratch space (not for recordings). |
-| `settings` | Machine settings; `None` in a session: call `tandem.core.settings.load()` each leg, so `tandem config set` applies next hand-off. |
+| `profile`, `session_dir` | The validated profile (the task); scratch space (not for recordings). |
+| `rig` | This machine's [rig](CONFIGURATION.md#the-rig): the cameras a leg records from, the robot's address. `None` in a context built by hand: read `tandem.core.rig.load()`. |
+| `settings` | tandem's settings; `None` in a session: call `tandem.core.settings.load()` each leg, so `tandem config set` applies next hand-off. |
 | `on_log(stream, text)`, `on_emit(payload)`, `on_problem(message)` | Log a line; message every UI subscriber; show the operator a problem until the leg ends. |
-| `options` | The profile's `hitl.human_executor_options.<name>` (`{}` if unset), after the factory's optional `validate_options(options)` at profile load. It returns plain data (saved to `profile.yml`) or raises `TandemError`/`ValueError` naming the key. |
+| `options` | The profile's `hitl.human_executor_options.<name>` (`{}` if unset), after the factory's optional `validate_options(options)` at profile load. It returns plain data (saved to the profile's file) or raises `TandemError`/`ValueError` naming the key. |
 
 ## Choosing one
 
@@ -145,7 +146,7 @@ tandem executors use mypolicy   # for the active profile, or -p PROFILE
 
 `TeleopExecutor` runs the DROID teleop driver, one process per leg. It needs:
 
-- the `teleop.*` settings ([keys](CONFIGURATION.md#machine-settings-and-credentials), [setup](../README.md#6-teleop));
+- the `teleop.*` settings ([keys](CONFIGURATION.md#tandem-settings-and-credentials), [setup](../README.md#6-teleop));
 - a [DROID fork](https://github.com/SamratSahoo/droid) checkout (upstream lacks `droid.stable_camera_env`);
 - a VR headset and controller, or a SpaceMouse.
 
@@ -153,9 +154,3 @@ tandem executors use mypolicy   # for the active profile, or -p PROFILE
 missing headset is a driver error at leg start. A driver
 that can't start leaves the leg open, showing the problem until "return control". One hand-off can make
 several recordings, all in `leg_dirs`.
-
-## Known gaps
-
-The [hitl-tamp-vla import](CONFIGURATION.md#importing-a-hitl-tamp-vla-setup) never fills
-`hitl.human_executor_options` from learned-policy keys (`policy_*`, `open_loop_horizon`): it refuses them with
-phase planning on and drops them otherwise.

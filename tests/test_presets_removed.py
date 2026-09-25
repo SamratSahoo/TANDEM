@@ -74,3 +74,13 @@ def _mentions(root: Path, suffixes: tuple[str, ...]) -> list[str]:
 
 def test_nothing_the_package_says_or_ships_mentions_them():
     assert _mentions(SRC, (".py", ".js", ".yml", ".tmpl", ".md", ".toml", ".html")) == []
+
+
+def test_nothing_the_docs_say_mentions_them():
+    assert _mentions(REPO / "docs", (".md",)) == []
+    readme = [
+        f"README.md:{number}: {line.strip()}"
+        for number, line in enumerate((REPO / "README.md").read_text().splitlines(), 1)
+        if GONE.search(line)
+    ]
+    assert readme == []

@@ -1,14 +1,14 @@
 # Data on disk
 
 What a trial leaves on disk, and tandem's logs. Paths are Linux defaults
-([moving them](CONFIGURATION.md#machine-settings-and-credentials)). Terms: [README.md](README.md#terms).
+([moving them](CONFIGURATION.md#tandem-settings-and-credentials)). Terms: [README.md](README.md#terms).
 
 ## Episode layout
 
 One directory per trial, under `success/` or `failure/` ([status directories](CONFIGURATION.md#profiles)):
 
 ```
-~/tandem-data/profiles/<profile>/trajectories/<status>/<YYYY-MM-DD_HH-MM-SS>/
+~/tandem-data/trajectories/<profile>/<status>/<YYYY-MM-DD_HH-MM-SS>/
 ├── external_cam.mp4  external_cam_2.mp4  hand_cam.mp4   exterior 1, exterior 2 (optional), wrist
 ├── robot_state.npz        per-frame arrays
 ├── _meta.json             lineage, timing, frame → leg and phase
@@ -205,7 +205,7 @@ A session's live state: in the web UI, from `GET /api/sessions/{id}`, and in `se
 | `~/.local/state/tandem/logs/export.log` | `tandem export lerobot`'s log, appended per run. |
 | `~/.local/state/tandem/logs/runtime-build-<YYYYMMDD-HHMMSS>.log` | One per runtime build (`tandem planners install`, `tandem runtime build`, `tandem init`). |
 | `~/tandem-data/exports/<owner>/<name>/` | Exported datasets (or `--out DIR`; [exporting](USAGE.md#exporting)). |
-| `<profile>/trajectories/.merge-<trajectory id>/` | A merge in progress. If one is left behind, the next `tandem traj merge` says how to move its legs back. |
+| `~/tandem-data/trajectories/<profile>/.merge-<trajectory id>/` | A merge in progress. If one is left behind, the next `tandem traj merge` says how to move its legs back. |
 
 A trial that failed at `invention` usually has no legs, so only its events file and session `vlm/` and
 `perception/` directories remain.

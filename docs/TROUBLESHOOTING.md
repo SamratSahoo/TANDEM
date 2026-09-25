@@ -13,12 +13,17 @@ Run `tandem doctor` first: it says how to fix what it finds. Logs and session fi
 Another process holds it. After a hand-off, TiPToP's save workers free the cameras within seconds: wait and
 retry. Else find the stray process: `ps aux | grep -E 'tandem|tiptop'`.
 
+## "the ZED SDK is not installed …, so ZED cameras will not open"
+
+The runtime was built without the ZED SDK, so it has no ZED Python API (`pyzed`). Install the
+[ZED SDK](https://www.stereolabs.com/developers/release), then run `tandem planners install tiptop`: it adds
+only what is missing ([details](CONFIGURATION.md#the-planner-runtime)).
+
 ## "no camera extrinsics for serial(s) …"
 
-A profile camera has no entry in `calibration.json`, so the session won't start. Check the serial, then add
-its entry ([format](CONFIGURATION.md#cameras-and-calibration)), or import it from a hitl-tamp-vla checkout:
-`tandem profile create <name> --import-from <path>`
-([details](CONFIGURATION.md#importing-a-hitl-tamp-vla-setup)).
+A rig camera has no entry in the rig's `calibration.json` (`tandem rig path --calibration`), so the session
+won't start. Check the serial (`tandem rig show`), then add its entry ([format](CONFIGURATION.md#the-rig);
+[steps](../README.md#5-cameras-and-calibration)).
 
 ## A trial was excluded
 

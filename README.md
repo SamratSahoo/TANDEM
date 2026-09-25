@@ -30,12 +30,17 @@ uv tool install git+https://github.com/SamratSahoo/tandem.git --with av --with p
 
 ### 2. Initialize
 
+Install the ZED SDK first, so the runtime build adds its Python API. Without it the runtime still builds, but
+ZED cameras won't open until you install the SDK and run `tandem planners install tiptop` again.
+
 ```bash
-tandem init                      # builds TiPToP's runtime (5–20 min), asks for the Gemini key, creates the
-                                 # `default` profile and offers teleop (step 6); safe to re-run
-tandem runtime run install-zed   # the ZED Python API, into the runtime (needs the ZED SDK in /usr/local/zed)
-# to redo one step: tandem planners install tiptop, or tandem config set-gemini-key
+tandem init   # builds TiPToP's runtime (5–20 min), asks for the Gemini key, the robot's address (the NUC),
+              # the arm and the camera serials, adds the paper's five tasks as profiles and offers teleop
+              # (step 6); safe to re-run
+# to redo one step: tandem planners install tiptop, tandem rig set KEY VALUE, or tandem config set-gemini-key
 ```
+
+Without a terminal: `tandem init -y --robot-host 172.16.0.2 --camera hand=SERIAL --camera external=SERIAL`.
 
 On a laptop, `tandem init --viz-only` sets up only for reviewing trajectories
 (`tandem config set data_root DIR` points it at them); `tandem plan` there also needs
@@ -59,9 +64,10 @@ Check that the shim's log shows `PolymetisGripper connected to localhost:50052`.
 
 ### 4. Perception servers
 
-TiPToP expects an M2T2 grasp server at `http://localhost:8123` (on another machine, set
-`planner.options.perception.m2t2.url`) and a FoundationStereo depth server at `http://localhost:1234`, on the
-workstation itself (`tandem doctor` does not check this one). Install each as TiPToP's
+TiPToP expects an M2T2 grasp server at `http://localhost:8123` and a FoundationStereo depth server at
+`http://localhost:1234`; `tandem doctor` checks both. On another machine:
+`tandem rig set planners.tiptop.perception.m2t2.url http://HOST:8123` (or `...foundation_stereo.url`).
+Install each as TiPToP's
 [installation guide](https://github.com/SamratSahoo/tiptop/blob/682047493b88e5301c6b2b49da914ea4f173e5d9/docs/installation.md#installing-m2t2)
 describes, and run each in its own terminal:
 
@@ -79,34 +85,35 @@ pixi run server   # port 1234
 
 ### 5. Cameras and calibration
 
-Set your rig in the `default` profile `tandem init` created (a profile made `--from default` copies its
-cameras and calibration):
+The robot and cameras are this machine's [rig](docs/CONFIGURATION.md#the-rig), shared by every profile.
+`tandem init` asked for them; change one setting at a time:
 
 ```bash
-tandem profile edit default   # opens $EDITOR, validates on save
-# cameras: your ZED serials under hand, external and optionally external_2
-# planner.options.robot: host if the NUC is not at 172.16.0.2; type: panda_robotiq for a Panda
+tandem rig show                                # the robot, cameras and which have extrinsics
+tandem rig set robot.host 172.16.0.5           # the NUC
+tandem rig set robot.type panda_robotiq        # a Panda
+tandem rig set cameras.external_2.serial SERIAL   # roles: hand, external, external_2
 ```
 
-Extrinsics go in the profile's `calibration.json`, keyed by serial. External cameras' poses come from DROID's
-own calibration: copy each `<serial>_left` pose in DROID's `droid/calibration/calibration_info.json` into it
-under the bare serial. Calibrate the wrist camera as TiPToP's
+Extrinsics go in the rig's `calibration.json` (`tandem rig path --calibration`), keyed by serial. External
+cameras' poses come from DROID's own calibration: copy each `<serial>_left` pose in DROID's
+`droid/calibration/calibration_info.json` into it under the bare serial. Calibrate the wrist camera as
+TiPToP's
 [guide](https://github.com/SamratSahoo/tiptop/blob/682047493b88e5301c6b2b49da914ea4f173e5d9/docs/getting-started.md)
-describes, skipping its Bamboo controller step (the shim replaces it). Its scripts reach the robot at
-`172.16.0.2` whatever the profile says ([another address](docs/CONFIGURATION.md#cameras-and-calibration)):
+describes, skipping its Bamboo controller step (the shim replaces it). `tandem runtime run` points its
+scripts at the rig: your NUC, your cameras, and this calibration file.
 
 ```bash
-export TIPTOP_CALIBRATION="$(tandem profile path default)/calibration.json"
-export TIPTOP_HAND_CAMERA_ID=<wrist serial> TIPTOP_EXTERNAL_CAMERA_ID=<external serial>
-tandem runtime run calibrate-wrist-cam
-tandem runtime run viz-calibration                        # checks the wrist camera
-tandem runtime run -- viz-calibration --camera external   # checks an external one
+tandem runtime run calibrate-wrist-cam                 # writes the wrist camera's extrinsics
+tandem runtime run viz-calibration                     # checks the wrist camera
+tandem runtime run viz-calibration --camera external   # checks an external one
 ```
 
 ### 6. Teleop
 
 Human phases run TANDEM's teleop driver in the DROID fork's environment, through the DROID server from step 3.
-The fork's `droid/misc/parameters.py` must name your NUC (`nuc_ip`). `tandem init` offers to set this up, or:
+The fork's `droid/misc/parameters.py` must name your NUC (`nuc_ip`, the rig's `robot.host`). `tandem init`
+offers to set this up, or:
 
 ```bash
 tandem config set teleop.enabled true
@@ -119,34 +126,34 @@ tandem executors list                        # teleop should say `ready`
 ### 7. Check the setup
 
 ```bash
-tandem doctor   # every check and what to do about it; --no-hardware skips the robot, camera and M2T2 probes
+tandem doctor   # every check and what to do about it; --no-hardware skips the robot, camera and server probes
 ```
 
 Common problems are in [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
 ## Usage
 
-### 1. Create a profile
+### 1. Choose a profile
 
-A profile is one collection setup plus every trajectory collected with it, in `~/tandem-data/profiles/<name>/`
-([every setting](docs/CONFIGURATION.md)).
-
-```bash
-tandem profile create bread-box --from default --preset paper --prompt "place the bread inside the box" --use
-```
-
-`--preset paper` turns on phase planning (off in the template) and applies the paper's
-[phase-planning](docs/CONFIGURATION.md#phase-planning-hitl) and TiPToP settings, keeping your
-robot, cameras and perception. Planned motions then run at the paper's pace, not slowed by
-`robot.time_dilation_factor`, so keep a hand on the E-stop.
-
-If you have the paper's hitl-tamp-vla repository, you can instead import one of its task configs, with its
-robot, camera serials, extrinsics, TAMP settings and phase planning:
+A profile is one task: its prompt, [phase planning](docs/CONFIGURATION.md#phase-planning-hitl) and TAMP
+settings, in one YAML file, `~/tandem-data/profiles/<name>.yml` ([every setting](docs/CONFIGURATION.md#profiles)).
+`tandem init` adds the paper's five tasks, each with the settings the paper collected it with:
 
 ```bash
-tandem profile create bread-box-v3 --use --import-from ~/hitl-tamp-vla \
-    --tamp-config ~/hitl-tamp-vla/data-collection/cfg/tamp/4_bread_box_v3.yml
+tandem profile list                               # cover-bread-rolls, solve-constrained-puzzle, sort-and-cover-snacks,
+                                                  # open-obstructed-book, store-bread-in-closed-box
+tandem profile use store-bread-in-closed-box
 ```
+
+Your own task starts from the paper's settings:
+
+```bash
+tandem profile create my-task --prompt "put the cup on the plate" --use   # --from PROFILE copies one instead
+tandem profile edit my-task                                               # opens my-task.yml; validated on save
+```
+
+The paper's settings run planned motions at their own pace, not slowed by the rig's `time_dilation_factor`:
+keep a hand on the E-stop.
 
 ### 2. Check the plan
 
@@ -184,8 +191,8 @@ robot phase the planner cannot plan ends the trial. More in [docs/USAGE.md](docs
 ```bash
 tandem traj list                   # newest first; --status eval|success|failure
 tandem traj relabel <id> failure   # move one between success, failure and eval
-tandem export lerobot --repo <hf-user>/bread-box          # LeRobot v3.0 from success/, in ~/tandem-data/exports/
-tandem export lerobot --repo <hf-user>/bread-box --push   # and upload (tandem config set-hf-token, or HF_TOKEN)
+tandem export lerobot --repo <hf-user>/my-task            # LeRobot v3.0 from success/, in ~/tandem-data/exports/
+tandem export lerobot --repo <hf-user>/my-task --push     # and upload (tandem config set-hf-token, or HF_TOKEN)
 ```
 
 Each trial becomes one episode, with its robot and human legs merged

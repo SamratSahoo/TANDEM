@@ -4,79 +4,84 @@ Every setting tandem reads. Setup: [README](../README.md#setup). Commands: [USAG
 
 ## Profiles
 
-A [profile](README.md#terms) is a directory under `~/tandem-data/profiles/`:
+A [profile](README.md#terms) is one task, in one YAML file under `~/tandem-data/profiles/`:
 
 ```
-~/tandem-data/profiles/bread-box/
-├── profile.yml                    task, cameras, hitl, planner, recording, export
-├── calibration.json               camera extrinsics, by serial
-├── planner-options.<planner>.yml  a previous planner's options
+~/tandem-data/
+├── profiles/
+│   ├── cover-bread-rolls.yml   one file per profile: the task's settings
+│   ├── my-task.yml
+│   └── .planner-options/       a previous planner's options (tandem planners use)
 └── trajectories/
-    ├── eval/                      not yet labeled
-    ├── success/
-    └── failure/                   failures; settled trials (no label)
+    └── my-task/
+        ├── eval/               not yet labeled
+        ├── success/
+        └── failure/            failures; settled trials (no label)
 ```
 
-`src/tandem/resources/profile_template.yml` documents every key. Unknown keys fail at load, by name (a `tamp`
-key also gets the nearest valid one).
+The robot, cameras and calibration are not a profile's: they are [the rig](#the-rig), which every profile
+shares. `src/tandem/resources/profile_template.yml` documents every key. Unknown keys fail at load, by name (a
+`tamp` key also gets the nearest valid one).
+
+```bash
+tandem profile create my-task --prompt "put the cup on the plate"   # the paper's settings, your task
+tandem profile create my-box --from store-bread-in-closed-box      # a copy of any profile
+tandem profile edit my-task                                        # $EDITOR; validated on save
+```
 
 ### Profile keys
 
 | key | default | what it does |
 |---|---|---|
-| `version` | `2` | Layout version ([older profiles](#older-profiles)). |
-| `name`, `description` | | Name: lowercase letters, digits, `-`, `_`; not starting with `-` or `_`. Free-text description. |
-| `task.prompt` | the template's | Language label stored with each episode. |
+| `version` | `3` | Layout version ([older profiles](#older-profiles)). |
+| `description` | | Free text. The name is the file's: lowercase letters, digits, `-`, `_`; not starting with `-` or `_`. |
+| `task.prompt` | | Language label stored with each episode, and what phase planning splits into steps. |
 | `task.goal` | `null` | Planner goal, if not `task.prompt`. |
 | `task.target_episodes` | `20` | Target shown by `tandem profile show`, the UI and the session. > 0. |
+| `hitl` | | [Phase planning](#phase-planning-hitl). |
+| `planner` | | [The planner and its task settings](#planner-settings). |
 | `recording.enabled` | `true` | Record camera video. `tandem collect --no-record` overrides it. |
-| `recording.fps` | `15` | Unused: each camera's `fps` sets the rate. |
 | `export.hf_repo` | `''` | Repository for `tandem export lerobot` without `--repo`. |
 | `export.private` | `false` | Upload as private. `--private` or `--public` overrides it. |
 
-### Presets
+### The paper's five
 
-`--preset paper` (on `tandem profile create` or `tandem init`) applies the paper's settings and prints each
-change:
+`tandem init` adds the paper's five tasks as profiles, each with the settings the paper collected it with: the
+prompt, `hitl:` block and `tamp_overrides` of its config in hitl-tamp-vla, plus
+[the three switches](#the-three-switches). Nothing of the paper's rig comes with them.
 
-- `hitl`: on, with the paper's values (the [defaults](#phase-planning-hitl)).
-- `planner.options.tamp`: replaced whole by the paper's TAMP and [DATAFARM](README.md#terms) settings,
-  [the three switches](#the-three-switches) included. A task config's `placement_*` keys are lost; to keep
-  them, use `--tamp-config` without `--preset`.
-- Robot, cameras, perception: untouched, so `--from` or `--import-from` keeps the rig's.
-- `tamp.time_dilation_factor_literal: 1.0`: planned motions ignore `robot.time_dilation_factor` (homing and
+| profile | paper task (Fig. 3) | from | its own settings |
+|---|---|---|---|
+| `cover-bread-rolls` | Cover Bread Rolls | `8c_pp_3bread_cloth_08272026_v3.yml` | a grasp-centre cost and threshold, finer voxels |
+| `solve-constrained-puzzle` | Solve Constrained Puzzle | `1_toy_puzzle_v3.yml` | [surface-fitted placement](#surface-fitted-placement) |
+| `sort-and-cover-snacks` | Sort & Cover Snacks | `2_bread_fruit_bowl_cloth_v3.yml` | |
+| `open-obstructed-book` | Open Obstructed Book | `3_pen_open_book_v3.yml` | |
+| `store-bread-in-closed-box` | Store Bread in Closed Box | `4_bread_box_v3.yml` | surface-fitted placement into the box, finer voxels |
+
+- Once copied they're yours to edit. `tandem init` never overwrites one, and puts back one you deleted.
+- A new profile (`--prompt`) is what the five share: phase planning on, the same TAMP and
+  [DATAFARM](README.md#terms) settings, and the three switches.
+- `tamp.time_dilation_factor_literal: 1.0`: planned motions ignore the rig's `time_dilation_factor` (homing and
   capture moves don't). Keep a hand on the E-stop.
-
-List: `tandem profile presets`. Format: [ADDING_A_PLANNER.md](ADDING_A_PLANNER.md#options-presets-and-doctor-rows).
-
-### Importing a hitl-tamp-vla setup
-
-```bash
-tandem init --import-from ~/hitl-tamp-vla
-tandem profile create bread-box --import-from ~/hitl-tamp-vla \
-    --tamp-config ~/hitl-tamp-vla/data-collection/cfg/tamp/4_bread_box_v3.yml
-```
-
-- **Imported:** robot and camera serials (`tiptop.yml`); extrinsics (`calibration_info.json`,
-  `calibration_info_<workspace>.json`); from `--tamp-config`: prompt, episode target, Hugging Face repo, TAMP
-  settings (with `placement_*`), `hitl:`.
-- **Refused** with phase planning on: a `robot_planner` other than `cutamp`; human phases run by a learned
-  policy (`policy_type: diffusion` or `act`). The error names the task's config for a person.
-- **Dropped with a warning:** `auto_mode`, `reset_placement_region`, `clear_goal_surfaces`.
-- **Turned on** unless the config sets them: [the three switches](#the-three-switches) (`blend_stretch_to_caps`
-  only with `blend_trajectory` on).
 
 ### Older profiles
 
-Version-1 profiles (top-level `robot:`, `perception:`, `tamp:`) load with a notice and move under
-`planner.options` on the next save. `tandem profile migrate [NAME]` (default: all) does it now, keeping
-`profile.yml.v1.bak`. Their `hitl.on_robot_phase_failure: teleop` (the old default) is kept: set `abort` unless
-you chose teleop. Older tandem can't read version 2.
+Before version 3 a profile was a directory (`profiles/<name>/profile.yml`) with its own cameras, robot and
+`calibration.json`. Until moved they aren't listed; `tandem init`, or `tandem profile migrate`, moves each:
+
+- the task to `profiles/<name>.yml`, the trajectories to `trajectories/<name>/`;
+- the cameras, robot and extrinsics to [the rig](#the-rig), only if `rig.yml` doesn't exist yet (then from the
+  active profile, with every profile's extrinsics); otherwise a difference is noted;
+- the old directory, whole, to `profiles/.migrated/<name>/`, with a `migration.json` of what was done.
+
+Nothing is deleted. A profile that can't be moved is left as it was, and the others still move. Version-1
+profiles' `hitl.on_robot_phase_failure: teleop` (the old default) is kept: set `abort` unless you chose teleop.
+Older tandem can't read version 3.
 
 ## Phase planning (hitl)
 
-[Phase planning](README.md#terms) is off in the template; `--preset paper` turns it on. Other defaults are the
-paper's.
+[Phase planning](README.md#terms) is on in the paper's profiles and in every new one; a profile with no `hitl:`
+block has it off. The other defaults are the paper's.
 
 | key | default | what it does |
 |---|---|---|
@@ -96,7 +101,7 @@ paper's.
 | `precondition_enforced` | `false` | An unmet precondition (either kind) ends the trial at `verification`. Off: recorded only. |
 | `check_plan_effects` | `true` | Run the [contract check](METHOD.md#the-contract-check) when repairing a proposal. No model call. |
 | `save_vlm_io` | `true` | Save every model image and reply, rejected ones too, in [`vlm/`](DATA.md#vlm). |
-| `cache_path` | `null` | Proposal-only SQLite cache (key: model, prompt, image), relative to the profile. Re-plans skip it. |
+| `cache_path` | `null` | Proposal-only SQLite cache (key: model, prompt, image), relative to `profiles/`. Re-plans skip it. |
 | `on_robot_phase_failure` | `abort` | A robot phase can't be planned. `abort`: fail at `tamp_planning`. `teleop`: a person does it, checked like a human phase. `replan`: propose again with the failure. An *execution* failure always ends at `tamp_execution`. |
 | `conjoin_robot_phases` | `true` | Plan consecutive robot phases as one goal where sound ([conditions](ADDING_A_PLANNER.md#capabilities)). Off: one leg and perception pass each. |
 | `human_executor` | `teleop` | Who does human phases, by registered name ([choosing one](ADDING_A_HUMAN_EXECUTOR.md#choosing-one)). |
@@ -108,26 +113,46 @@ A check costs one model call per checkable atom, with the arm parked. Checkable 
 the planner's `checkable_predicates` (TiPToP: `On`; [capabilities](ADDING_A_PLANNER.md#capabilities)). Trial
 flow: [METHOD.md](METHOD.md#the-trial-loop).
 
-## Cameras and calibration
+## The rig
+
+This machine's robot, cameras and calibration, shared by every profile: `~/.config/tandem/rig.yml`.
 
 ```yaml
+version: 1
+robot:
+  type: fr3_robotiq
+  host: 172.16.0.2          # the NUC
 cameras:
   perception: external
-  hand:     {serial: '14846828', type: zed, resolution: HD720, fps: 15}
-  external: {serial: '32439448', type: zed, resolution: HD720, fps: 15}
-  # external_2: {serial: '...', type: zed, resolution: HD720, fps: 15}
+  hand:     {serial: '14846828'}
+  external: {serial: '32439448'}
+calibration: calibration.json
+planners:
+  tiptop: {...}             # TiPToP's machine settings
 ```
 
-Every leg, robot or human, is recorded from these cameras.
+`tandem init` writes it. Then:
+
+```bash
+tandem rig show                                   # also --json; the web's Settings page shows it too
+tandem rig set robot.host 172.16.0.5              # one setting; `null` removes one
+tandem rig set planners.tiptop.perception.m2t2.url http://gpu-box:8123
+tandem rig edit                                   # $EDITOR; validated on save
+tandem rig path --calibration                     # where the extrinsics are
+```
 
 | key | default | what it does |
 |---|---|---|
-| `perception` | `external` | Camera perception reads. `external`: the arm stays at `q_home`. `hand`: it moves to `q_capture` first. |
-| `hand`, `external` | | Wrist and third-person cameras. Both must open at warm-up or the session stops. |
-| `external_2` | | Optional second third-person camera (DROID `exterior_2`). If listed, it must open or collection stops. |
-| `<camera>.serial` | | ZED serial, quoted (`'14846828'`). Unquoted is refused. |
+| `robot.type` | `fr3_robotiq` | The arm, named as the planner names it. TiPToP: `fr3_robotiq` (FR3) or `panda_robotiq` (Panda), with a Robotiq 2F-85 via the bamboo-polymetis shim; `panda` (Franka Hand): the shim refuses its gripper commands; `ur5` (UR5, Robotiq gripper): needs tiptop's `ur5` extra (ur_rtde), not in the runtime. |
+| `robot.host` | `172.16.0.2` | The robot computer (the NUC). A hostname or IP address; ports are the planner's. |
+| `cameras.perception` | `external` | Camera perception reads. `external`: the arm stays at `q_home`. `hand`: it moves to `q_capture` first. |
+| `cameras.hand`, `cameras.external` | | Wrist and third-person cameras. Every leg, robot or human, is recorded from them; both must open at warm-up or the session stops. |
+| `cameras.external_2` | | Optional second third-person camera (DROID `exterior_2`). If listed, it must open or collection stops. |
+| `<camera>.serial` | | ZED serial, quoted (`'14846828'`); `tandem rig set` keeps it text. One camera per serial. |
 | `<camera>.type`, `.resolution` | `zed`, `HD720` | |
 | `<camera>.fps` | `15` | Keep 15: three ZEDs at HD720@30 exceed USB bandwidth, and the export resamples to 15 Hz. |
+| `calibration` | `calibration.json` | The extrinsics file, relative to `rig.yml`. |
+| `planners.<name>` | | Each planner's machine settings ([TiPToP's](#tiptop-options)); `tandem planners info NAME` lists them. |
 
 `calibration.json` holds one pose per serial (TiPToP's `calibration_info.json` format). Wrist: `ee_from_cam`.
 Fixed: `world_from_cam`. Rotations: `xyz` Euler, radians.
@@ -139,62 +164,71 @@ Fixed: `world_from_cam`. Rotations: `xyz` Euler, radians.
 A configured serial with no entry stops the session before warm-up; `tandem doctor` reports it. The
 [README](../README.md#5-cameras-and-calibration) has the steps to fill it in. Also:
 
-- **Another robot address or type.** TiPToP's calibration scripts read
-  `$(tandem runtime path)/tiptop/tiptop/config/tiptop.yml` (`172.16.0.2`, `fr3_robotiq`), not the profile.
-  Copy it, edit `robot.host` and `robot.type`, and set `$TIPTOP_CONFIG` to the copy's absolute path.
+- **TiPToP's own scripts** (`calibrate-wrist-cam`, `viz-calibration`, `cutamp-demo`, ...). `tandem runtime run`
+  and `tandem runtime shell` give them a `tiptop.yml` written from the rig (`$TIPTOP_CONFIG`: the robot's
+  address and type, the cameras, TiPToP's machine settings) and the rig's calibration file
+  (`$TIPTOP_CALIBRATION`), so they reach your NUC and write your extrinsics. `--raw` runs them on tiptop's stock
+  config instead.
+- **Teleop** reaches the NUC through DROID's own `droid/misc/parameters.py` (`nuc_ip`): keep it the same as
+  `robot.host`.
 - **Gripper mask** (`perception: hand` only). The runtime's `tiptop/tiptop/config/assets/gripper_mask.png`
   masks the fingers out of the wrist cloud. Make yours: `tandem runtime run compute-gripper-mask` (or
   `paint-gripper-mask`).
 
 ## Planner settings
 
+A planner's settings are of two kinds: the task's, in each profile's `planner.options`, and this machine's, in
+[the rig](#the-rig) under `planners.<name>`. `tandem planners info NAME` lists both.
+
 ```yaml
 planner:
   backend: tiptop     # which planner
-  options:            # its settings, checked by the planner at load
-    robot: ...
-    perception: ...
+  options:            # its task settings, checked by the planner at load
     tamp: ...
 ```
 
 `tandem planners use NAME` sets `planner.backend`. It:
 
-- stashes the old planner's `options` in `planner-options.<planner>.yml`, restored on switching back;
+- stashes the old planner's `options` in `profiles/.planner-options/<profile>.<planner>.yml`, restored on
+  switching back;
 - takes `--option KEY=VALUE` (repeatable) for options the new planner requires;
 - warns, but doesn't refuse, if its runtime isn't installed;
 - repairs a profile naming a planner this machine lacks.
+
+New profiles plan with the machine's default planner (`tandem planners default NAME`).
 
 **Did my setting apply?** `tandem profile show NAME --planner` prints what the planner gets; a key missing there
 didn't apply. `tandem planners info NAME` lists what a planner reads.
 
 ### TiPToP options
 
-**`robot`**
+**Machine settings**, in `rig.yml` under `planners.tiptop` (`tandem rig set planners.tiptop.KEY VALUE`). The
+robot's address and type are the rig's own `robot.host` and `robot.type`.
+
+`robot`:
 
 | key | default | what it does |
 |---|---|---|
-| `type` | `fr3_robotiq` | `fr3_robotiq` (FR3) or `panda_robotiq` (Panda): Robotiq 2F-85, via the bamboo-polymetis shim. `panda` (Franka Hand): the shim refuses its gripper commands. `ur5` (UR5, Robotiq gripper): needs tiptop's `ur5` extra (ur_rtde), not in the runtime. |
 | `dof` | `7` | Joint count; must match `q_home` and `q_capture`. |
-| `host` | `172.16.0.2` | The NUC running the shim. |
 | `port`, `gripper_port`, `state_port` | `5555`, `5559`, `5557` | Shim control, gripper and state (encoder) ports. |
 | `time_dilation_factor` | `0.2` | Arm speed, in (0, 1]; `0.2` is 20%. |
-| `q_home`, `q_capture` | the template's | Home pose; capture pose for `cameras.perception: hand`. |
+| `q_home`, `q_capture` | TiPToP's | Home pose; capture pose for `cameras.perception: hand`. |
 
-**`perception`**
+`perception`:
 
 | key | default | what it does |
 |---|---|---|
-| `m2t2.url`, `m2t2.apply_bounds` | `http://localhost:8123`, `true` | M2T2 grasp server; a flag sent with each request. |
+| `m2t2.url`, `m2t2.apply_bounds` | `http://localhost:8123`, `true` | M2T2 grasp server; a flag sent with each request. `tandem doctor` probes it. |
+| `foundation_stereo.url` | `http://localhost:1234` | FoundationStereo depth server, for the ZEDs' depth every rollout. `tandem doctor` probes it. |
 | `sam_mode` | `local` | `local`: SAM-2 in the runtime. `remote`: the server at `sam_url` (then required). |
 | `depth_smoothing_frames` | `5` | Depth frames median-fused at capture. `1` disables it. |
 | `robot_mask_margin_m` | `0.02` | Arm collision-sphere padding when cutting the arm from a third-person cloud. Raise it if arm remains. |
 | `depth_trunc_m`, `voxel_downsample_size`, `contact_threshold_m`, `mask_erosion_pixels` | `5.0`, `0.0075`, `0.01`, `3` | tiptop's settings of those names. |
 | `gemini.model`, `gemini.temperature` | `gemini-robotics-er-2-preview`, `null` | Recorded only: the pinned tiptop always runs this model at its own temperature. `tandem doctor` warns on a mismatch. |
 
-**`tamp`**
-
-cuTAMP and cuRobo overrides with tiptop's key names, so a `cfg/tamp/*.yml` pastes in as is. Accepted keys:
-`src/tandem/planners/tiptop/tamp_keys.py`. `tamp` beats `perception` for `contact_threshold_m` and
+**Task settings**, in the profile's `planner.options.tamp`: cuTAMP and cuRobo overrides with tiptop's key
+names, so a `cfg/tamp/*.yml` config's `tamp_overrides` paste in as is. Accepted keys:
+`src/tandem/planners/tiptop/tamp_keys.py`. `tamp` beats the rig's `perception` for `contact_threshold_m` and
 `voxel_downsample_size`. `tandem doctor` warns about a key that needs another (`blend_ops` without
 `blend_trajectory`).
 
@@ -214,13 +248,14 @@ height. All are `tamp:` keys.
 | `placement_fill_occluded` | `false` | Unseen cells inside a surface's outline count as floor, as in a box the camera can't see into. The only setting that places on unseen surface. |
 | `placement_min_seen_frac` | `0.25` | Observed fraction each footprint needs; guards `placement_fill_occluded`. In [0, 1]. |
 
-The paper's configs: `1_toy_puzzle_v3.yml` sets `placement_support`, `placement_support_required` and
-`placement_into_surface`; `4_bread_box*.yml` sets all seven (margin `0.005`, flatness `0.012`,
-`placement_fill_occluded: true`). `--tamp-config` imports them unchanged.
+The paper's: `solve-constrained-puzzle` sets `placement_support`, `placement_support_required` and
+`placement_into_surface`; `store-bread-in-closed-box` sets all seven (margin `0.005`, flatness `0.012`,
+`placement_fill_occluded: true`).
 
 ### The three switches
 
-`tamp:` keys, off by default. `--preset paper` and an [import](#importing-a-hitl-tamp-vla-setup) turn them on.
+`tamp:` keys, off unless set. On in [the paper's five](#the-papers-five) and every new profile: every run in the
+paper had them, because LJ1356's tiptop always did them.
 
 | key | what it switches on |
 |---|---|
@@ -228,13 +263,14 @@ The paper's configs: `1_toy_puzzle_v3.yml` sets `placement_support`, `placement_
 | `disjoint_object_masks` | Meshes and clouds from disjoint masks (a pixel two masks claim goes to the smaller object), so a container's hull stops at what rests on it. Placement fitting always uses them. |
 | `blend_stretch_to_caps` | With `blend_trajectory` on, slow a stroke that can't be re-timed within the velocity and acceleration caps until it fits, instead of keeping the plan's timing. A stroke can get many times slower. |
 
-## Machine settings and credentials
+## tandem settings and credentials
 
-`~/.config/tandem/config.toml`. Edit with `tandem config` (`list`, `get`, `set`, `edit`, `path`):
+tandem's own settings, in `~/.config/tandem/config.toml` beside [the rig](#the-rig). Edit with `tandem config`
+(`list`, `get`, `set`, `edit`, `path`):
 
 | key | default | what it does |
 |---|---|---|
-| `active_profile` | `default` | The profile commands act on (`tandem profile use`). |
+| `active_profile` | | The profile commands act on (`tandem profile use`); `tandem init` sets `cover-bread-rolls`. |
 | `data_root` | `~/tandem-data` | Profiles and trajectories. `$TANDEM_DATA_ROOT` wins. |
 | `runtime_dir` | `~/.local/share/tandem/runtime` | TiPToP's runtime (about 25 GB). `$TANDEM_RUNTIME_DIR` wins. |
 | `default_planner` | `tiptop` | The planner new profiles get (`tandem planners default NAME`). |
@@ -254,7 +290,7 @@ Directories (Linux defaults; other systems differ):
 
 | directory | default | env var |
 |---|---|---|
-| config: `config.toml`, `credentials.toml` | `~/.config/tandem` | `$TANDEM_CONFIG_DIR` |
+| config: `config.toml`, `credentials.toml`, `rig.yml`, `calibration.json` | `~/.config/tandem` | `$TANDEM_CONFIG_DIR` |
 | state: logs, session scratch ([DATA.md](DATA.md#logs-and-session-files)) | `~/.local/state/tandem` | `$TANDEM_STATE_DIR` |
 | share: runtimes | `~/.local/share/tandem` | `$TANDEM_SHARE_DIR` |
 | data: profiles, trajectories | `~/tandem-data` | `$TANDEM_DATA_ROOT` |
@@ -278,14 +314,15 @@ profile turns them on.
 | [SamratSahoo/cuTAMP](https://github.com/SamratSahoo/cuTAMP/tree/TANDEM) | `TANDEM` | `fc8f233` |
 | [SamratSahoo/curobo](https://github.com/SamratSahoo/curobo) | `main` | `3a90ff4` |
 
-The install applies one patch (so `$TIPTOP_CALIBRATION` can point TiPToP at the profile's file) and places the
-DATAFARM checkpoints tandem ships. Fetching:
+The install applies one patch (so `$TIPTOP_CONFIG` and `$TIPTOP_CALIBRATION` can point TiPToP at the rig's
+config and calibration file) and places the DATAFARM checkpoints tandem ships. Fetching:
 [ADDING_A_PLANNER.md](ADDING_A_PLANNER.md#a-runtime-recipe). Build log: [DATA.md](DATA.md#logs-and-session-files).
 
 - **Updating.** A moved pin shows `outdated` in `tandem planners list`; `tandem planners install tiptop`
   replaces only moved sources, reusing the environment. `--force` refetches and rebuilds all.
-- **ZED.** `tandem runtime run install-zed` adds the ZED Python API (`pyzed`) from the ZED SDK
-  (`/usr/local/zed/get_python_api.py`).
+- **ZED.** With the ZED SDK installed (`/usr/local/zed/get_python_api.py`), the install adds its Python API
+  (`pyzed`) to the runtime. Without it the install still succeeds, and it, `tandem planners info tiptop` and
+  `tandem doctor` say ZED cameras won't open: install the SDK, then `tandem planners install tiptop` again.
 
 ### Offline install
 

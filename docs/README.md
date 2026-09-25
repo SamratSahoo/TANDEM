@@ -5,7 +5,7 @@ Setup and collecting: [repo README](../README.md).
 | Doc | Covers |
 |---|---|
 | [USAGE.md](USAGE.md) | Commands: `collect`, `plan`, web UI, review, export |
-| [CONFIGURATION.md](CONFIGURATION.md) | Profiles, `hitl:`, cameras, TiPToP, machine settings, planner runtime |
+| [CONFIGURATION.md](CONFIGURATION.md) | Profiles, the paper's five, the rig, `hitl:`, TiPToP, tandem's settings, planner runtime |
 | [DATA.md](DATA.md) | Trial files, logs |
 | [METHOD.md](METHOD.md) | Paper's method in code |
 | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | Fixes |
@@ -14,7 +14,8 @@ Setup and collecting: [repo README](../README.md).
 
 ## Terms
 
-- **profile**: a setup (task, cameras, planner, settings) plus its trajectories; `~/tandem-data/profiles/<name>/` by default.
+- **profile**: a task (prompt, phase planning, planner settings) in one YAML file, `~/tandem-data/profiles/<name>.yml` by default, plus its trajectories in `~/tandem-data/trajectories/<name>/`. `tandem init` adds the paper's five.
+- **rig**: this machine's robot, cameras and calibration, shared by every profile; `~/.config/tandem/rig.yml`.
 - **phase planning**: splitting an instruction into ordered robot and human phases. Needs `hitl.enabled: true`.
 - **phase**: a step and the **atoms** (predicates on objects, e.g. `On(bread, plate)`) that must hold after it. **Robot phase**: a planner goal. **Human phase**: for a human executor.
 - **proposal**: the model's phase list. **Repair**: sending a failing one back with the reason.

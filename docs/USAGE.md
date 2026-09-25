@@ -6,26 +6,28 @@
 
 | command | does | notable flags |
 |---|---|---|
-| `tandem init` | Setup: checks, data directory, planner runtime, Gemini key, a profile, teleop. Skips done steps. | `--viz-only` (laptop: no runtime or robot), `-y/--yes`, `--repair` (redo runtime, key, teleop; keeps existing profiles), `--profile` (default `default`), `--import-from`, `--planner`, `--preset` |
-| `tandem doctor` | Every check, with fixes. Changes nothing. | `-p/--profile`, `--no-hardware` (skip robot, camera, grasp-server probes) |
+| `tandem init` | Setup: checks, data directory, planner runtime, Gemini key, [the rig](CONFIGURATION.md#the-rig), [the paper's five](CONFIGURATION.md#the-papers-five), teleop. Moves [older profiles](CONFIGURATION.md#older-profiles). Skips done steps. | `--viz-only` (laptop: no runtime or robot), `-y/--yes`, `--repair` (redo runtime, key, rig, teleop; never touches a profile), `--robot-host`, `--robot-type`, `--camera ROLE=SERIAL` (repeatable), `--planner`, `--profile` (make it active) |
+| `tandem doctor` | Every check, with fixes. Changes nothing. | `-p/--profile`, `--no-hardware` (skip robot, camera, perception-server probes) |
 | `tandem collect [profile]` | A [session](#collecting) in the terminal. | `-t/--task`, `-n/--episodes`, `--no-execute` (plan, never move), `--no-record`, `--web` (in the browser) |
 | `tandem plan "<task>" -i PHOTO` | [Phases from a photo](#planning-from-a-photo). | |
 | `tandem ui` | The [web UI](#the-web-ui). | `-p/--port`, `--host`, `--no-open`, `--profile` (also makes it active) |
-| `tandem profile list\|show\|use\|edit\|path\|delete\|create\|presets\|migrate` | Manage [profiles](CONFIGURATION.md#profiles). `edit` validates on save; `migrate` rewrites [older ones](CONFIGURATION.md#older-profiles) (default: all). | `show --planner` (only what the planner receives); `delete --purge` (and its trajectories), `-y`; `create --from --preset --prompt --use --force --import-from --tamp-config --planner`; `presets --planner` |
-| `tandem planners list\|info NAME` | Every planner and its state; one's needs, pinned vs installed commits, goal language, `planner.options`, presets. | `-p/--profile` |
+| `tandem profile list\|show\|use\|edit\|path\|delete\|create\|migrate` | Manage [profiles](CONFIGURATION.md#profiles), one YAML file each. `create NAME --prompt "..."`: the paper's settings with your task. `edit` validates on save; `migrate` moves [older ones](CONFIGURATION.md#older-profiles). | `create --prompt --from PROFILE --use --force`; `show --planner` (only what the planner receives); `delete --purge` (and its trajectories), `-y` |
+| `tandem rig show\|set\|edit\|path` | [This machine's robot, cameras and calibration](CONFIGURATION.md#the-rig), shared by every profile. | `set KEY VALUE` (dotted, e.g. `robot.host`; `null` removes one); `path --calibration` |
+| `tandem planners list\|info NAME` | Every planner and its state; one's needs, pinned vs installed commits, goal language, task and machine settings. | `-p/--profile` |
 | `tandem planners install\|remove NAME` | Builds or updates its [runtime](CONFIGURATION.md#the-planner-runtime) from pinned sources. `remove` deletes only the runtime. | `--sources` ([offline](CONFIGURATION.md#offline-install)), `--force` (refetch, rebuild), `-y/--yes` |
 | `tandem planners use\|default NAME` | Makes a profile plan with it ([settings](CONFIGURATION.md#planner-settings)); `default` sets only what new profiles get. | `use -p/--profile -o/--option KEY=VALUE --default` (new profiles too) |
 | `tandem planners bundle NAME --out DIR` | Its pinned sources, for an [offline install](CONFIGURATION.md#offline-install). | `--only SOURCE`, `--from SOURCE=PATH` (local checkout), repeatable; `--archive` (also `DIR.tar.gz`) |
 | `tandem planners new NAME` | Scaffolds [your own planner](ADDING_A_PLANNER.md#quick-start). | `--sidecar`, `--dir` |
 | `tandem executors list\|use NAME` | Human executors and readiness; `use` sets a profile's ([choosing one](ADDING_A_HUMAN_EXECUTOR.md#choosing-one)). | `-p/--profile` |
 | `tandem traj …`, `tandem export lerobot\|manifest [profile]` | [Review and file trajectories](#reviewing-and-exporting); [export](#exporting) a LeRobot dataset or JSON index. | |
-| `tandem config list\|get\|set\|edit\|path\|set-gemini-key\|set-hf-token` | [Machine settings](CONFIGURATION.md#machine-settings-and-credentials). `set-*` store a credential typed at a prompt. | `set KEY VALUE` (dotted, e.g. `ui.port`); `--stdin`; `set-gemini-key --key KEY` (lands in shell history) |
-| `tandem runtime status\|build\|shell\|python\|run\|clean\|path` | The active profile's planner runtime. `build` also repairs; `python` prints the interpreter; `clean` deletes it. | `--planner` or `-p/--profile` for another; `build --force` (refetch), `--env-only`, `--sources`; `clean -y` |
+| `tandem config list\|get\|set\|edit\|path\|set-gemini-key\|set-hf-token` | [tandem's settings](CONFIGURATION.md#tandem-settings-and-credentials) (config.toml). `set-*` store a credential typed at a prompt. | `set KEY VALUE` (dotted, e.g. `ui.port`); `--stdin`; `set-gemini-key --key KEY` (lands in shell history) |
+| `tandem runtime status\|build\|shell\|python\|run\|clean\|path` | The active profile's planner runtime. `run` and `shell` point the planner's own scripts at [the rig](CONFIGURATION.md#the-rig); `build` also repairs; `python` prints the interpreter; `clean` deletes it. | `--planner` or `-p/--profile` for another; `run`/`shell --raw` (the planner's stock config); `build --force` (refetch), `--env-only`, `--sources`; `clean -y` |
 
-- `--json`: `doctor`, `plan`, `profile list|show|presets`, `traj list|show`, `planners list|info|use|default`,
+- `--json`: `doctor`, `plan`, `profile list|show`, `rig show`, `traj list|show`, `planners list|info|use|default`,
   `executors list|use`, `runtime status`, `config list`.
 - `--debug` (full tracebacks) and `--no-color` (or `NO_COLOR`) go first: `tandem --debug collect`.
-- Put `--` before a runtime command's options: `tandem runtime run -- viz-calibration --camera external`.
+- `tandem runtime run`: tandem's own options (`--planner`, `-p`, `--raw`) go before the command; everything
+  after it is the command's: `tandem runtime run viz-calibration --camera external` (`--` still works).
 - Planner states: `installed`, `not installed`, `outdated` (built at commits other than the pinned ones),
   `no runtime needed`, `broken` (with why). Executor states: `ready`, `needs setup` (with what is missing),
   `broken`. `●` marks the profile's choice.
@@ -64,7 +66,7 @@
 
 `tandem plan` previews a task's phases before you collect: who does each, its goal or magic operator, and the
 invented predicates. It needs only tandem (Python 3.10+) and a
-[Gemini key](CONFIGURATION.md#machine-settings-and-credentials), no runtime, GPU or robot. Answers vary by run.
+[Gemini key](CONFIGURATION.md#tandem-settings-and-credentials), no runtime, GPU or robot. Answers vary by run.
 
 ```bash
 tandem plan "place the bread inside the box" --image workspace.png -o bread -o box -o plate
@@ -105,8 +107,9 @@ once, leaving the arm where it is.
   Shaded bands mark frames π₀.₅-DROID's training drops as idle.
 - **Collect**: the terminal's controls. Clauses the plan leaves out show before the arm moves; the label prompt
   has an inline review.
-- **Profiles**: edit one and see what its planner receives. **Settings**: credentials, paths, catalogs, runtime
-  status, `tandem doctor`.
+- **Profiles**: the paper's five and yours. Create one from a task or as a copy, edit one and see what its
+  planner receives. **Settings**: the rig (robot, cameras, calibration, each planner's machine settings),
+  credentials, paths, catalogs, runtime status, `tandem doctor`.
 
 ### HTTP API
 
@@ -115,6 +118,8 @@ once, leaving the arm where it is.
 | `GET /api/planners[/{name}]`, `GET /api/executors` | `planners list\|info --json`, `executors list --json`. `?profile=P` for another profile. |
 | `POST /api/planners/{name}/use\|default`, `POST /api/executors/{name}/use` | `planners use` (optional body: `profile`, `options`), `planners default`, `executors use` (optional body: `profile`). |
 | `GET /api/profiles/{name}` | The profile and `planner_view.receives` (`profile show --planner`). Cards in `GET /api/profiles` have a `planner_summary` line. |
+| `POST /api/profiles` | `profile create`: body `{name, prompt}` (the paper's settings) or `{name, from}` (a copy; `prompt` optional). `POST /api/profiles/builtin` adds the paper's five, as `init` does. |
+| `GET /api/rig`, `PATCH /api/rig` | `rig show --json`; `rig set` for several keys at once (body `{"robot.host": "172.16.0.5", "cameras.external_2": null}`). |
 | `GET /api/sessions/{id}` | The [session summary](DATA.md#session-summary) and its last 500 log lines. |
 | `GET /api/media/{profile}/{id}/{file}` | A trajectory video, served with HTTP Range; a proxy must pass `Range` headers. |
 
@@ -160,5 +165,5 @@ needs av, pyarrow and huggingface_hub ([installing](CONFIGURATION.md#installing)
 - **Destination**: `--repo` defaults to `export.hf_repo`; `hf_org` fills a missing owner.
   `--out DIR` writes `DIR/<owner>/<name>`. `-n/--max-episodes N` exports the first N.
 - **Rebuilds** replace only a dataset tandem built, once the new one is complete. `--force` replaces anything.
-- **`--push`** needs a Hugging Face token ([where tandem looks](CONFIGURATION.md#machine-settings-and-credentials)).
+- **`--push`** needs a Hugging Face token ([where tandem looks](CONFIGURATION.md#tandem-settings-and-credentials)).
   Visibility defaults to `export.private`.

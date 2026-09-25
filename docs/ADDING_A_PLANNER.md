@@ -137,9 +137,8 @@ class).
 | `info` | yes | `PlannerInfo(name, display_name, summary, homepage, requires, sources)` for `tandem planners list`/`info`; `requires` is free text, `sources` defaults to the recipe's. |
 | `CAPABILITIES` | yes | [Above](#capabilities). |
 | `recipe` | no | A [`RuntimeRecipe`](#a-runtime-recipe); `None`: pure Python. |
-| `OPTIONS` | no | `planner.options` key → one-line description. |
-| `importer` | no | A `ProfileImporter` (`source`, `find`, `configs`, `build`) for `--import-from`. `build` returns the profile, extrinsics and notes; a note starting `"warning: "` shows as a warning. |
-| `presets_dir` | no | A directory of `<name>.yml` [presets](#options-presets-and-doctor-rows). |
+| `OPTIONS` | no | The task's settings: a profile's `planner.options` key → one-line description. |
+| `RIG_OPTIONS` | no | This machine's settings, shared by every profile: a `planners.<name>` key in [rig.yml](CONFIGURATION.md#the-rig) → one-line description (a server's address, a robot's ports). No key in both. |
 
 A bad declaration raises one `TandemError` at import, listing every problem. A base class passes
 `abstract=True` (`class MyBase(Planner, abstract=True)`): unchecked, unregistrable.
@@ -149,13 +148,15 @@ A bad declaration raises one `TandemError` at import, listing every problem. A b
 | `warm`, `close`, `home`, `release_hardware`, `reacquire_hardware` | No-op. |
 | `require_ready` | Checks the recipe's runtime is installed. |
 | `capture_frame`, `move_to_joints` | Raise `UnsupportedVerb`; with phase planning and `hitl.check_human_effects`, `check_human_preconditions` or `check_tamp_effects` on, a session won't start without `capture_frame`. |
-| `create(ctx)` | `validate_options(ctx.options)`, then `cls(ctx)`. |
+| `create(ctx)` | `validate_options(ctx.options)` and `validate_rig_options(ctx.rig_options)`, then `cls(ctx)`. |
+| `runtime_env(*, rig, settings=None)` | `{}`: what `tandem runtime run` and `shell` add to the environment of the planner's own scripts. TiPToP's writes a `tiptop.yml` from the rig and points `$TIPTOP_CONFIG` at it. |
 | `replay(rollout_dir, *, settings=None)` | Raises `UnsupportedVerb` (no `tandem traj open`). |
 | `runtime(settings)`, `runtime_root(settings)` | `~/.local/share/tandem/runtimes/<name>` (or `$TANDEM_RUNTIMES_DIR`); `None` without a recipe. |
 
 `self.ctx` is the session's `BackendContext` (`profile`, `session_dir`, `output_dir`, `execute`, `record`,
-`on_log`, `options`, `settings`, `session_id`, `task`, `events_file`, `runtime_dir`), `self.options` the
-validated options; `self.log(text)` writes to the session log. Any `tandem.planners.base.BackendFactory`
+`on_log`, `options`, `settings`, `session_id`, `task`, `events_file`, `runtime_dir`, `rig`, `rig_options`),
+`self.options` and `self.rig_options` the validated settings, `self.rig` the machine's rig (`robot.host`,
+`robot.type`, `cameras`, `calibration_file()`); `self.log(text)` writes to the session log. Any `tandem.planners.base.BackendFactory`
 (`info`, `capabilities()`, `create(ctx)`, `runtime(settings)`, optional hooks) also works, like TiPToP's.
 
 ## Sidecars
@@ -210,7 +211,7 @@ A planner needing more than pip declares its runtime as data, `recipe = RuntimeR
 | `RuntimeRecipe` | `planner` (equals `info.name`), `title`, `sources`, `environment`, `steps`, `assets`, `notes`. |
 | `Source` | `SourcePin(name, url, commit, ref=)`, `trim` (paths deleted after fetching), `patches` (in order; a failure stops the install), `marker` (only in a complete tree), `persistent` (run-time directories kept across trees). |
 | `PixiEnvironment` | `manifest` (the planner's pixi manifest and lock, in a source), `home` (default `env`, outside every tree), `env`. |
-| `BuildStep` | `name`, `task` (from the manifest), `env`, `produces` (globs present once run), `description`. |
+| `BuildStep` | `name`, `task` (from the manifest), `env`, `produces` (globs present once run), `description`; `optional` (the runtime works without it: a failure doesn't fail the install, and it shows as a note), `requires` (absolute paths it needs, such as an SDK's installer; skipped until they exist) and `missing` (what won't work meanwhile, and the fix). TiPToP's ZED step is one. |
 | `Asset` | `(source, dest)`: a package file copied into the runtime. |
 
 - **Pins** are full 40-character commits; `ref` (the branch) is shown by `tandem planners info` and
@@ -230,44 +231,29 @@ A planner needing more than pip declares its runtime as data, `recipe = RuntimeR
   ([offline install](CONFIGURATION.md#offline-install)).
 - **ffmpeg:** the merge joins videos with the environment's `bin/ffmpeg`, else the one on `PATH`.
 
-## Options, presets and doctor rows
+## Options and doctor rows
 
-**Options.** `validate_options(options)` checks `planner.options` when a profile loads; the default
-refuses keys not in `OPTIONS`, suggesting the nearest. Overrides (pydantic works well) must:
+**Options** are of two kinds. The task's, in each profile's `planner.options`, are declared in `OPTIONS` and
+checked by `validate_options(options)` when a profile loads. This machine's, in rig.yml's `planners.<name>`
+(`tandem rig set planners.NAME.KEY VALUE`), are declared in `RIG_OPTIONS` and checked by
+`validate_rig_options(options)` when the rig is read. The defaults refuse keys not declared, suggesting the
+nearest, and say where a key put in the wrong one belongs. Overrides (pydantic works well) must:
 
-- Accept its own output (it is re-validated on every read).
+- Accept their own output (it is re-validated on every read).
 - Return plain data (string-keyed mappings, lists, strings, numbers, booleans, `None`), e.g.
   `model_dump(mode="json")`; not `Path`, `Enum` or numpy values.
 - Raise `TandemError` or `ValueError` (including pydantic's `ValidationError`), reported under
-  `planner.options.`.
+  `planner.options.` or `planners.<name>.`.
 
-For a required setting (a robot's address), refuse `{}` with a `TandemError` naming it; people pass
-`tandem planners use NAME --option KEY=VALUE`.
+For a required setting, refuse `{}` with a `TandemError` naming it: a machine setting (a robot's address) in
+`validate_rig_options`, set with `tandem rig set`; a task setting in `validate_options`, set with
+`tandem planners use NAME --option KEY=VALUE`. `tandem init` fills a planner's machine settings with what
+`validate_rig_options({})` returns.
 
 `describe_options(profile, *, settings=None)` returns the `OptionsView` (`summary`, `sections`,
 `receives`, `receives_note`, `warnings`) shown by `tandem profile show`, the web editor and the session
 header (default: each option as set). `tandem profile show NAME --planner` prints `receives`: exactly what
 the planner gets.
-
-**Presets** are `<name>.yml` files in `presets_dir`, applied by
-`tandem profile create NAME --preset PRESET` and listed by `tandem profile presets --planner NAME`.
-tandem's `paper`: [CONFIGURATION.md](CONFIGURATION.md#presets).
-
-```yaml
-title: One line                       # required; the rest optional
-summary: One line for a listing
-caution: [what a person must know]    # shown as warnings once applied
-extends: paper                        # one of tandem's presets, applied first
-replace: [planner.options.tamp]       # blocks substituted whole, not merged
-profile:
-  planner:
-    options: {...}
-```
-
-No preset states `name`, `version` or `description`; a planner's states only `planner.options`,
-tandem's never `planner`. A planner's preset named like one of tandem's (`paper`) must extend it.
-`replace` names only blocks the preset sets. Ship the directory as package data (the scaffold
-doesn't): `[tool.setuptools.package-data]` `"tandem_arm" = ["presets/*.yml"]`.
 
 **Doctor rows.** `doctor_checks(profile, *, settings=None, probe_hardware=True)` returns
 `tandem.core.probe.Check(name, state, detail, hint, group)` rows (`state`: `probe.OK`, `WARN`,
@@ -359,16 +345,17 @@ class TestArmPlanner(PlannerConformance):
     planner = ArmPlanner          # a Planner subclass, a BackendFactory or a registered name
     records_legs = True           # False: check only the _meta.json stamp
     options = {}                  # its planner.options
+    rig_options = {}              # its machine settings (rig.yml planners.<name>)
     task_hint = "put one thing where it belongs"
 ```
 
-Tests cover the declarations, options, presets, doctor rows, sidecar script, lifecycle, every verb and
+Tests cover the declarations, options, machine settings, doctor rows, sidecar script, lifecycle, every verb and
 (with `records_legs`) the recording, skipping anything not declared or shipped.
 
 Override `goal(scene, caps)` if the kit can't guess a plannable goal, and `make_backend(tmp_path)` to
 build the backend differently. Each check is also a function raising `ConformanceError`:
 `check_declarations`, `check_protocol`, `check_scene`, `check_plan_result`, `check_leg`,
-`check_sidecar_script`, `check_presets`.
+`check_sidecar_script`.
 
 Two switches, on by default, hold it to phase planning's needs (turn one off only for a planner
 never run that way; the scaffold passes both with stand-in images):

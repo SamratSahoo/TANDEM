@@ -24,7 +24,7 @@ Code paths are relative to `src/tandem/`. Terms: [the docs index](README.md#term
 | Re-perception after every phase | Perception before every robot leg ([departures](#departures-from-the-paper)); a fresh `capture_frame` per human-phase check. |
 | Human-phase verification | `grounding.verify_effects`: add effects must hold, delete effects must not. Preconditions optionally first. |
 | τ = ((τ₁, φ₁), …, (τ_N, φ_N)) | `core/merge.py`: one episode per trial; `segments[k].phase_index` names each leg's phase ([layout](DATA.md#episode-layout)). |
-| [DATAFARM](README.md#terms) alignment | TiPToP's `planner.options.tamp` (`blend_mode: vae`), set by the [`paper` preset](CONFIGURATION.md#presets). A planner option, not the method. |
+| [DATAFARM](README.md#terms) alignment | TiPToP's `planner.options.tamp` (`blend_mode: vae`), set in [the paper's profiles](CONFIGURATION.md#the-papers-five). A planner option, not the method. |
 | Failure taxonomy (Fig. 4); failed trials excluded | `plan.OUTCOMES`, `plan.FAILURE_STAGES`. `core/phase_loop.py` ends a trial, `core/session.py` files it ([outcomes](#how-a-trial-ends)). |
 
 ## From instruction to plan
@@ -191,14 +191,14 @@ src/tandem/
 ├── __init__.py, api.py   library surface: tandem.plan_task and the SDK
 ├── planning/     the method (proposal, predicates, operators, checks); no planner or robot
 ├── planners/     protocol (base.py), SDK (sdk.py), sidecars, runtimes, registry, conformance kit
-│                 (testing.py), and tiptop/ (declaration, recipe, options, presets, sidecar)
+│                 (testing.py), and tiptop/ (declaration, recipe, options, sidecar)
 ├── executors/    human executors: protocol, registry, teleop
-├── core/         session, trial loop, episodes, merge, profiles
+├── core/         session, trial loop, episodes, merge, profiles, the rig
 ├── cli/          commands (Typer, Rich)
 ├── server/       FastAPI and a no-build single-page app
 ├── export/       LeRobot v3.0 writer
 ├── teleop/       hand-off driver, run in a DROID environment
-└── resources/    profile template, presets, planner scaffold
+└── resources/    the paper's five profiles, the profile and rig templates, planner scaffold
 ```
 
 - The **session** (`core/session.py`) owns the state machine, prompts and label, and survives preempts,
