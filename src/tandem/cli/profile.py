@@ -429,11 +429,16 @@ def edit(name: str = typer.Argument(None, help="Profile name (default: the activ
         profiles.load_file(path, name=name, keep_absent=before)
     except ProfileError as exc:
         # Never leave a broken profile in place: a session would fail at warmup, minutes
-        # later, with a message about the wrong thing.
+        # later, with a message about the wrong thing. But keep what the person wrote: restored over, it
+        # was gone, and the edit had to be made again from nothing.
+        rejected = path.with_name(f"{path.name}.rejected")
+        shutil.copy2(path, rejected)
         shutil.move(str(backup), str(path))
         raise ProfileError(
-            f"Your edit was rejected and the previous profile restored.\n\n{exc.message}",
-            hint="Re-run `tandem profile edit` and fix the reported line.",
+            f"Your edit was rejected and the previous profile restored; your text is kept in {rejected}."
+            f"\n\n{exc.message}",
+            hint=f"Re-run `tandem profile edit {name}` and fix the reported line (your rejected text is in "
+            f"{rejected.name}, beside it).",
         ) from exc
     backup.unlink(missing_ok=True)
     theme.ok(f"Profile {name!r} is valid", str(path))

@@ -231,10 +231,15 @@ def edit() -> None:
     try:
         rig_mod.parse_text(path.read_text(), source=path)
     except RigInvalid as exc:
+        # The person's text is kept: restored over, it was gone, and the edit had to be made again from nothing.
+        rejected = path.with_name(f"{path.name}.rejected")
+        shutil.copy2(path, rejected)
         _restore(path, backup, created)
+        restored = "rig.yml was not written" if created else "the previous rig restored"
         raise RigInvalid(
-            f"Your edit was rejected and the previous rig restored.\n\n{exc.message}",
-            hint="Re-run `tandem rig edit` and fix the reported line.",
+            f"Your edit was rejected and {restored}; your text is kept in {rejected}.\n\n{exc.message}",
+            hint="Re-run `tandem rig edit` and fix the reported line (your rejected text is in "
+            f"{rejected.name}, beside it).",
         ) from exc
     backup.unlink(missing_ok=True)
     rig = rig_mod.load(force=True)

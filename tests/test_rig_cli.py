@@ -123,6 +123,9 @@ def test_edit_validates_on_save_and_restores_the_rig_when_it_does_not(isolated_e
     assert "Your edit was rejected and the previous rig restored" in rejected.exception.message
     assert paths.rig_file().read_text() == before
     assert not paths.rig_file().with_name("rig.yml.bak").exists()
+    # The person's text is not thrown away: it is kept beside the file, and the error says where.
+    kept = paths.rig_file().with_name("rig.yml.rejected")
+    assert kept.read_text() == 'robot: {host: "http://x"}\n' and str(kept) in rejected.exception.message
 
     fixer = tmp_path / "fix.sh"
     fixer.write_text("#!/bin/sh\nprintf 'version: 1\\nrobot: {host: nuc.lab}\\n' > \"$1\"\n")
