@@ -106,13 +106,33 @@ def write_atomic(path: Path, text: str) -> None:
 
     Truncating a settings file before a write that could fail -- a value that cannot be serialised, a
     Ctrl-C, a full disk -- once left an empty profile that then loaded, silently, as one of defaults.
+
+    Each writer has a partial file of its own. With one shared name, two writers at once -- the web's rig
+    card and `tandem rig set`, two `tandem profile migrate` runs -- truncated and interleaved into the same
+    file, one of them renamed the mix into place, and the other's rename found nothing and raised. Now the
+    last rename wins, with one writer's text whole. The file keeps its permissions (a new one gets the
+    umask's), since ``mkstemp`` makes its file readable by its owner alone.
     """
-    partial = path.with_name(f".{path.name}.partial")
+    import tempfile
+
+    fd, partial = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".partial")
     try:
-        with partial.open("w") as fh:
+        try:
+            mode = path.stat().st_mode & 0o7777
+        except OSError:
+            mode = 0o666 & ~_umask()
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "w") as fh:
             fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(partial, path)
     finally:
-        partial.unlink(missing_ok=True)
+        Path(partial).unlink(missing_ok=True)
+
+
+def _umask() -> int:
+    """The process's umask. Reading it means setting it, so it is set straight back."""
+    mask = os.umask(0o022)
+    os.umask(mask)
+    return mask
