@@ -94,7 +94,10 @@ def list_profiles(as_json: bool = typer.Option(False, "--json", help="Machine-re
             "  ".join(extra),
         )
     theme.console().print(table)
-    theme.info(f"active profile: {cfg.active_profile}", str(cfg.profiles_root()))
+    if cfg.active_profile in names:
+        theme.info(f"active profile: {cfg.active_profile}", str(cfg.profiles_root()))
+    else:
+        theme.info("no active profile: `tandem profile use NAME`", str(cfg.profiles_root()))
     for row in rows:
         if not row.get("valid"):
             from tandem.core.errors import one_line
@@ -259,9 +262,11 @@ def create(
     theme.ok(f"Created profile {name!r}", origin)
     theme.info(str(profile.file()))
     warn_planner_profile_checks(profile)
-    if activate:
+    # With no usable active profile, the new one is it: otherwise the next `tandem collect` fails over one
+    # that is not there.
+    if activate or not profiles.exists(settings_mod.load().active_profile):
         use(name)
-    else:
+    if not activate:
         theme.next_steps(
             [
                 (f"tandem profile edit {name}", "change any of its settings"),
@@ -469,9 +474,12 @@ def delete(
 
     if cfg.active_profile == name:
         remaining = profiles.list_names()
-        cfg.active_profile = remaining[0] if remaining else "default"
+        cfg.active_profile = remaining[0] if remaining else ""
         settings_mod.save(cfg)
-        theme.info(f"Active profile is now {cfg.active_profile!r}")
+        if cfg.active_profile:
+            theme.info(f"Active profile is now {cfg.active_profile!r}")
+        else:
+            theme.info("No profile is active now", '`tandem profile create NAME --prompt "..."` makes one')
 
 
 @app.command("path", help="Print a profile's file.")

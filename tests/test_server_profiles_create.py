@@ -130,3 +130,12 @@ def test_the_page_creates_from_a_task_or_a_copy_and_says_what_is_not_shown():
     assert "preset" not in page.lower() and "cams" not in page
     shell = (STATIC / "app.js").read_text()
     assert "state.builtin = payload.builtin" in shell and "state.oldLayout = payload.old_layout" in shell
+
+
+def test_a_new_profile_is_made_active_when_none_is_and_a_delete_falls_back_to_none(client):
+    assert settings_mod.load().active_profile == ""
+    assert client.post("/api/profiles", json={"name": "cups", "prompt": "stack the cups"}).json()["active"]
+    assert settings_mod.load(force=True).active_profile == "cups"
+    assert not client.post("/api/profiles", json={"name": "bowls", "prompt": "stack the bowls"}).json()["active"]
+    assert client.delete("/api/profiles/cups").json()["active"] == "bowls"
+    assert client.delete("/api/profiles/bowls").json()["active"] == ""

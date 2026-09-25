@@ -200,6 +200,10 @@ async def create_profile(body: dict[str, Any] = Body(...)) -> dict:
         planner = planners_cli.planner_for_new_profile()
     profiles_mod.create(name, source=source, prompt=prompt, planner=planner)
     cfg = settings_mod.load()
+    if not profiles_mod.exists(cfg.active_profile):
+        # With no usable active profile, the new one is it, as `tandem profile create` makes it.
+        cfg.active_profile = name
+        settings_mod.save(cfg)
     return _card(name, cfg.active_profile)
 
 
@@ -223,6 +227,6 @@ async def delete_profile(name: str, purge: bool = False) -> dict:
     profiles_mod.delete(name, keep_data=not purge)
     if cfg.active_profile == name:
         remaining = profiles_mod.list_names()
-        cfg.active_profile = remaining[0] if remaining else "default"
+        cfg.active_profile = remaining[0] if remaining else ""
         settings_mod.save(cfg)
     return {"deleted": name, "purged": purge, "active": cfg.active_profile}

@@ -44,7 +44,9 @@ class TeleopSettings(BaseModel):
 class Settings(BaseModel):
     model_config = {"extra": "forbid"}
 
-    active_profile: str = "default"
+    # The profile a command works on when none is named. Empty until there is one: `tandem init` makes the
+    # first of the paper's five active, and `tandem profile create` its new profile when none is active.
+    active_profile: str = ""
     data_root: str = ""  # blank -> paths.default_data_root()
     runtime_dir: str = ""  # blank -> paths.default_runtime_dir()
     hf_org: str = ""

@@ -225,7 +225,7 @@ def test_outdated_is_a_runtime_built_from_other_commits_than_the_planner_pins_no
 
 def test_a_missing_profile_is_said_next_to_the_listing_not_instead_of_it():
     payload = _json("planners", "list", "--json")
-    assert payload["profile_planner"] is None and "no profile named 'default'" in payload["profile_problem"]
+    assert payload["profile_planner"] is None and payload["profile_problem"] == "no profile is active"
     assert [row["name"] for row in payload["planners"]] == ["tiptop"]
     assert not any(row["active"] for row in payload["planners"])
 

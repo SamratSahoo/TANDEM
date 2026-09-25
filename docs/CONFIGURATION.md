@@ -274,7 +274,7 @@ tandem's own settings, in `~/.config/tandem/config.toml` beside [the rig](#the-r
 
 | key | default | what it does |
 |---|---|---|
-| `active_profile` | | The profile commands act on (`tandem profile use`); `tandem init` sets `cover-bread-rolls`. |
+| `active_profile` | none | The profile commands act on (`tandem profile use`); `tandem init` sets `cover-bread-rolls`, and `tandem profile create` makes its profile active when none is. |
 | `data_root` | `~/tandem-data` | Profiles and trajectories. `$TANDEM_DATA_ROOT` wins. |
 | `runtime_dir` | `~/.local/share/tandem/runtime` | TiPToP's runtime (about 25 GB). `$TANDEM_RUNTIME_DIR` wins. |
 | `default_planner` | `tiptop` | The planner new profiles get (`tandem planners default NAME`). |

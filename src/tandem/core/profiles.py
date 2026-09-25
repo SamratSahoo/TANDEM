@@ -666,6 +666,12 @@ def _checked(name: object) -> str:
     as from the command line -- where ``%2E%2E`` decodes to ``..`` before any route sees it. A name that
     is not a profile name never becomes a path.
     """
+    if name in (None, ""):
+        raise ProfileError(
+            "No profile was named, and none is active.",
+            hint="`tandem profile use NAME` makes one active (`tandem profile list` shows them); `tandem init` "
+            'adds the paper\'s five tasks, and `tandem profile create NAME --prompt "..."` makes your own.',
+        )
     if not is_name(name):
         known = list_names()
         raise ProfileError(

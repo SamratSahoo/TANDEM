@@ -84,7 +84,7 @@ def profile_planner(profile_name: str | None = None) -> tuple[str, str | None, s
 
     name = profile_name or settings_mod.load().active_profile
     if not profiles.exists(name):
-        return name, None, f"there is no profile named {name!r} yet"
+        return name, None, f"there is no profile named {name!r} yet" if name else "no profile is active"
     try:
         return name, profiles.load(name).planner.backend, None
     except ProfileError as exc:

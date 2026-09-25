@@ -49,7 +49,7 @@ def profile_executor(profile_name: str | None = None) -> dict:
     name = profile_name or settings_mod.load().active_profile
     out: dict[str, Any] = {"profile": name, "executor": None, "phase_planning": None, "problem": None}
     if not profiles.exists(name):
-        out["problem"] = f"there is no profile named {name!r} yet"
+        out["problem"] = f"there is no profile named {name!r} yet" if name else "no profile is active"
         return out
     try:
         profile = profiles.load(name)

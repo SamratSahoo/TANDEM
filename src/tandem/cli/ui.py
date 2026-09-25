@@ -65,7 +65,7 @@ def serve(
     active = profile_name or cfg.active_profile
     theme.kv(
         [
-            ("profile", active),
+            ("profile", active or "none active"),
             ("data root", cfg.resolved_data_root()),
             ("runtime", _runtime_note(cfg, active)),
         ]

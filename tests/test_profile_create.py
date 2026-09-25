@@ -148,7 +148,10 @@ def test_create_with_a_prompt_is_one_flag():
     assert "Created profile 'my-task' the paper's settings" in _said(result)
     assert "tandem profile edit my-task" in _said(result) and "tandem collect my-task" in _said(result)
     assert profiles.load("my-task").task.prompt == "put the cup on the plate"
-    assert settings_mod.load(force=True).active_profile != "my-task", "only --use makes it active"
+    # With none active, the new profile is: otherwise the next `tandem collect` fails over one not there.
+    assert settings_mod.load(force=True).active_profile == "my-task"
+    assert _run("create", "other", "--prompt", "stack the cups").exit_code == 0
+    assert settings_mod.load(force=True).active_profile == "my-task", "with one active, only --use switches"
 
 
 def test_create_without_a_task_says_to_give_one():
@@ -220,3 +223,34 @@ def test_the_web_writes_no_profile_without_its_task():
     made = client.post("/api/profiles", json={"name": "fresh", "prompt": "sort the bins"})
     assert made.status_code == 200, made.text
     assert profiles.load("fresh").task.prompt == "sort the bins"
+
+
+def test_with_no_profile_active_every_command_says_so_rather_than_name_a_default_one():
+    """Before init there is no `default` profile: nothing names it, and nothing falls back to it."""
+    assert settings_mod.load().active_profile == ""
+    shown = _run("show")
+    assert shown.exit_code == 1 and "none is active" in shown.exception.message
+    assert "`tandem profile use NAME`" in shown.exception.hint and "default" not in shown.exception.message
+    listed = _run("list")
+    assert listed.exit_code == 0 and "No profiles yet" in listed.output
+
+
+def test_deleting_the_active_profile_leaves_the_next_one_or_none_active():
+    for name in ("aaa", "bbb"):
+        assert _run("create", name, "--prompt", "stack the cups").exit_code == 0
+    assert settings_mod.load(force=True).active_profile == "aaa"
+    assert _run("delete", "aaa", "--yes").exit_code == 0
+    assert settings_mod.load(force=True).active_profile == "bbb"
+    assert _run("delete", "bbb", "--yes").exit_code == 0
+    assert settings_mod.load(force=True).active_profile == ""
+    listed = _run("list")
+    assert "default" not in listed.output
+
+
+def test_a_listing_does_not_call_a_missing_profile_active():
+    assert _run("create", "cups", "--prompt", "stack the cups").exit_code == 0
+    cfg = settings_mod.load()
+    cfg.active_profile = "gone"
+    settings_mod.save(cfg)
+    said = _said(_run("list"))
+    assert "no active profile: `tandem profile use NAME`" in said and "active profile: gone" not in said
