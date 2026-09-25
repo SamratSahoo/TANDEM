@@ -228,12 +228,4 @@ package can register ([ADDING_A_HUMAN_EXECUTOR.md](docs/ADDING_A_HUMAN_EXECUTOR.
 
 ## License and acknowledgements
 
-TANDEM is released under the [MIT License](LICENSE). cuRobo and cuTAMP, which the TiPToP planner runs on and
-`tandem planners install` fetches, are under NVIDIA's license, which limits their use to research and
-evaluation ([NOTICE](NOTICE)).
-
-TANDEM builds on [TiPToP](https://github.com/SamratSahoo/tiptop) (MIT; William Shen, Nishanth Kumar and
-contributors), [cuTAMP](https://github.com/SamratSahoo/cuTAMP) and [cuRobo](https://github.com/NVlabs/curobo)
-(NVIDIA Seattle Robotics Lab), and [DATAFARM](https://github.com/SamratSahoo/DATAFARM)'s checkpoints. The
-phase planner's design and prompts began as `tiptop.hitl` on the `feat/hitl-phase-planning` branch of
-[LJ1356/tiptop](https://github.com/LJ1356/tiptop/tree/feat/hitl-phase-planning).
+This repository is released under the [MIT License](LICENSE).
