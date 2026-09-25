@@ -63,7 +63,7 @@ def test_a_profile_file_in_a_layout_before_version_3_is_refused_with_the_way_out
     with pytest.raises(ProfileError) as excinfo:
         profiles.load("legacy")
     assert "tandem profile migrate" in excinfo.value.message
-    assert "rig.yml" in excinfo.value.message
+    assert "`tandem rig set cameras.ROLE.serial SERIAL`" in excinfo.value.message
 
 
 def test_an_old_detector_setting_in_the_rig_still_loads_and_is_said_to_change_nothing(machine_rig, monkeypatch):

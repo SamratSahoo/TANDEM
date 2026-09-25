@@ -335,3 +335,11 @@ def test_the_active_profile_was_default_when_the_old_settings_left_it_unset(isol
     settings_mod.save(settings)
     assert _cli("profile", "migrate").exit_code == 0
     assert settings_mod.load(force=True).active_profile == "default"
+
+
+def test_a_migrated_profile_writes_null_as_null(isolated_env):
+    _old("cloth", (FIXTURES / "v1_ef1411f.yml").read_text())
+    layout.migrate_all()
+    text = profiles.path_of("cloth").read_text()
+    assert "goal: null" in text
+    assert "goal:\n" not in text, "a bare `goal:` reads as a key left unfinished"

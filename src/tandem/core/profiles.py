@@ -55,6 +55,16 @@ LAYOUT_VERSION = 3
 
 #: The top-level sections a profile had before version 3 that are not a task's. Refused in a profile file.
 OLD_SECTIONS = ("cameras", "robot", "perception", "tamp")
+# Where each of them lives now, said to whoever put one in a profile. (At the top level they were
+# version 1's, whose only planner was TiPToP.)
+_OLD_SECTION_HOME = {
+    "cameras": "cameras are this machine's rig (`tandem rig set cameras.ROLE.serial SERIAL`)",
+    "robot": "robot.host and robot.type are the rig's (`tandem rig set robot.host HOST`), and TiPToP's other "
+    "robot settings its planners.tiptop.robot",
+    "perception": "perception is the rig's planners.tiptop.perception (`tandem rig set "
+    "planners.tiptop.perception.KEY VALUE`)",
+    "tamp": "tamp goes under this profile's planner.options.tamp",
+}
 
 #: Where a profile's previous planner's options are set aside (``stash_file``), inside profiles/.
 STASH_DIR = ".planner-options"
@@ -543,13 +553,18 @@ class Profile(BaseModel):
         except (TypeError, ValueError):
             return data  # the version field says what is wrong with it
         older = [key for key in OLD_SECTIONS if key in data]
-        if version < LAYOUT_VERSION or older:
-            found = f" (it has {', '.join(older)} at the top)" if older else f" (version {version})"
+        where = "; ".join(_OLD_SECTION_HOME[key] for key in older)
+        if version >= LAYOUT_VERSION and older:
             raise ValueError(
-                f"this profile is in the layout before version {LAYOUT_VERSION}{found}: its robot and cameras "
-                "are this machine's rig now. `tandem profile migrate` converts old profile directories; for a "
-                "file, move those sections into rig.yml (`tandem rig edit`) and set version: "
-                f"{LAYOUT_VERSION}"
+                f"{', '.join(older)} {'is' if len(older) == 1 else 'are'} not a task's setting, so not a "
+                f"profile's: {where}"
+            )
+        if version < LAYOUT_VERSION:
+            raise ValueError(
+                f"this profile says version {version}, the layout before version {LAYOUT_VERSION}. `tandem "
+                "profile migrate` converts old profile directories; for this file, "
+                + (f"{where}; then " if older else "")
+                + f"set version: {LAYOUT_VERSION}"
             )
         return data
 
@@ -897,8 +912,10 @@ def _yaml_text(data: Any, *, what: str) -> str:
     from ruamel.yaml.representer import RepresenterError
 
     buf = io.StringIO()
+    yaml = _new_yaml()
+    yaml.Representer = _NullAsWritten  # `goal: null`, not a bare `goal:` that reads as unfinished
     try:
-        _new_yaml().dump(data, buf)
+        yaml.dump(data, buf)
     except RepresenterError as exc:
         raise ProfileError(
             f"{what} holds a value that cannot be written as YAML: {exc}",

@@ -180,18 +180,33 @@ def _plain(obj):
 
 # --- dotted get/set for `tandem config get|set` -----------------------------
 
+#: A key's first part that is the rig's, or a profile's, not one of tandem's settings: said where it lives.
+_RIG_SECTIONS = ("robot", "cameras", "calibration", "planners")
+_PROFILE_SECTIONS = ("task", "hitl", "planner", "recording", "export")
+
+
+def _unknown(key: str, value: str | None = None) -> TandemError:
+    """``key`` is not one of tandem's settings; when it is the rig's or a profile's, where to set it instead."""
+    top = key.split(".")[0]
+    if top in _RIG_SECTIONS:
+        return TandemError(
+            f"{key!r} is not one of tandem's settings: it is this machine's rig (rig.yml).",
+            hint=f"`tandem rig set {key} {value if value is not None else 'VALUE'}`; `tandem rig show` lists the rig.",
+        )
+    if top in _PROFILE_SECTIONS:
+        return TandemError(
+            f"{key!r} is not one of tandem's settings: it is a profile's.",
+            hint="`tandem profile edit NAME` (the active one without a NAME); `tandem profile show` lists it.",
+        )
+    return TandemError(f"Unknown setting {key!r}.", hint="Run `tandem config list` to see every key.")
+
+
 def get_dotted(settings: Settings, key: str):
     node = settings
     for part in key.split("."):
-        if isinstance(node, BaseModel):
-            if part not in type(node).model_fields:
-                raise TandemError(
-                    f"Unknown setting {key!r} (no field {part!r}).",
-                    hint="Run `tandem config list` to see every key.",
-                )
-            node = getattr(node, part)
-        else:
-            raise TandemError(f"Unknown setting {key!r}.", hint="Run `tandem config list`.")
+        if not isinstance(node, BaseModel) or part not in type(node).model_fields:
+            raise _unknown(key)
+        node = getattr(node, part)
     return node
 
 
@@ -203,11 +218,11 @@ def set_dotted(settings: Settings, key: str, value: str) -> Settings:
     node = settings
     for part in parts[:-1]:
         if not isinstance(node, BaseModel) or part not in type(node).model_fields:
-            raise TandemError(f"Unknown setting {key!r}.", hint="Run `tandem config list`.")
+            raise _unknown(key, value)
         node = getattr(node, part)
     leaf = parts[-1]
     if not isinstance(node, BaseModel) or leaf not in type(node).model_fields:
-        raise TandemError(f"Unknown setting {key!r}.", hint="Run `tandem config list`.")
+        raise _unknown(key, value)
 
     field = type(node).model_fields[leaf]
     coerced = _coerce(value, field.annotation)

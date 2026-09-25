@@ -105,6 +105,15 @@ def list_profiles(as_json: bool = typer.Option(False, "--json", help="Machine-re
             theme.fail(f"{row['name']}: {one_line(row['error'])}")
 
 
+def _on_verification_failure(hitl) -> str:
+    """What becomes of a trial whose human step still fails its check, as the settings have it."""
+    if not hitl.verify_enforced:
+        return "recorded, and the run carries on"
+    if hitl.on_verification_failure == "exclude":
+        return "the trial ends, and is excluded from the dataset"
+    return "the trial ends, and you label it"
+
+
 def missing_here(profile: profiles.Profile) -> list[str]:
     """What a profile names that this machine does not have: "planner shelfbot", "executor policybot".
 
@@ -206,10 +215,7 @@ def show(
                 ("proposal model", profile.hitl.proposal_model),
                 ("verification model", profile.hitl.vlm_model),
                 ("retries", f"{profile.hitl.verify_retries} extra attempt(s) at a step that does not verify"),
-                (
-                    "on failure",
-                    "the rollout fails" if profile.hitl.verify_enforced else "recorded, and the run carries on",
-                ),
+                ("on failure", _on_verification_failure(profile.hitl)),
                 ("vlm audit trail", profile.hitl.save_vlm_io),
             ]
         )

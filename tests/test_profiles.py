@@ -201,23 +201,32 @@ def test_the_name_is_the_files_and_is_never_written(profile):
 
 
 @pytest.mark.parametrize(
-    "text, found",
+    "text, said, not_said",
     [
-        ("version: 2\ntask: {prompt: x}\n", "version 2"),
-        ("version: 3\ncameras: {perception: external}\n", "cameras"),
-        ("robot: {host: 10.0.0.5}\n", "robot"),
+        # Nothing to move: the version is all that is old.
+        ("version: 2\ntask: {prompt: x}\n", ["says version 2", "tandem profile migrate", "set version: 3"], ["rig"]),
+        # A version-3 file with a machine's section: where it lives, and no migration advice.
+        (
+            "version: 3\ncameras: {perception: external}\n",
+            ["cameras are this machine's rig", "`tandem rig set cameras.ROLE.serial SERIAL`"],
+            ["migrate", "set version"],
+        ),
+        ("robot: {host: 10.0.0.5}\n", ["robot.host and robot.type are the rig's", "`tandem rig set robot.host"], ["migrate"]),
+        # tamp is a task's: it goes in the profile, not the rig (which refuses it).
+        ("version: 3\ntamp: {num_particles: 8}\n", ["planner.options.tamp"], ["rig", "migrate"]),
     ],
 )
-def test_the_layout_before_version_3_is_refused_with_the_way_out(isolated_env, text, found):
+def test_a_section_that_is_not_a_tasks_is_refused_with_where_it_lives(isolated_env, text, said, not_said):
     root = isolated_env / "data" / "profiles"
     root.mkdir(parents=True)
     (root / "old.yml").write_text(text)
     with pytest.raises(ProfileInvalid) as excinfo:
         profiles.load("old")
     message = excinfo.value.message
-    assert found in message
-    assert "tandem profile migrate" in message
-    assert "rig.yml" in message
+    for words in said:
+        assert words in message
+    for words in not_said:
+        assert words not in message.split("is not a valid profile:")[1]
 
 
 def test_a_newer_layout_is_refused_as_one(isolated_env):
