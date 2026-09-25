@@ -56,16 +56,25 @@ TOY_CAPABILITIES = Capabilities(
 )
 
 
+#: What the toys read of the machine: rig.yml's planners.<name>. Declared, so a key in a profile is refused.
+TOY_RIG_OPTIONS = {"station": "which of this machine's bin stations the arm drops into"}
+DEFAULT_STATION = "bench-1"
+
+
 class ToyPlanner(Planner):
     """The toy world as an in-process planner."""
 
     info = PlannerInfo(name="toy", display_name="Toy", summary="Drops items into bins, in memory.")
     CAPABILITIES = TOY_CAPABILITIES
     OPTIONS = {"items": "the items on the floor when the session starts"}
+    RIG_OPTIONS = TOY_RIG_OPTIONS
 
     def __init__(self, ctx=None) -> None:
         super().__init__(ctx)
         self.world = ToyWorld(items=tuple(self.options.get("items") or ITEMS))
+        # A task's settings from the profile, the machine's from the rig: what a real planner reads of each.
+        self.station = self.rig_options.get("station", DEFAULT_STATION)
+        self.robot_host = self.rig.robot.host if self.rig is not None else None
 
     def perceive(
         self, *, task_hint: str, save_dir: Path, reset_arm: bool = True, open_gripper: bool = False
@@ -124,10 +133,19 @@ class ToySidecarPlanner(SidecarPlanner):
     CAPABILITIES = replace(TOY_CAPABILITIES, name="toy-sidecar")
     SIDECAR = "toy_sidecar.py"
     TIMEOUTS = {"warm": 30.0, "perceive": 30.0, "plan": 30.0, "execute": 30.0}
+    RIG_OPTIONS = TOY_RIG_OPTIONS
 
     def __init__(self, ctx=None, *, flags: tuple[str, ...] = (), **kwargs: Any) -> None:
         super().__init__(ctx, **kwargs)
         self.flags = tuple(flags)
+
+    def warm_args(self) -> dict[str, Any]:
+        # The sidecar has no rig of its own to read: the machine's settings go over with the warm-up.
+        return {
+            **super().warm_args(),
+            "station": self.rig_options.get("station", DEFAULT_STATION),
+            "robot_host": self.rig.robot.host if self.rig is not None else None,
+        }
 
     def launch_command(self) -> list[str]:
         return [*super().launch_command(), *self.flags]

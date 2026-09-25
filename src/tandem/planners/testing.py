@@ -17,7 +17,8 @@ The easy way in is to subclass the test class in your own suite::
 
 pytest collects every ``test_*`` it inherits. Tune it with class attributes (``records_legs``,
 ``phase_planning``, ``verifies_human_phases``, ``options``, ``rig_options``, ``task_hint``) and hooks (``goal`` to
-choose what is planned, ``make_backend`` to build the backend some other way). The two in the middle
+choose what is planned, ``rig`` for the machine it is built for, ``make_backend`` to build the backend some
+other way). The two in the middle
 are on by default and hold a planner to what the method needs of it: an image from every perception
 pass, which the task is decomposed from, and a camera frame, which a person's step is verified from.
 Each check is also a plain function (``check_declarations``,
@@ -27,7 +28,9 @@ raising ``ConformanceError`` -- an ``AssertionError`` listing every problem foun
 What the dynamic tests need from the planner is only that it runs where the tests run: an in-process
 planner as it stands, a ``SidecarPlanner`` with its sidecar launchable (a fake world, or a real runtime
 on a machine that has one). They build it through its factory with a ``BackendContext`` pointing into
-pytest's ``tmp_path``, warm it, and always close it.
+pytest's ``tmp_path``, warm it, and always close it. The context always has a rig: a stand-in machine
+(``stand_in_rig``) unless the ``rig`` hook gives another, so a planner reading ``self.rig.robot.host`` runs,
+and the kit never reads the rig.yml of the machine it runs on.
 
 pytest is imported only by the test class's skips, so the check functions work without it.
 """
@@ -539,6 +542,22 @@ def moved_objects(goal: Sequence[GoalAtom], caps: Capabilities) -> set[str]:
 # --------------------------------------------------------------------------- the test class
 
 
+def stand_in_rig(directory: Path) -> Any:
+    """A machine for the kit to build a backend for: the rig's defaults (an arm at 172.16.0.2), a hand and an
+    external camera, and a calibration file of its own under ``directory`` -- absent, so no extrinsics.
+
+    Not this machine's rig.yml: a test that read it would pass or fail with whatever the developer's machine
+    happens to hold. A session always hands its planner a rig; a context without one is not what runs.
+    """
+    from tandem.core.rig import Rig
+
+    rig = Rig.model_validate(
+        {"cameras": {"hand": {"serial": "10000001"}, "external": {"serial": "10000002"}}}
+    )
+    rig._source = Path(directory) / "rig.yml"
+    return rig
+
+
 def _skip(reason: str) -> None:
     import pytest
 
@@ -583,6 +602,10 @@ class PlannerConformance:
             raise AssertionError(f"{type(self).__name__} sets no `planner` to test")
         return as_factory(self.planner)
 
+    def rig(self, tmp_path: Path) -> Any:
+        """The machine the backend is built for (``tandem.core.rig.Rig``). Default: ``stand_in_rig``."""
+        return stand_in_rig(tmp_path)
+
     def context(self, tmp_path: Path) -> BackendContext:
         """The context the backend is built from: every directory under ``tmp_path``."""
         self.logs: list[tuple[str, str]] = []
@@ -596,6 +619,7 @@ class PlannerConformance:
             record=True,
             on_log=lambda stream, text: self.logs.append((stream, text)),
             options=dict(self.options),
+            rig=self.rig(tmp_path),
             rig_options=dict(self.rig_options),
             session_id="conformance",
             task=self.task_hint,

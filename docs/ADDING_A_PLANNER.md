@@ -181,7 +181,9 @@ class ArmPlanner(SidecarPlanner):      # tandem.planners.SidecarPlanner; info, C
 | `close` | Asks the sidecar to quit, then ends its process group, helpers included. |
 
 Overridable: `launch_command`, `launch_cwd`, `launch_env`, `warm_args` (default `output_dir`,
-`execute`, `record`), `on_event`; `call(verb, **args)` calls a sidecar-only verb.
+`execute`, `record`), `on_event`; `call(verb, **args)` calls a sidecar-only verb. The sidecar has no rig of
+its own: hand it what it reads of the machine in `warm_args`, e.g. `{**super().warm_args(), "host":
+self.rig.robot.host, **self.rig_options}` (`tests/toy_planner.py` does).
 
 **The script** imports only `tandem_sidecar` (one standard-library file, Python 3.8+) from tandem;
 the scaffold's `sidecar.py` is complete. It has one method per verb (keyword arguments in, JSON-safe
@@ -352,8 +354,10 @@ class TestArmPlanner(PlannerConformance):
 Tests cover the declarations, options, machine settings, doctor rows, sidecar script, lifecycle, every verb and
 (with `records_legs`) the recording, skipping anything not declared or shipped.
 
-Override `goal(scene, caps)` if the kit can't guess a plannable goal, and `make_backend(tmp_path)` to
-build the backend differently. Each check is also a function raising `ConformanceError`:
+Every backend is built for a stand-in machine (`stand_in_rig`: the default arm at 172.16.0.2, a hand and an
+external camera, no extrinsics), never this machine's rig.yml, so a planner reading `self.rig.robot.host`
+runs and the tests do not depend on the machine. Override `rig(tmp_path)` for another, `goal(scene, caps)` if
+the kit can't guess a plannable goal, and `make_backend(tmp_path)` to build the backend differently. Each check is also a function raising `ConformanceError`:
 `check_declarations`, `check_protocol`, `check_scene`, `check_plan_result`, `check_leg`,
 `check_sidecar_script`.
 

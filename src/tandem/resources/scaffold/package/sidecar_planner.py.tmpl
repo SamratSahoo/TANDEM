@@ -100,4 +100,6 @@ class {{class_name}}(SidecarPlanner):
     # TODO: settings of THIS MACHINE it reads -- a robot's ports, a server's address -- each with one line.
     # They live in the rig (rig.yml, under planners.{{name}}) and every profile shares them: `tandem rig set
     # planners.{{name}}.KEY VALUE`. OPTIONS above are the TASK's, one set per profile. No key in both.
+    # The sidecar has no rig of its own: hand it what it needs in warm_args() -- self.rig_options, and the
+    # rig's own self.rig.robot.host, robot.type and cameras -- as {**super().warm_args(), "host": ...}.
     RIG_OPTIONS = {}

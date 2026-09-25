@@ -219,9 +219,13 @@ class TiptopFactory:
         from tandem.planners.tiptop.backend import TiptopBackend
 
         # The session hands over the rig and its planners.tiptop block, checked; a context built by hand
-        # without a rig gets this machine's.
+        # without them gets this machine's. Whichever the context does supply is used: a conformance kit
+        # that sets rig_options for TiPToP must not have them replaced by the rig.yml of the machine it runs on.
         rig = ctx.rig if ctx.rig is not None else rig_mod.load()
-        rig_options = ctx.rig_options if ctx.rig is not None else rig_mod.planner_options(rig, "tiptop")
+        if ctx.rig is not None or ctx.rig_options:
+            rig_options = ctx.rig_options
+        else:
+            rig_options = rig_mod.planner_options(rig, "tiptop")
         options = _resolve(rig, rig_options, ctx.options)
 
         # TiPToP's perception is a Gemini call every rollout: the detector turns the instruction into

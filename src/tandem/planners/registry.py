@@ -230,16 +230,28 @@ def options_for(planner: Any, options: Mapping[str, Any] | None) -> dict[str, An
     raw = dict(options or {})
     misplaced = _declared_elsewhere(planner, raw, own="OPTIONS", other="RIG_OPTIONS")
     if misplaced:
-        name = _name_of(planner)
-        key = misplaced[0]
-        raise TandemError(
-            f"{', '.join(misplaced)} {'is a machine setting' if len(misplaced) == 1 else 'are machine settings'} "
-            f"of {_title_of(planner)}: {'it lives' if len(misplaced) == 1 else 'they live'} in rig.yml under "
-            f"planners.{name}.{key}, which every profile on this machine shares.",
-            hint=f"Remove it from the profile's planner.options; `tandem rig set planners.{name}.{key} VALUE` "
-            "sets it for this machine.",
-        )
+        raise machine_settings_in_a_profile(planner, misplaced, raw)
     return _checked_by(planner, "validate_options", raw, stored_in="a profile")
+
+
+def machine_settings_in_a_profile(planner: Any, keys: list[str], options: Mapping[str, Any]) -> TandemError:
+    """The refusal of machine settings (``RIG_OPTIONS``) found in a profile's planner.options, with where they
+    live and the `tandem rig set` that sets the first: one error, whichever check finds them first.
+
+    ``tandem rig set`` sets one value at a time, so a setting that is a block (TiPToP's ``robot``) is named
+    down to a key inside it (``planners.tiptop.robot.KEY``) and a plain one is not (``planners.toy.sensor``).
+    """
+    name = _name_of(planner)
+    key = keys[0]
+    one = len(keys) == 1
+    leaf = f"planners.{name}.{key}" + (".KEY" if isinstance(options.get(key), Mapping) else "")
+    return TandemError(
+        f"{', '.join(keys)} {'is a machine setting' if one else 'are machine settings'} of {_title_of(planner)}, "
+        f"not a task's: {'it lives' if one else 'they live'} in rig.yml under planners.{name}, which every "
+        "profile on this machine shares.",
+        hint=f"Remove {'it' if one else 'them'} from the profile's planner.options; `tandem rig set {leaf} VALUE` "
+        "sets it for this machine.",
+    )
 
 
 def rig_options_for(planner: Any, options: Mapping[str, Any] | None) -> dict[str, Any]:

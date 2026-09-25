@@ -64,10 +64,12 @@ class TestTheFakeBackendConforms(PlannerConformance):
 class TestAnInProcessPlannerConforms(PlannerConformance):
     planner = ToyPlanner
     options = {"items": ["apple", "pear"]}
+    rig_options = {"station": "bench-2"}
 
 
 class TestASidecarPlannerConforms(PlannerConformance):
     planner = ToySidecarPlanner
+    rig_options = {"station": "bench-2"}
 
 
 def test_tiptop_passes_everything_that_can_be_checked_without_a_robot():

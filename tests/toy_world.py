@@ -55,8 +55,9 @@ class ToyWorld:
 
     # ---- lifecycle and custody ---------------------------------------------------------------------
 
-    def warm(self, *, output_dir=None, execute=True, record=True) -> dict:
+    def warm(self, *, output_dir=None, execute=True, record=True, station=None, robot_host=None) -> dict:
         self.warmed = True
+        self.station, self.robot_host = station, robot_host
         return {"items": sorted(self.where)}
 
     def close(self) -> dict:

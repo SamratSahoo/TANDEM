@@ -605,17 +605,12 @@ class Planner(abc.ABC):
         A key it reads from the rig instead is told so: the same setting in both places is the drift the
         split exists to prevent.
         """
+        from tandem.planners.registry import machine_settings_in_a_profile
+
         title = cls.info.title if hasattr(cls, "info") else cls.__name__
         machine = sorted(str(key) for key in (options or {}) if key in cls.RIG_OPTIONS and key not in cls.OPTIONS)
         if machine:
-            name = cls.info.name if hasattr(cls, "info") else "NAME"
-            raise TandemError(
-                f"{', '.join(machine)} {'is a machine setting' if len(machine) == 1 else 'are machine settings'} "
-                f"of the {title} planner, not a task's: {'it lives' if len(machine) == 1 else 'they live'} in "
-                f"rig.yml under planners.{name}, which every profile shares.",
-                hint=f"Remove {'it' if len(machine) == 1 else 'them'} from the profile's planner.options, and "
-                f"`tandem rig set planners.{name}.{machine[0]}.KEY VALUE` instead.",
-            )
+            raise machine_settings_in_a_profile(cls, machine, dict(options or {}))
         unknown = sorted(str(key) for key in (options or {}) if key not in cls.OPTIONS)
         if not unknown:
             return
