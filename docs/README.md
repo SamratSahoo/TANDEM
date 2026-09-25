@@ -4,7 +4,7 @@ Setup and collecting: [repo README](../README.md).
 
 | Doc | Covers |
 |---|---|
-| [USAGE.md](USAGE.md) | Commands: `collect`, `plan`, web UI, review, export |
+| [USAGE.md](USAGE.md) | Every command; `collect`, `plan`, web UI, review, export |
 | [CONFIGURATION.md](CONFIGURATION.md) | Profiles, the paper's five, the rig, `hitl:`, TiPToP, tandem's settings, planner runtime |
 | [DATA.md](DATA.md) | Trial files, logs |
 | [METHOD.md](METHOD.md) | Paper's method in code |

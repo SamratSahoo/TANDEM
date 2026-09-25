@@ -65,7 +65,7 @@ until the trial is over:
     preempt or session stop → aborted
     plan finished           → stop
     unless the next phase is human:
-        perceive into a new leg in <profile>/trajectories/eval/ (reset_arm on the first pass only,
+        perceive into a new leg in trajectories/<profile>/eval/ (reset_arm on the first pass only,
             open_gripper only after a human phase); raised → failure at tamp_planning
         no plan, planning off → goal = scene.detected_goal
         no plan, planning on  → build_plan(); no image or no valid proposal → failure at invention

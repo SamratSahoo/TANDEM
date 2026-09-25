@@ -25,6 +25,20 @@ A rig camera has no entry in the rig's `calibration.json` (`tandem rig path --ca
 won't start. Check the serial (`tandem rig show`), then add its entry ([format](CONFIGURATION.md#the-rig);
 [steps](../README.md#5-cameras-and-calibration)).
 
+## The robot doesn't answer ("robot control … TimeoutError")
+
+tandem reaches the robot at the rig's `robot.host` (`tandem rig show`). `TimeoutError`: nothing answers at that
+address; if it isn't the NUC's, `tandem rig set robot.host 172.16.0.5`. `ConnectionRefusedError`: the NUC
+answers but the shim isn't running ([step 3](../README.md#3-robot)). Teleop reaches the NUC through DROID's
+`nuc_ip` instead: keep the two equal.
+
+## A perception server doesn't answer ("foundation stereo depth server …", "m2t2 grasp server …")
+
+TiPToP asks both on every rollout. Start each with `pixi run server` in its checkout
+([step 4](../README.md#4-perception-servers)). One on another machine goes in the rig:
+`tandem rig set planners.tiptop.perception.foundation_stereo.url http://HOST:1234` (M2T2: `…m2t2.url`, port
+8123). `gaierror`: the hostname doesn't resolve. `ConnectionRefusedError`: nothing listens on that port.
+
 ## A trial was excluded
 
 Usually a human phase failed its camera check, retries included. `hitl.json`'s `verifications` show each
@@ -69,6 +83,12 @@ With `placement_support: true`, no seen level patch of the goal surface fits the
 - Noisy floor: raise `placement_flatness_tol`.
 - Last resort: `placement_support_required: false` uses the bounding box.
 
+## "vae_path does not exist"
+
+The paper's profiles name the DATAFARM checkpoint the runtime install places, `vae/checkpoints/vae_full_v2.pt`,
+found beside the profile's file or in the runtime. `tandem doctor` warns about it until
+`tandem planners install tiptop` has run.
+
 ## A TAMP setting seems to do nothing
 
 `tandem profile show <name> --planner` prints what the planner receives; a key not there never applied.
@@ -80,6 +100,12 @@ With `placement_support: true`, no seen level patch of the goal surface fits the
 
 A proxy in front of `tandem ui` is likely dropping the `Range` header `/api/media/` needs; pass it through
 ([details](USAGE.md#http-api)).
+
+## My profiles are gone after updating tandem
+
+Profiles from before version 3 (a directory each, with its own cameras and robot) aren't listed until moved:
+`tandem profile migrate`, or `tandem init`, moves them and sets up the rig from them. Nothing is deleted
+([details](CONFIGURATION.md#older-profiles)).
 
 ## A profile's planner or executor isn't installed
 

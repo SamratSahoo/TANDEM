@@ -60,7 +60,8 @@ python scripts/server/run_server.py   # in the DROID checkout and its polymetis 
 python bamboo_polymetis_shim.py       # in a second terminal
 ```
 
-Check that the shim's log shows `PolymetisGripper connected to localhost:50052`.
+Check that the shim's log shows `PolymetisGripper connected to localhost:50052`. tandem reaches the NUC at the
+address `tandem init` asked for; `tandem rig set robot.host 172.16.0.5` changes it.
 
 ### 4. Perception servers
 
@@ -89,9 +90,8 @@ The robot and cameras are this machine's [rig](docs/CONFIGURATION.md#the-rig), s
 `tandem init` asked for them; change one setting at a time:
 
 ```bash
-tandem rig show                                # the robot, cameras and which have extrinsics
-tandem rig set robot.host 172.16.0.5           # the NUC
-tandem rig set robot.type panda_robotiq        # a Panda
+tandem rig show                                   # the robot, cameras and which have extrinsics
+tandem rig set robot.type panda_robotiq           # a Panda
 tandem rig set cameras.external_2.serial SERIAL   # roles: hand, external, external_2
 ```
 
@@ -133,27 +133,27 @@ Common problems are in [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
 ## Usage
 
-### 1. Choose a profile
+### 1. Choose a task
 
-A profile is one task: its prompt, [phase planning](docs/CONFIGURATION.md#phase-planning-hitl) and TAMP
-settings, in one YAML file, `~/tandem-data/profiles/<name>.yml` ([every setting](docs/CONFIGURATION.md#profiles)).
-`tandem init` adds the paper's five tasks, each with the settings the paper collected it with:
-
-```bash
-tandem profile list                               # cover-bread-rolls, solve-constrained-puzzle, sort-and-cover-snacks,
-                                                  # open-obstructed-book, store-bread-in-closed-box
-tandem profile use store-bread-in-closed-box
-```
-
-Your own task starts from the paper's settings:
+A profile is one task (its prompt, phase planning and TAMP settings) in one YAML file,
+`~/tandem-data/profiles/<name>.yml`. `tandem init` added the paper's five, each with the settings the paper
+collected it with. Pick one:
 
 ```bash
-tandem profile create my-task --prompt "put the cup on the plate" --use   # --from PROFILE copies one instead
-tandem profile edit my-task                                               # opens my-task.yml; validated on save
+tandem profile use store-bread-in-closed-box   # or cover-bread-rolls, solve-constrained-puzzle,
+                                               # sort-and-cover-snacks, open-obstructed-book
 ```
 
-The paper's settings run planned motions at their own pace, not slowed by the rig's `time_dilation_factor`:
-keep a hand on the E-stop.
+Or make your own, with the paper's settings:
+
+```bash
+tandem profile create my-task --prompt "put the cup on the plate" --use
+tandem profile edit my-task                    # optional: opens my-task.yml, validated on save
+```
+
+`--from PROFILE` copies a profile instead ([every setting](docs/CONFIGURATION.md#profiles)). The paper's
+settings run planned motions at their own pace, not slowed by the rig's `time_dilation_factor`: keep a hand on
+the E-stop.
 
 ### 2. Check the plan
 

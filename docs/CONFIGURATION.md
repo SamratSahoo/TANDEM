@@ -151,7 +151,7 @@ tandem rig path --calibration                     # where the extrinsics are
 | `<camera>.serial` | | ZED serial, quoted (`'14846828'`); `tandem rig set` keeps it text. One camera per serial. |
 | `<camera>.type`, `.resolution` | `zed`, `HD720` | |
 | `<camera>.fps` | `15` | Keep 15: three ZEDs at HD720@30 exceed USB bandwidth, and the export resamples to 15 Hz. |
-| `calibration` | `calibration.json` | The extrinsics file, relative to `rig.yml`. |
+| `calibration` | `calibration.json` | The extrinsics file, relative to `rig.yml`, or absolute. |
 | `planners.<name>` | | Each planner's machine settings ([TiPToP's](#tiptop-options)); `tandem planners info NAME` lists them. |
 
 `calibration.json` holds one pose per serial (TiPToP's `calibration_info.json` format). Wrist: `ee_from_cam`.
@@ -178,7 +178,9 @@ A configured serial with no entry stops the session before warm-up; `tandem doct
 ## Planner settings
 
 A planner's settings are of two kinds: the task's, in each profile's `planner.options`, and this machine's, in
-[the rig](#the-rig) under `planners.<name>`. `tandem planners info NAME` lists both.
+[the rig](#the-rig) under `planners.<name>`. The planner declares which is which
+([how](ADDING_A_PLANNER.md#options-and-doctor-rows)): a server's address or a robot's ports are the machine's,
+and a key put in the wrong file is refused with where it belongs. `tandem planners info NAME` lists both.
 
 ```yaml
 planner:
@@ -230,7 +232,9 @@ robot's address and type are the rig's own `robot.host` and `robot.type`.
 names, so a `cfg/tamp/*.yml` config's `tamp_overrides` paste in as is. Accepted keys:
 `src/tandem/planners/tiptop/tamp_keys.py`. `tamp` beats the rig's `perception` for `contact_threshold_m` and
 `voxel_downsample_size`. `tandem doctor` warns about a key that needs another (`blend_ops` without
-`blend_trajectory`).
+`blend_trajectory`). A relative checkpoint path (`vae_path`, `blend_model_path`, `blend_stats_path`,
+`posture_ref`) is looked up beside the profile's file, then in the runtime, where the install puts the DATAFARM
+checkpoints (`vae/checkpoints/vae_full_v2.pt`, `rnd/checkpoints/rnd_droid.pt`).
 
 ### Surface-fitted placement
 

@@ -19,7 +19,7 @@ Implement `tandem.executors.HumanExecutor`. Only `close()` is optional.
 | `run` argument | meaning |
 |---|---|
 | `request` | A [`HumanPhaseRequest`](#humanphaserequest); `None` only for an operator's hand-off between phases (always `teleop`). |
-| `leg`, `save_root` | Record under a new `save_root/eval/` directory (`save_root`: the profile's `trajectories/`), stamped from `leg` per [the recording contract](ADDING_A_PLANNER.md#the-recording-contract). |
+| `leg`, `save_root` | Record under a new `save_root/eval/` directory (`save_root`: `trajectories/<profile>/`), stamped from `leg` per [the recording contract](ADDING_A_PLANNER.md#the-recording-contract). |
 | `should_stop` | True once the operator returns control (`r`), the session stops, or an hour passes. Poll it; never block without it. |
 
 Raise `tandem.executors.CustodyError` if the arm can't be freed; the session ends. `teleop` does when its
