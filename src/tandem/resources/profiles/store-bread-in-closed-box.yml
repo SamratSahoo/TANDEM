@@ -3,9 +3,15 @@
 #
 #  The settings the paper collected it with: the prompt, the hitl block and the
 #  tamp_overrides of hitl-tamp-vla's data-collection/cfg/tamp/4_bread_box_v3.yml
-#  (41cf4ac), plus the three switches every v3 run had on. Keys it does not set are tandem's
-#  defaults, which are the paper's. The robot, cameras and calibration are this machine's rig
-#  (`tandem rig show`).
+#  (41cf4ac), plus the three switches every v3 run had on. The hitl keys that config does not
+#  state are tandem's defaults, which are hitl-tamp-vla's but for two that follow the paper:
+#  on_verification_failure: exclude (its code asked for a label instead) and
+#  verify_final_phase: true (its code left the last step to that label). The robot, cameras
+#  and calibration are this machine's rig (`tandem rig show`).
+#
+#  Its placement settings were tuned with the hand camera looking across the box, as the
+#  config's notes say; which camera perception reads is this machine's (rig.yml
+#  cameras.perception).
 # ─────────────────────────────────────────────────────────────────────────────────────────
 version: 3
 description: 'Store Bread in Closed Box: task 5 of the TANDEM paper'
@@ -83,7 +89,8 @@ planner:
       table_plane_support_vote: true
       disjoint_object_masks: true
       blend_stretch_to_caps: true
-      # this task's own: place into the box's tray, fitted to its observed floor
+      # this task's own: place into the box's tray, fitted to its observed floor, and a finer
+      # voxel size
       placement_support: true
       placement_support_margin: 0.005
       placement_support_required: true

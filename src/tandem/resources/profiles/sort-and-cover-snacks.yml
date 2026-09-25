@@ -3,9 +3,11 @@
 #
 #  The settings the paper collected it with: the prompt, the hitl block and the
 #  tamp_overrides of hitl-tamp-vla's data-collection/cfg/tamp/2_bread_fruit_bowl_cloth_v3.yml
-#  (41cf4ac), plus the three switches every v3 run had on. Keys it does not set are tandem's
-#  defaults, which are the paper's. The robot, cameras and calibration are this machine's rig
-#  (`tandem rig show`).
+#  (41cf4ac), plus the three switches every v3 run had on. The hitl keys that config does not
+#  state are tandem's defaults, which are hitl-tamp-vla's but for two that follow the paper:
+#  on_verification_failure: exclude (its code asked for a label instead) and
+#  verify_final_phase: true (its code left the last step to that label). The robot, cameras
+#  and calibration are this machine's rig (`tandem rig show`).
 # ─────────────────────────────────────────────────────────────────────────────────────────
 version: 3
 description: 'Sort & Cover Snacks: task 3 of the TANDEM paper'

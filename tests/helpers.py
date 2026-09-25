@@ -135,3 +135,10 @@ def wait_for(predicate, timeout: float = 8.0, interval: float = 0.02) -> bool:
             return True
         time.sleep(interval)
     return False
+
+
+def builtin_path(name: str):
+    """The packaged copy of one of the paper's five (``profiles.BUILTIN``), as a file to read in a test."""
+    from tandem import resources
+
+    return resources.path(f"profiles/{name}.yml")

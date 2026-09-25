@@ -12,6 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from helpers import builtin_path
 from ruamel.yaml import YAML
 
 from tandem import resources
@@ -50,7 +51,7 @@ def _raw(path: Path) -> dict:
 
 
 def _builtin(name: str) -> profiles.Profile:
-    return profiles.load_file(profiles.builtin_path(name), name=name)
+    return profiles.load_file(builtin_path(name), name=name)
 
 
 def _template() -> profiles.Profile:
@@ -87,8 +88,13 @@ def test_a_built_in_profile_plans_with_its_configs_hitl_block_and_the_papers_def
     assert {key: hitl[key] for key in defaults if key not in stated} == {
         key: value for key, value in defaults.items() if key not in stated
     }
+    # Pinned to what hitl-tamp-vla's code (cf75a68) ran with, not only to tandem's defaults: a later change
+    # of a default must not drift the paper's tasks without a test saying so.
+    assert hitl["max_attempts"] == 3 and hitl["cache_path"] is None
+    # The two keys that follow the paper rather than that code, and say so in the file.
+    assert hitl["on_verification_failure"] == "exclude" and hitl["verify_final_phase"] is True
     # Every key is written, so a reader sees the whole of what the paper ran with.
-    assert set(_raw(profiles.builtin_path(name))["hitl"]) == set(HitlSpec.model_fields)
+    assert set(_raw(builtin_path(name))["hitl"]) == set(HitlSpec.model_fields)
 
 
 @pytest.mark.parametrize("name", list(PAPER))
@@ -102,7 +108,7 @@ def test_a_built_in_profiles_tamp_settings_are_its_configs_plus_the_three_switch
 
 @pytest.mark.parametrize("name", list(PAPER))
 def test_a_built_in_profile_holds_nothing_of_the_machine(name):
-    raw = _raw(profiles.builtin_path(name))
+    raw = _raw(builtin_path(name))
     assert not RIG_KEYS & set(raw)
     assert not RIG_KEYS & set(raw["planner"]["options"])
     assert raw["version"] == profiles.LAYOUT_VERSION and "name" not in raw
@@ -143,11 +149,15 @@ def test_a_built_in_profile_raises_none_of_tiptops_warnings(name, machine_rig):
 @pytest.mark.parametrize("name", list(PAPER))
 def test_a_built_in_profile_says_which_task_it_is_and_where_its_values_came_from(name):
     title, number, source = PAPER[name]
-    text = profiles.builtin_path(name).read_text()
+    text = builtin_path(name).read_text()
     header = text[: text.index("version:")]
     assert f"{title}  —  task {number} of the TANDEM paper" in header
     assert source in header and "hitl-tamp-vla" in header
     assert "rig" in header, "and that the robot and cameras are not here"
+    flat = " ".join(line.lstrip("# ") for line in header.splitlines())
+    assert "on_verification_failure: exclude (its code asked for a label instead)" in flat
+    assert "verify_final_phase: true (its code left the last step to that label)" in flat
+    assert "which are the paper's" not in flat, "the unset keys are not all what the paper's code did"
 
 
 # --------------------------------------------------------------------------- the template
@@ -181,7 +191,7 @@ def test_a_built_in_profile_is_the_template_with_its_own_task():
     # The same comments and order, so a copy of any of them reads like a new profile does.
     body = profiles._without_header(resources.read(profiles.TEMPLATE))
     for name in PAPER:
-        own = profiles._without_header(profiles.builtin_path(name).read_text())
+        own = profiles._without_header(builtin_path(name).read_text())
         kept = [line for line in body.splitlines() if not line.startswith(("description:", "  prompt:"))]
         lines = own.splitlines()
         assert all(line in lines for line in kept), name
@@ -195,7 +205,7 @@ def test_seeding_copies_the_five_word_for_word():
     assert profiles.seed_builtins() == list(profiles.BUILTIN)
     assert profiles.list_names() == sorted(profiles.BUILTIN)
     for name in profiles.BUILTIN:
-        assert profiles.path_of(name).read_text() == profiles.builtin_path(name).read_text()
+        assert profiles.path_of(name).read_text() == builtin_path(name).read_text()
         assert (profiles.trajectories_root() / name / "success").is_dir()
         profiles.load(name)
 

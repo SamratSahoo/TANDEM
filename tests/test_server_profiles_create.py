@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from helpers import builtin_path
 
 from tandem import resources
 from tandem.core import profiles
@@ -50,7 +51,7 @@ def test_a_paper_task_is_copied_before_init_has_copied_it_in(client):
     response = client.post("/api/profiles", json={"name": "my-box", "from": "store-bread-in-closed-box"})
     assert response.status_code == 200, response.text
     copy = profiles.load("my-box")
-    paper = profiles.load_file(profiles.builtin_path("store-bread-in-closed-box"), name="x")
+    paper = profiles.load_file(builtin_path("store-bread-in-closed-box"), name="x")
     assert copy.task == paper.task and copy.planner == paper.planner, "its own task and placement settings"
     assert copy.description == "copied from store-bread-in-closed-box"
     assert "# this task's own" in profiles.path_of("my-box").read_text()

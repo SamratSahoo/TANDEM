@@ -5,6 +5,9 @@
 #  what the paper's five tasks share: phase planning on, and the TAMP and DATAFARM settings common
 #  to hitl-tamp-vla's five *_v3.yml configs, plus three switches every v3 run had on. A task's own
 #  extras (surface-fitted placement, a finer voxel size) are in the paper profiles that use them.
+#  Two hitl keys follow the paper rather than hitl-tamp-vla's code: on_verification_failure:
+#  exclude (its code asked for a label instead) and verify_final_phase: true (its code left the
+#  last step to that label).
 #
 #  A profile is only the task. This machine's robot, cameras and calibration are its rig
 #  (`tandem rig show`), which every profile shares.

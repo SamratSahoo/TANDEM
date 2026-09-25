@@ -9,7 +9,7 @@ from __future__ import annotations
 import io
 
 import pytest
-from helpers import isolate_registry
+from helpers import builtin_path, isolate_registry
 from ruamel.yaml import YAML
 from toy_planner import ToyPlanner
 
@@ -180,7 +180,7 @@ def test_create_from_one_of_the_papers_five_and_use_it():
     assert "a copy of cover-bread-rolls" in _said(result)
     assert settings_mod.load(force=True).active_profile == "rolls"
     assert profiles.load("rolls").task.prompt == profiles.load_file(
-        profiles.builtin_path("cover-bread-rolls"), name="x"
+        builtin_path("cover-bread-rolls"), name="x"
     ).task.prompt
 
 

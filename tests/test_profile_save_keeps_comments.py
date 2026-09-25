@@ -13,7 +13,7 @@ import difflib
 
 import pytest
 from fastapi.testclient import TestClient
-from helpers import FakeFactory, isolate_registry
+from helpers import FakeFactory, builtin_path, isolate_registry
 
 from tandem.cli import planners as planners_cli
 from tandem.core import profiles
@@ -88,7 +88,7 @@ def test_a_planner_switch_and_back_keeps_the_comments(paper):
     planners_cli.use_planner("tiptop", profile_name=NAME)
     after = paper.read_text()
     assert "task 5 of the TANDEM paper" in after and "# Phase planning" in after
-    paper_options = profiles.load_file(profiles.builtin_path(NAME), name=NAME).planner.options
+    paper_options = profiles.load_file(builtin_path(NAME), name=NAME).planner.options
     assert profiles.load(NAME).planner.options == paper_options
     # The tamp block left the file and came back from the stash, a plain dump: its settings are the
     # paper's again, but the group comments inside it went with it.

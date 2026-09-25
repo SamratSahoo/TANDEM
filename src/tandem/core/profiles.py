@@ -974,13 +974,6 @@ def delete(name: str, *, keep_data: bool = True) -> Path:
 # --------------------------------------------------------------------------- the paper's five, and new profiles
 
 
-def builtin_path(name: str) -> Path:
-    """The packaged copy of one of the paper's five (``BUILTIN``)."""
-    from tandem import resources
-
-    return resources.path(f"profiles/{name}.yml")
-
-
 def builtin_text(name: str) -> str:
     """The packaged copy of one of the paper's five, as written. Read through the package, so a zipped
     install reads it as well as an unpacked one."""
