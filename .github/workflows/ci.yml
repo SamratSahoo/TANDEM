@@ -51,7 +51,7 @@ jobs:
           cache-dependency-path: pyproject.toml
 
       - name: Install
-        run: pip install -e '.[dev,export]'
+        run: pip install -e '.[dev]'
 
       - name: Test
         # The suite spawns a stand-in driver and drives a real state machine over pipes and

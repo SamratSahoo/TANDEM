@@ -34,8 +34,8 @@ def lerobot(
         raise TandemError(
             f"The export dependencies are not installed ({exc}).",
             hint=(
-                "Add them with: pipx inject tandem-tamp av pyarrow huggingface_hub  "
-                "(or `pip install 'tandem-tamp[export]'` inside a virtualenv)."
+                "They come with tandem, so this install is incomplete. Reinstall it: "
+                "pipx install --force git+https://github.com/SamratSahoo/tandem.git"
             ),
         ) from exc
 

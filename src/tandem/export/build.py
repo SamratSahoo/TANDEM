@@ -97,8 +97,8 @@ def _finite(value) -> float | None:
 def _decode_resized(path: Path, hw: tuple[int, int]) -> list[np.ndarray]:
     """Decode an mp4 to RGB frames at the target size.
 
-    Scaling happens inside PyAV's reformatter rather than in OpenCV, which keeps the export
-    extra down to av + pyarrow + huggingface_hub.
+    Scaling happens inside PyAV's reformatter rather than in OpenCV, which keeps the export's
+    dependencies down to av + pyarrow + huggingface_hub.
     """
     import av
 

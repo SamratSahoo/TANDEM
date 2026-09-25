@@ -143,8 +143,7 @@ tandem export manifest --out index.json              # a JSON index of the traje
 ```
 
 `export lerobot` writes a LeRobot v3.0 dataset in `lerobot/droid_1.0.1`'s schema, for π₀.₅-DROID fine-tuning.
-It needs av, pyarrow and huggingface_hub ([installing](CONFIGURATION.md#installing)). Each run is logged to
-`export.log` ([logs](DATA.md#logs-and-session-files)).
+Each run is logged to `export.log` ([logs](DATA.md#logs-and-session-files)).
 
 **Only `success/` is exported.** These are skipped, each with its reason:
 

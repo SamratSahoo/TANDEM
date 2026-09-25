@@ -467,12 +467,7 @@ tandem planners install tiptop --sources /media/usb/planner-sources # on the wor
 ## Installing
 
 tandem isn't on PyPI; install it from git ([README](../README.md#1-install)). Plain `pip install git+…` needs
-a virtualenv on Debian and Ubuntu. `tandem export lerobot` needs `av`, `pyarrow` and `huggingface_hub`:
+a virtualenv on Debian and Ubuntu. Every install includes what `tandem export lerobot` needs (`av`, `pyarrow`
+and `huggingface_hub`).
 
-```bash
-pipx inject tandem-tamp av pyarrow huggingface_hub
-# or, with uv:
-uv tool install --reinstall git+https://github.com/SamratSahoo/tandem.git --with av --with pyarrow --with huggingface_hub
-```
-
-To develop tandem: `pip install -e '.[export,dev]'` in a virtualenv, then `pytest -q`.
+To develop tandem: `pip install -e '.[dev]'` in a virtualenv, then `pytest -q`.

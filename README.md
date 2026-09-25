@@ -26,9 +26,8 @@ Every command below runs on the workstation unless it says otherwise.
 
 ```bash
 pipx install git+https://github.com/SamratSahoo/tandem.git
-pipx inject tandem-tamp av pyarrow huggingface_hub   # only needed for `tandem export lerobot`
-# or, with uv, both at once:
-uv tool install git+https://github.com/SamratSahoo/tandem.git --with av --with pyarrow --with huggingface_hub
+# or, with uv:
+uv tool install git+https://github.com/SamratSahoo/tandem.git
 ```
 
 ### 2. Initialize
