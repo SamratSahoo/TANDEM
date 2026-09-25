@@ -127,11 +127,11 @@ cameras:
   hand:     {serial: '14846828'}
   external: {serial: '32439448'}
 calibration: calibration.json
-planners:
-  tiptop: {...}             # TiPToP's machine settings
+planners: {}                # a planner's machine settings, where they differ from its defaults
 ```
 
-`tandem init` writes it. Then:
+`tandem init` writes it: the robot and the cameras. A planner's own machine settings keep their defaults until you
+set one (`tandem rig show` lists them all, with their defaults). Then:
 
 ```bash
 tandem rig show                                   # also --json; the web's Settings page shows it too

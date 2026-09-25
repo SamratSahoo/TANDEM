@@ -43,7 +43,7 @@ def _said(result) -> str:
 # --------------------------------------------------------------------------- the rig, from flags
 
 
-def test_the_flags_write_the_rig_with_the_planners_machine_settings(machine):
+def test_the_flags_write_the_rig_and_leave_the_planners_defaults_its_own(machine):
     result = _run(
         "-y", "--robot-host", "10.0.0.5", "--robot-type", "panda_robotiq", "--camera", "hand=111", "--camera",
         "external=222",
@@ -52,12 +52,14 @@ def test_the_flags_write_the_rig_with_the_planners_machine_settings(machine):
     rig = rig_mod.load(force=True)
     assert (rig.robot.host, rig.robot.type) == ("10.0.0.5", "panda_robotiq")
     assert {role: cam.serial for role, cam in rig.cameras.configured().items()} == {"hand": "111", "external": "222"}
-    # TiPToP's machine settings, every default filled in, so the servers' addresses are there to edit.
-    tiptop = rig.planners["tiptop"]
+    # TiPToP's machine settings are not written: its defaults stay its own, so the file is the few lines a
+    # person set, and a later default reaches this machine. They are still what it runs with.
+    assert rig.planners == {}
+    tiptop = rig_mod.planner_options(rig, "tiptop")
     assert tiptop["perception"]["m2t2"]["url"] == "http://localhost:8123"
     assert tiptop["perception"]["foundation_stereo"]["url"] == "http://localhost:1234"
-    assert tiptop["robot"]["port"] and "host" not in tiptop["robot"]
     text = paths.rig_file().read_text()
+    assert "gemini" not in text and "depth_trunc" not in text and len(text.splitlines()) < 30
     assert "serial: '111'" in text, "a serial is written as text, so it reads back as one"
     assert json.loads(rig.calibration_file().read_text()) == {}
     assert "Rig: panda_robotiq at 10.0.0.5" in _said(result)
@@ -231,3 +233,25 @@ def test_profile_makes_one_active_and_must_exist(machine):
     assert "Did you mean 'store-bread-in-closed-box'?" in missing.exception.hint
     assert "tandem profile create store-bread-in-closed-bx" in missing.exception.hint
     assert len(machine) == builds, "said before the runtime step"
+
+
+def test_the_rig_flags_are_written_before_the_planners_checks_can_stop_init(monkeypatch):
+    """A missing GPU driver stops init at the planner's checks; the robot and cameras it was given are
+    written first, not dropped without a word."""
+
+    def no_driver(planner, *, interactive, repair=False):
+        raise init_cli.TandemError("Preflight found blocking problems: nvidia driver")
+
+    monkeypatch.setattr(init_cli, "_planner_preflight", no_driver)
+    result = _run("-y", "--robot-host", "172.16.0.9", "--camera", "hand=111", "--camera", "external=222")
+    assert result.exit_code == 1 and "nvidia driver" in result.exception.message
+    rig = rig_mod.load(force=True)
+    assert rig.robot.host == "172.16.0.9" and set(rig.cameras.configured()) == {"hand", "external"}
+
+
+def test_tandems_own_preflight_says_the_rig_flags_were_not_applied(monkeypatch):
+    monkeypatch.setattr(init_cli, "_preflight", lambda viz_only: [probe.Check("ffmpeg", probe.FAIL, "not found")])
+    result = _run("-y", "--robot-host", "172.16.0.9")
+    assert result.exit_code == 1
+    assert "--robot-host, --robot-type and --camera were not applied" in result.exception.hint
+    assert not rig_mod.exists()

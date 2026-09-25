@@ -12,4 +12,7 @@ cameras:
   # external:   {serial: 'SERIAL'}    # a third-person camera
   # external_2: {serial: 'SERIAL'}    # an optional second one (recorded as DROID exterior_2)
 calibration: calibration.json   # extrinsics by serial, beside this file
-planners: {}             # each planner's machine settings; `tandem planners info NAME` lists them
+# Each planner's own machine settings, only those that differ from its defaults, such as
+#   tandem rig set planners.tiptop.perception.m2t2.url http://gpu-box:8123
+# `tandem rig show` lists every one with its default; `tandem planners info NAME` says what each is.
+planners: {}

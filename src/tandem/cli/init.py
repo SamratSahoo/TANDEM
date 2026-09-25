@@ -87,7 +87,7 @@ def init(
     checks = _preflight(viz_only=viz_only)
     _render_checks(checks)
     if not viz_only:
-        _stop_on_blocking(checks, interactive=interactive)
+        _stop_on_blocking(checks, interactive=interactive, unapplied=rig_flags)
     theme.blank()
 
     # ---- 3. where data lives ------------------------------------------------
@@ -124,10 +124,22 @@ def init(
     if profile_name is not None:
         _check_profile_to_activate(profile_name)
 
-    # ---- 4. the planner -----------------------------------------------------
-    # Chosen before anything is built: the runtime step builds THIS planner's runtime, and the rig step
-    # adds its machine settings. A laptop builds nothing; a planner named on its command line is still
-    # made the one its new profiles get.
+    # ---- 4. the rig: this machine's robot and cameras -----------------------
+    # Before the planner's checks and its build: it needs no GPU, and --robot-host and --camera given to an
+    # init that a missing driver then stops are written all the same, not dropped without a word.
+    if not viz_only:
+        theme.rule("robot and cameras")
+        _setup_rig(rig_flags, interactive=interactive, repair=repair)
+        theme.blank()
+    elif rig_flags:
+        theme.warn(
+            "--robot-host, --robot-type and --camera were not applied",
+            "a visualization-only machine has no robot; `tandem rig set` sets them on one that does",
+        )
+
+    # ---- 5. the planner -----------------------------------------------------
+    # Chosen before anything is built: the runtime step builds THIS planner's runtime. A laptop builds
+    # nothing; a planner named on its command line is still made the one its new profiles get.
     if not viz_only:
         theme.rule("planner")
         planner = _choose_planner(planner, interactive=interactive)
@@ -140,13 +152,13 @@ def init(
         # switched: that is `tandem planners use`, and a profile's planner is its own.
         planners_cli.set_default_planner(planner)
 
-    # ---- 5. the planner's runtime -------------------------------------------
+    # ---- 6. the planner's runtime -------------------------------------------
     if not viz_only:
         theme.rule("planner runtime")
         _build_runtime(planner, interactive=interactive, repair=repair)
         theme.blank()
 
-    # ---- 6. the Gemini key --------------------------------------------------
+    # ---- 7. the Gemini key --------------------------------------------------
     theme.rule("gemini api key")
     source = secrets.gemini_key_source()
     if source != "none" and not repair:
@@ -167,17 +179,6 @@ def init(
         else:
             theme.warn("No key set", "run `tandem config set-gemini-key`")
     theme.blank()
-
-    # ---- 7. the rig: this machine's robot and cameras -----------------------
-    if not viz_only:
-        theme.rule("robot and cameras")
-        _setup_rig(planner, rig_flags, interactive=interactive, repair=repair)
-        theme.blank()
-    elif rig_flags:
-        theme.warn(
-            "--robot-host, --robot-type and --camera were not applied",
-            "a visualization-only machine has no robot; `tandem rig set` sets them on one that does",
-        )
 
     # ---- 8. the paper's five tasks, and the active profile ------------------
     theme.rule("profiles")
@@ -321,7 +322,11 @@ def _planner_preflight(planner: str, *, interactive: bool, repair: bool = False)
     _stop_on_blocking(checks, interactive=interactive)
 
 
-def _stop_on_blocking(checks: list[probe.Check], *, interactive: bool) -> None:
+def _stop_on_blocking(
+    checks: list[probe.Check], *, interactive: bool, unapplied: dict[str, Any] | None = None
+) -> None:
+    """Stop on a failed check: asked at a terminal, refused without one. ``unapplied``: the rig flags this
+    stop leaves unwritten, which the refusal says rather than drop them without a word."""
     blocking = [c for c in checks if c.state == probe.FAIL]
     if not blocking:
         return
@@ -339,7 +344,13 @@ def _stop_on_blocking(checks: list[probe.Check], *, interactive: bool) -> None:
         raise TandemError(
             "Preflight found blocking problems: " + ", ".join(c.name for c in blocking),
             hint="Fix them and re-run `tandem init`."
-            + ("" if runtime_only else " On a laptop, --viz-only sets up for browsing only."),
+            + ("" if runtime_only else " On a laptop, --viz-only sets up for browsing only.")
+            + (
+                " --robot-host, --robot-type and --camera were not applied: give them again then, or "
+                "`tandem rig set KEY VALUE` now."
+                if unapplied
+                else ""
+            ),
         )
 
 
@@ -398,13 +409,16 @@ def _checked_rig_value(key: str, value: str) -> str:
     return value.strip()
 
 
-def _setup_rig(planner: str, flags: dict[str, Any], *, interactive: bool, repair: bool) -> None:
-    """This machine's rig: the robot's address and arm, the cameras by role, and the planner's machine settings.
+def _setup_rig(flags: dict[str, Any], *, interactive: bool, repair: bool) -> None:
+    """This machine's rig: the robot's address and arm, and the cameras by role.
 
     Asked at a terminal when there is no rig yet (and again with --repair), each question defaulting to
     what the rig says now; the flags are applied either way, and are the defaults of the questions. One
     write, validated whole. A rig already there is otherwise left as it is and shown: `tandem rig set`
     changes one setting at any time.
+
+    A planner's machine settings are not written: its defaults stay its own (so a later tandem's better
+    default reaches this machine), and `tandem rig show` lists each with its default beside the ones set.
     """
     from tandem.cli import rig as rig_cli
 
@@ -415,9 +429,6 @@ def _setup_rig(planner: str, flags: dict[str, Any], *, interactive: bool, repair
     changes = dict(flags)
     if asked:
         changes.update(_ask_rig(rig, flags))
-    block = _planner_rig_defaults(planner, rig)
-    if block is not None:
-        changes[f"planners.{planner}"] = block
     changes = {key: value for key, value in changes.items() if _differs(rig, key, value)}
     if changes or not existed:
         rig = rig_mod.update(changes)
@@ -482,33 +493,6 @@ def _ask(label: str, key: str, default: str, *, blank: bool = False) -> str:
             return _checked_rig_value(key, answer)
         except TandemError as exc:
             theme.warn(exc.message)
-
-
-def _planner_rig_defaults(planner: str, rig: rig_mod.Rig) -> dict[str, Any] | None:
-    """The planner's machine settings with every default filled in, for a rig that has none of them yet.
-
-    Written into rig.yml so the settings a person may need to change -- a grasp server's address, the
-    robot shim's ports -- are there to read and edit. None when the rig has them already, or the planner
-    declares none. A planner that refuses to start from nothing (an address only its user can know) is
-    said to need them.
-    """
-    if planner in rig.planners:
-        return None
-    try:
-        declared = registry.rig_options_declared(planner)
-    except TandemError:
-        return None
-    if not declared:
-        return None
-    try:
-        return registry.validate_rig_options(planner, {})
-    except (TandemError, ValueError) as exc:
-        message = exc.message if isinstance(exc, TandemError) else one_line(str(exc))
-        theme.warn(
-            f"{registry.info(planner).title} needs machine settings that have no default: {message}",
-            f"`tandem rig set planners.{planner}.KEY VALUE`; `tandem planners info {planner}` lists them",
-        )
-        return None
 
 
 def _differs(rig: rig_mod.Rig, key: str, value: Any) -> bool:
