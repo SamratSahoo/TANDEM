@@ -212,7 +212,8 @@ async def add_builtin() -> dict:
     if not profiles_mod.exists(cfg.active_profile):
         cfg.active_profile = profiles_mod.BUILTIN[0]
         settings_mod.save(cfg)
-    return {"added": added, "active": cfg.active_profile}
+    # Left out, and said: a profile of that name is still in the old layout (`tandem profile migrate`).
+    return {"added": added, "active": cfg.active_profile, "held_back": profiles_mod.held_back()}
 
 
 @router.delete("/profiles/{name}")

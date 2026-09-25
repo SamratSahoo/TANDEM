@@ -110,9 +110,12 @@ def init(
 
         theme.rule("profiles in the old layout")
         report = profile_cli.run_migration()
+        if report is not None and report.aborted is not None:
+            # The rig comes from these profiles, and every later step reads the rig: nothing is set up over it.
+            raise report.aborted
         if report is not None and report.failed:
             theme.warn(
-                f"{len(report.failed)} profile(s) were left as they were",
+                f"{len(report.failed)} profile(s) could not be moved, or only partly",
                 "`tandem profile migrate` again once each is fixed",
             )
         theme.blank()
@@ -405,6 +408,7 @@ def _setup_rig(planner: str, flags: dict[str, Any], *, interactive: bool, repair
     """
     from tandem.cli import rig as rig_cli
 
+    layout.refuse_rig_change()  # old profiles that could not be moved still hold this machine's rig
     existed = rig_mod.exists()
     rig = rig_mod.load()  # a rig.yml that does not validate stops here, naming the line and `tandem rig edit`
     asked = interactive and (not existed or repair)
@@ -532,8 +536,13 @@ def _setup_profiles(requested: str | None) -> str:
             f"Added the paper's {'five tasks' if len(written) == len(profiles.BUILTIN) else ', '.join(written)}",
             str(profiles.profiles_root()),
         )
-    else:
+    elif not profiles.held_back():
         theme.ok("The paper's five tasks are here", str(profiles.profiles_root()))
+    for name in profiles.held_back():
+        theme.warn(
+            f"{name} was not added: a profile of that name is still in the old layout",
+            "`tandem profile migrate` moves it; `tandem init` again then adds the rest",
+        )
 
     cfg = settings_mod.load()
     if requested is not None:

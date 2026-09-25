@@ -104,14 +104,14 @@ def test_the_papers_five_are_added_as_init_adds_them(client):
     settings_mod.save(settings)
 
     added = client.post("/api/profiles/builtin").json()
-    assert added == {"added": list(profiles.BUILTIN), "active": "cover-bread-rolls"}
+    assert added == {"added": list(profiles.BUILTIN), "active": "cover-bread-rolls", "held_back": []}
     cards = {card["name"]: card for card in client.get("/api/profiles").json()["profiles"]}
     assert set(cards) == set(profiles.BUILTIN) and all(card["builtin"] for card in cards.values())
     assert cards["cover-bread-rolls"]["active"]
 
     path = profiles.path_of("open-obstructed-book")
     path.write_text(path.read_text().replace("target_episodes: 20", "target_episodes: 9"))
-    assert client.post("/api/profiles/builtin").json() == {"added": [], "active": "cover-bread-rolls"}
+    assert client.post("/api/profiles/builtin").json() == {"added": [], "active": "cover-bread-rolls", "held_back": []}
     assert profiles.load("open-obstructed-book").task.target_episodes == 9, "never over one that is here"
 
 

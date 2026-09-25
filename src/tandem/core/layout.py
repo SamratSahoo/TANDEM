@@ -14,17 +14,25 @@ beside config.toml). ``migrate_all`` gets from the one to the other:
 
 1. Each old profile is split (``split_legacy``): the task's settings stay, the cameras and the planner's
    machine settings (its declared ``RIG_OPTIONS``; for TiPToP, robot and perception) go to the rig, and
-   the robot's address and type become the rig's own ``robot.host`` and ``robot.type``.
-2. When this machine has no rig.yml yet, one is written from the active profile (or the first one that
-   has cameras), with every profile's extrinsics merged by serial. An existing rig.yml is never touched:
-   a profile whose settings differ from it is said to, and its own are kept in the archive.
+   TiPToP's robot address and arm become the rig's own ``robot.host`` and ``robot.type``.
+2. Before anything moves, the rig: when this machine has no rig.yml yet, one is written from the active
+   profile (or the first one that has cameras). Then, on every run and whether or not rig.yml was there,
+   every old profile's extrinsics go into the rig's calibration file for the cameras it has none for --
+   never over an entry that is there. An existing rig.yml is never touched: a profile whose settings
+   differ from it (extrinsics included) is said to, and its own are kept in the archive. When the rig
+   cannot be written, or the extrinsics cannot be kept, NOTHING is moved, and what to fix is said: once a
+   directory is archived no run looks in it again.
 3. Per profile, in an order a re-run resumes from: its trajectories are renamed into
-   ``trajectories/<name>``, its file is written, and its old directory is renamed into
-   ``profiles/.migrated/<name>/`` with a ``migration.json`` saying what was done.
+   ``trajectories/<name>``, its file is written, a previous planner's options go where `tandem planners
+   use` finds them, and its old directory is renamed into ``profiles/.migrated/<name>/`` with a
+   ``migration.json`` saying what was done. A symlinked directory is linked again at its new place, to
+   where it pointed.
 
 Nothing is deleted. Every move is an ``os.rename`` inside the data root -- atomic, and nothing copied. A
-profile that cannot be moved (it does not validate, or both trajectory directories exist) is reported
-and left exactly as it was; the others still move.
+profile that cannot be moved at all (it does not validate, or both trajectory directories hold runs) is
+reported and left exactly as it was; the others still move. One that failed part way (its trajectories
+moved, its directory not archived) is reported as partly moved, with what was done, and a re-run
+finishes it.
 
 It runs when asked: `tandem init` runs it, and so does `tandem profile migrate`. Everything else only
 says old profiles are there (``pending``), and does not load them.
@@ -36,6 +44,7 @@ import datetime as _dt
 import errno
 import json
 import os
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -74,6 +83,36 @@ def pending(root: Path | None = None) -> list[str]:
     )
 
 
+def refuse_rig_change() -> None:
+    """Refuse to write rig.yml while old profiles that hold this machine's robot, cameras and calibration have
+    not set it up yet: a rig.yml written first (`tandem rig set`, `rig edit`, the web's rig card) is one the
+    migration never touches, so their robot and cameras would go no further than the archive."""
+    from tandem.core import rig as rig_mod
+
+    if rig_mod.exists():
+        return
+    waiting = pending()
+    if not waiting:
+        return
+    raise TandemError(
+        f"{len(waiting)} profile(s) in the old layout ({', '.join(waiting)}) hold this machine's robot, cameras "
+        "and calibration: `tandem profile migrate` first.",
+        hint="It writes rig.yml from them and keeps their extrinsics; change the rig after. A profile that cannot "
+        "be moved says why: fix it, or move its directory out of profiles/.",
+    )
+
+
+def refuse_name(name: str) -> None:
+    """Refuse a new profile named as one still in the old layout: the migration would keep the new file, and
+    give it the old task's trajectories."""
+    if name in pending():
+        raise TandemError(
+            f"Profile {name!r} is in the old layout ({profiles_mod.profiles_root() / name}): `tandem profile "
+            "migrate` first.",
+            hint="It moves that profile into the current layout under its name; or choose another name.",
+        )
+
+
 # --------------------------------------------------------------------------- one profile, split
 
 
@@ -102,8 +141,10 @@ def split_legacy(raw: Mapping[str, Any], *, name: str | None = None) -> tuple[di
     else:
         machine = {key: options.pop(key) for key in list(options) if key in declared}
         # TiPToP's robot block used the generic names for the arm and its address. They are the rig's own
-        # now, which every planner reads; the rest of the block is the planner's machine settings.
-        robot = machine.get("robot")
+        # now, which every planner reads; the rest of the block is the planner's machine settings. TiPToP's
+        # alone: that is the historical fact this encodes, and another planner's own `robot` block may have
+        # a `host` that is not the arm's at all.
+        robot = machine.get("robot") if backend == _VERSION_1_PLANNER else None
         if isinstance(robot, Mapping):
             robot = dict(robot)
             generic = {key: robot.pop(key) for key in ("type", "host") if key in robot}
@@ -218,6 +259,10 @@ class Moved:
     archive: str | None = None
     notes: list[str] = field(default_factory=list)
     error: str | None = None
+    # What was already done when a later step failed: the profile is partly moved, and a re-run finishes it.
+    done: list[str] = field(default_factory=list)
+    # Where its old directory still is, when it was not archived.
+    left_at: str | None = None
 
 
 @dataclass
@@ -225,7 +270,12 @@ class Report:
     profiles: list[Moved] = field(default_factory=list)
     # "rig.yml written from NAME: ...", or None when rig.yml was there already (or nothing was pending).
     rig: str | None = None
+    # "N camera(s)' extrinsics added to ...", or None when the old profiles had none the rig lacked.
+    calibration: str | None = None
     notes: list[str] = field(default_factory=list)
+    # Why nothing was moved: the rig could not be set up from the old profiles, or their extrinsics could
+    # not be kept in it. Every profile is then where it was.
+    aborted: ProfileError | None = None
 
     @property
     def failed(self) -> list[Moved]:
@@ -236,16 +286,25 @@ class Report:
 class _Plan:
     name: str
     directory: Path
+    archive: Path
     version: Any = None
     profile: dict | None = None  # None: a profile deleted with its data kept
     backend: str = ""
     rig: dict = field(default_factory=dict)
     calibration: dict = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
+    # Why it cannot be moved (its profile.yml does not validate). Its extrinsics are still kept.
+    error: str | None = None
 
 
 def migrate_all(*, active: str | None = None, log: Callable[[str], None] | None = None) -> Report:
-    """Move every old-layout profile into the current layout (see the module docstring). Never deletes."""
+    """Move every old-layout profile into the current layout (see the module docstring). Never deletes.
+
+    The rig first, and every old profile's extrinsics into it, before anything moves: a profile's
+    directory is archived once it is moved, and a re-run never looks in the archive again, so what the
+    rig needs of the old profiles is taken from them while they are still where they were. When that
+    cannot be done, nothing is moved (``Report.aborted``).
+    """
     from tandem.core import rig as rig_mod
 
     say = log or (lambda _line: None)
@@ -255,49 +314,69 @@ def migrate_all(*, active: str | None = None, log: Callable[[str], None] | None 
     if not names:
         return report
 
-    plans: list[_Plan] = []
-    for name in names:
-        try:
-            plans.append(_plan(root, name))
-        except (TandemError, ValueError, OSError) as exc:
-            message = exc.message if isinstance(exc, TandemError) else str(exc)
-            report.profiles.append(Moved(name, ok=False, error=message))
-            say(f"{name}: not moved: {one_line(message)}")
+    plans = [_plan(root, name) for name in names]
+    usable = [plan for plan in plans if plan.error is None]
+    for plan in plans:
+        if plan.error is not None:
+            report.profiles.append(Moved(plan.name, ok=False, error=plan.error, left_at=str(plan.directory)))
+            say(f"{plan.name}: not moved: {one_line(plan.error)}")
+
+    source = _source_of(usable, active)
+    seeded = False
+    try:
+        if not rig_mod.exists() and source is not None:
+            report.rig = _seed_rig(source)
+            seeded = True
+            say(report.rig)
+        rig = _loaded_rig()
+        # Every old profile's, those that cannot move included: theirs are this machine's cameras too.
+        order = ([source] if source is not None else []) + [plan for plan in plans if plan is not source]
+        report.calibration, extrinsics = _merge_calibration(rig, order)
+    except ProfileError as exc:
+        report.aborted = exc
+        say(f"nothing was moved: {one_line(exc.message)}")
+        report.profiles.sort(key=lambda moved: moved.name)
+        return report
+    if report.calibration:
+        say(report.calibration)
 
     rig_state: dict[str, str] = {}
-    if not rig_mod.exists():
-        report.rig = _seed_rig(plans, active, report)
-        if report.rig:
-            say(report.rig)
-    current = _current_rig(report)
-    for plan in plans:
-        if plan.profile is not None and plan.rig and current is not None:
-            differs = _differences(plan, current)
-            rig_state[plan.name] = f"differs: {differs}" if differs else "same"
-            if differs:
-                plan.notes.append(
-                    f"its machine settings differ from this machine's rig.yml ({', '.join(differs)}); the rig was "
-                    "left as it is, and the originals are in the archive"
-                )
-    if report.rig is not None:
-        rig_state[_source_of(plans, active).name] = "seeded rig.yml"
+    for plan in usable:
+        if plan.profile is None:
+            continue
+        differs, problem = _differences(plan, rig, extrinsics)
+        if problem:
+            plan.notes.append(
+                f"its robot and camera settings are not valid ({problem}): the rig keeps its own, and this "
+                f"profile's are in {plan.archive}"
+            )
+        if differs:
+            written = f" (written from {source.name})" if seeded and source is not None else ""
+            plan.notes.append(
+                f"its machine settings differ from this machine's rig{written}: {', '.join(differs)}. The rig "
+                f"keeps its own; this profile's are in {plan.archive}"
+            )
+        rig_state[plan.name] = f"differs: {', '.join(differs)}" if differs else "same"
+    if seeded and source is not None:
+        rig_state[source.name] = "seeded rig.yml"
 
-    for plan in plans:
+    for plan in usable:
         moved = _move(root, plan, rig_state.get(plan.name))
         report.profiles.append(moved)
         if moved.ok:
             what = f"{moved.file}" if moved.file else "its trajectories only (the profile was deleted)"
             say(f"{plan.name}: moved: {what}; the original is in {moved.archive}")
         else:
-            say(f"{plan.name}: not moved: {one_line(moved.error or '')}")
+            say(f"{plan.name}: {'partly moved' if moved.done else 'not moved'}: {one_line(moved.error or '')}")
     report.profiles.sort(key=lambda moved: moved.name)
     return report
 
 
 def _plan(root: Path, name: str) -> _Plan:
+    """What moving the old profile ``name`` involves. Never raises: a profile that cannot move says why in
+    ``error``, and its extrinsics are read all the same."""
     directory = root / name
-    plan = _Plan(name, directory)
-    source = directory / "profile.yml"
+    plan = _Plan(name, directory, archive=_free(root / ARCHIVE_DIR / name))
     calibration = directory / "calibration.json"
     if calibration.is_file():
         try:
@@ -305,24 +384,30 @@ def _plan(root: Path, name: str) -> _Plan:
             plan.calibration = data if isinstance(data, dict) else {}
         except (OSError, json.JSONDecodeError) as exc:
             plan.notes.append(f"its calibration.json could not be read ({exc}); it is kept in the archive")
-    for stash in sorted(directory.glob("planner-options.*.yml")):
-        plan.notes.append(f"{stash.name} stays in the archive: `tandem planners use` no longer restores it")
+    source = directory / "profile.yml"
     if not source.is_file():
         return plan  # deleted, with its data kept
-    raw = profiles_mod.read_data(source, name=name)
-    plan.version = raw.get("version")
-    profile, rig, notes = split_legacy(raw, name=name)
+    try:
+        raw = profiles_mod.read_data(source, name=name)
+        plan.version = raw.get("version")
+        profile, rig, notes = split_legacy(raw, name=name)
+        # Checked as a read would check it: a planner or executor this machine lacks is kept by name.
+        profiles_mod._validate({**profile, "name": name}, source=source, absent_ok=True)
+    except (TandemError, ValueError, OSError) as exc:
+        plan.error = exc.message if isinstance(exc, TandemError) else str(exc)
+        return plan
     plan.profile, plan.rig = profile, rig
     plan.backend = str(profile["planner"].get("backend") or "")
     plan.notes.extend(notes)
-    # Checked as a read would check it: a planner or executor this machine lacks is kept by name.
-    profiles_mod._validate({**profile, "name": name}, source=source, absent_ok=True)
     return plan
 
 
-def _source_of(plans: list[_Plan], active: str | None) -> _Plan:
-    """The profile the rig is written from: the active one, else the first with cameras, else the first."""
+def _source_of(plans: list[_Plan], active: str | None) -> _Plan | None:
+    """The profile the rig is written from: the active one, else the first with cameras, else the first.
+    None when no old profile has settings to write it from."""
     usable = [plan for plan in plans if plan.profile is not None]
+    if not usable:
+        return None
     with_cameras = [plan for plan in usable if (plan.rig.get("cameras") or {})]
     for plan in with_cameras:
         if plan.name == active:
@@ -330,56 +415,95 @@ def _source_of(plans: list[_Plan], active: str | None) -> _Plan:
     return (with_cameras or usable)[0]
 
 
-def _seed_rig(plans: list[_Plan], active: str | None, report: Report) -> str | None:
-    """Write rig.yml from one old profile, with every profile's extrinsics. None when nothing could be."""
+def _seed_rig(source: _Plan) -> str:
+    """Write rig.yml from one old profile's robot, cameras and planner machine settings. ``ProfileError``,
+    naming the setting and the file it came from, when they do not make a valid rig: nothing is written."""
     from tandem.core import rig as rig_mod
 
-    if not any(plan.profile is not None for plan in plans):
-        return None
-    source = _source_of(plans, active)
-    changes = _rig_changes(source.rig)
-    calibration = dict(source.calibration)
-    for plan in plans:
-        for serial, extrinsics in plan.calibration.items():
-            if serial not in calibration:
-                calibration[serial] = extrinsics
-            elif calibration[serial] != extrinsics:
-                report.notes.append(
-                    f"camera {serial}: {plan.name}'s extrinsics differ from {source.name}'s; {source.name}'s are "
-                    f"in the rig, and {plan.name}'s are in its archive"
-                )
+    where = source.directory / "profile.yml"
     try:
-        rig = rig_mod.update(changes)
+        rig = rig_mod.update(_rig_changes(source.rig))
     except TandemError as exc:
-        report.notes.append(
-            f"rig.yml could not be written from {source.name}: {one_line(exc.message)}. Set it up with "
-            "`tandem rig set` (or `tandem init`); every profile's cameras are in its archive"
-        )
-        return None
-    # A calibration.json can be there before rig.yml is (put there by hand, or by a calibration script
-    # pointed at it): its extrinsics are this machine's as it is now, so they are kept, and merged into.
+        located = exc.message.splitlines()[1:] or [exc.message]
+        raise ProfileError(
+            f"This machine's rig could not be set up from {source.name}'s robot and cameras ({where}):\n"
+            + "\n".join(_as_in_profile(line, source) for line in located),
+            hint=f"Fix that in {where}, then `tandem profile migrate` again. Nothing was moved or written: every "
+            "old profile is where it was.",
+        ) from None
+    except OSError as exc:
+        raise ProfileError(
+            f"rig.yml could not be written from {source.name}: {exc}",
+            hint="Nothing was moved: every old profile is where it was. `tandem profile migrate` again once "
+            f"{rig_mod.paths.rig_file().parent} is writable.",
+        ) from None
+    cameras = ", ".join(f"{role} {cam.serial}" for role, cam in rig.cameras.configured().items()) or "none"
+    return f"rig.yml written from {source.name}: {rig.summary()}; cameras {cameras}"
+
+
+def _as_in_profile(text: str, plan: _Plan) -> str:
+    """A rig setting named in ``text`` as the old profile.yml spelled it: the rig's planners.tiptop.robot.port
+    and robot.host were planner.options.robot.port and planner.options.robot.host (version 1: robot.port and
+    robot.host at the top). The cameras were where they are."""
+    try:
+        older = int(plan.version or 0) < 2
+    except (TypeError, ValueError):
+        older = True
+    prefix = "" if older else "planner.options."
+    if plan.backend:
+        text = re.sub(rf"(?<![\w.]){re.escape(f'planners.{plan.backend}.')}", prefix, text)
+    return re.sub(r"(?<![\w.])robot\.(host|type)\b", rf"{prefix}robot.\1", text)
+
+
+def _loaded_rig():
+    """This machine's rig as it is now. A rig.yml that does not load stops the migration: the old profiles'
+    extrinsics could not be kept in it, and once moved nothing looks for them again."""
+    from tandem.core import rig as rig_mod
+
+    try:
+        return rig_mod.load(force=True)
+    except TandemError as exc:
+        raise ProfileError(
+            f"This machine's rig.yml does not load, so the old profiles' cameras and extrinsics cannot be kept "
+            f"in it: {exc.message}",
+            hint="Fix it (`tandem rig edit`), then `tandem profile migrate` again. Nothing was moved.",
+        ) from None
+
+
+def _merge_calibration(rig: Any, plans: list[_Plan]) -> tuple[str | None, dict]:
+    """Every old profile's extrinsics into the rig's calibration file, for the cameras it has none for.
+
+    Never over an entry that is there: the file is this machine's as it is now (put there by hand, by a
+    calibration script, or merged by an earlier run). Among the old profiles the first in ``plans`` wins --
+    the one the rig was written from -- and an old profile whose own extrinsics differ is said to, with
+    where its own are kept (``_differences``). Returns what to say, and the file's extrinsics after.
+    """
+    path = rig.calibration_file()
     try:
         present = rig.extrinsics()
     except TandemError as exc:
-        report.notes.append(
-            f"{rig.calibration_file()} does not read ({one_line(exc.message)}), so the old profiles' extrinsics "
-            "were not merged into it; they are in their archives"
-        )
-        calibration, present = {}, {}
-    for serial, extrinsics in present.items():
-        if serial in calibration and calibration[serial] != extrinsics:
-            report.notes.append(
-                f"camera {serial}: {rig.calibration_file().name} already had extrinsics for it, and they were kept; "
-                "the old profiles' are in their archives"
-            )
-        calibration[serial] = extrinsics
-    if calibration and calibration != present:
-        paths.write_atomic(rig.calibration_file(), json.dumps(calibration, indent=2) + "\n")
-    cameras = ", ".join(f"{role} {cam.serial}" for role, cam in rig.cameras.configured().items()) or "none"
-    return (
-        f"rig.yml written from {source.name}: {rig.summary()}; cameras {cameras}; {len(calibration)} "
-        f"extrinsics, in {rig.calibration_file()}"
-    )
+        raise ProfileError(
+            f"{path} does not read, so the old profiles' extrinsics cannot be kept in it: {one_line(exc.message)}",
+            hint="Fix it (it holds each camera's extrinsics, keyed by serial), then `tandem profile migrate` "
+            "again. Nothing was moved.",
+        ) from None
+    merged = dict(present)
+    for plan in plans:
+        for serial, extrinsics in plan.calibration.items():
+            merged.setdefault(serial, extrinsics)
+    added = [serial for serial in merged if serial not in present]
+    if not added:
+        return None, merged
+    try:
+        paths.ensure_dir(path.parent)
+        paths.write_atomic(path, json.dumps(merged, indent=2) + "\n")
+    except OSError as exc:
+        raise ProfileError(
+            f"The old profiles' extrinsics could not be written into {path}: {exc}",
+            hint="Nothing was moved: every old profile is where it was. `tandem profile migrate` again once "
+            "it is writable.",
+        ) from None
+    return f"{len(added)} camera(s)' extrinsics kept in {path} ({', '.join(added)})", merged
 
 
 def _rig_changes(parts: Mapping[str, Any]) -> dict[str, Any]:
@@ -395,28 +519,25 @@ def _rig_changes(parts: Mapping[str, Any]) -> dict[str, Any]:
     return changes
 
 
-def _current_rig(report: Report):
+def _differences(plan: _Plan, rig: Any, extrinsics: Mapping[str, Any]) -> tuple[list[str], str | None]:
+    """The rig settings an old profile had that this machine's rig says otherwise, extrinsics included; and
+    what is wrong with the old profile's own, when they are not valid on their own."""
     from tandem.core import rig as rig_mod
 
-    try:
-        return rig_mod.load(force=True)
-    except TandemError as exc:
-        report.notes.append(f"this machine's rig.yml does not load, so no profile was compared with it: {exc.message}")
-        return None
-
-
-def _differences(plan: _Plan, rig: Any) -> list[str]:
-    """The rig settings an old profile had that this machine's rig.yml says otherwise."""
-    from tandem.core import rig as rig_mod
-
-    ours: dict[str, Any] = {}
+    differs = [
+        f"extrinsics of camera {serial}"
+        for serial, own in sorted(plan.calibration.items())
+        if serial in extrinsics and extrinsics[serial] != own
+    ]
+    if not plan.rig:
+        return differs, None
     try:
         candidate = rig_mod.Rig.model_validate(
             {key: value for key, value in plan.rig.items() if key in ("robot", "cameras", "planners")}
         )
     except ValueError as exc:
-        plan.notes.append(f"its cameras and robot settings are not valid on their own: {one_line(str(exc))}")
-        return ["(invalid)"]
+        return differs, one_line(str(exc))
+    ours: dict[str, Any] = {}
     ours.update(_flat("robot", candidate.robot.model_dump(mode="json")) if "robot" in plan.rig else {})
     ours.update(_flat("cameras", candidate.cameras.model_dump(mode="json")) if "cameras" in plan.rig else {})
     theirs = {
@@ -429,7 +550,7 @@ def _differences(plan: _Plan, rig: Any) -> list[str]:
             theirs.update(_flat(f"planners.{backend}", rig_mod.planner_options(rig, backend)))
         except TandemError:
             ours[f"planners.{backend}"] = "?"
-    return sorted(key for key, value in ours.items() if theirs.get(key) != value)
+    return sorted(key for key, value in ours.items() if theirs.get(key) != value) + differs, None
 
 
 def _flat(prefix: str, value: Any) -> dict[str, Any]:
@@ -441,11 +562,15 @@ def _flat(prefix: str, value: Any) -> dict[str, Any]:
     return {prefix: value}
 
 
+#: What an old profile directory held that the migration itself deals with; anything else is said.
+_KNOWN = ("profile.yml", "calibration.json", "trajectories", RECORD)
+
+
 def _move(root: Path, plan: _Plan, rig_state: str | None) -> Moved:
     moved = Moved(plan.name, notes=list(plan.notes))
     old_trajectories = plan.directory / "trajectories"
     new_trajectories = profiles_mod.trajectories_root() / plan.name
-    archive = _free(root / ARCHIVE_DIR / plan.name)
+    archive = plan.archive
     target = root / f"{plan.name}.yml"
     try:
         # a. The trajectories first: a re-run after a failure further on finds them moved and goes on.
@@ -454,20 +579,34 @@ def _move(root: Path, plan: _Plan, rig_state: str | None) -> Moved:
                 # A profile of the same name made before the move (`tandem profile create`, the web's create
                 # button) left only its empty eval/success/failure: nothing to merge, so no reason to refuse.
                 _remove_empty(new_trajectories)
-            if new_trajectories.exists():
-                moved.ok = False
-                moved.error = (
-                    f"both {old_trajectories} and {new_trajectories} exist; merge them by hand, then migrate again"
-                )
-                return moved
-            new_trajectories.parent.mkdir(parents=True, exist_ok=True)
-            _rename(old_trajectories, new_trajectories)
+            if new_trajectories.exists() or new_trajectories.is_symlink():
+                if not _holds_no_files(old_trajectories):
+                    moved.ok = False
+                    moved.error = (
+                        f"both {old_trajectories} and {new_trajectories} hold trajectories. Move each run from "
+                        f"{old_trajectories}/<status>/ into {new_trajectories}/<status>/ (e.g. `mv "
+                        f"{old_trajectories}/success/* {new_trajectories}/success/`), then `tandem profile migrate`"
+                    )
+                    moved.left_at = str(plan.directory)
+                    return moved
+                # Every run was moved over by hand, and only the empty status directories are left.
+                _remove_empty(old_trajectories)
+            else:
+                new_trajectories.parent.mkdir(parents=True, exist_ok=True)
+                _move_path(old_trajectories, new_trajectories)
+                moved.done.append(f"its trajectories are now in {new_trajectories}")
         if new_trajectories.is_dir():
             moved.trajectories = str(new_trajectories)
         # b. The profile's file, unless one of that name was made since.
         if plan.profile is not None:
             if target.exists():
-                moved.notes.append(f"kept the existing {target.name}; the old profile.yml is in the archive")
+                if _written_by_migration(target, plan.name):
+                    moved.notes.append(f"{target.name} was written by an earlier run of the migration")
+                else:
+                    moved.notes.append(
+                        f"kept the existing {target.name} (made since, under the same name); the old "
+                        "profile.yml is in the archive"
+                    )
             else:
                 date = _dt.date.today().isoformat()
                 header = (
@@ -478,13 +617,16 @@ def _move(root: Path, plan: _Plan, rig_state: str | None) -> Moved:
                 )
                 body = profiles_mod._yaml_text(plan.profile, what=f"Profile {plan.name!r}")
                 profiles_mod._write_atomic(target, header + body)
+                moved.done.append(f"its file is {target}")
                 for status in profiles_mod.STATUSES:
                     (new_trajectories / status).mkdir(parents=True, exist_ok=True)
                 moved.trajectories = str(new_trajectories)
             moved.file = str(target)
-        # c. The old directory, archived whole: profile.yml, calibration.json, backups, stashes.
+            moved.notes.extend(_restash(plan))
+        moved.notes.extend(_others(plan, archive))
+        # c. The old directory, archived whole: profile.yml, calibration.json, backups, anything else.
         archive.parent.mkdir(parents=True, exist_ok=True)
-        _rename(plan.directory, archive)
+        _move_path(plan.directory, archive)
         moved.archive = str(archive)
         # d. What was done, where the original now is.
         record = {
@@ -504,7 +646,72 @@ def _move(root: Path, plan: _Plan, rig_state: str | None) -> Moved:
     except (OSError, ProfileError) as exc:
         moved.ok = False
         moved.error = exc.message if isinstance(exc, TandemError) else str(exc)
+    if not moved.ok and moved.archive is None:
+        moved.left_at = str(plan.directory)
     return moved
+
+
+def _written_by_migration(path: Path, name: str) -> bool:
+    """Whether ``path`` is the file an earlier run of the migration wrote for ``name`` (its first line says so)."""
+    try:
+        with path.open() as fh:
+            first = fh.readline()
+    except OSError:
+        return False
+    return first.startswith(f"# {name}: migrated from profiles/{name}/profile.yml")
+
+
+def _restash(plan: _Plan) -> list[str]:
+    """An old profile's set-aside options of another planner (``planner-options.<p>.yml``), put where `tandem
+    planners use` restores them from now (``profiles.stash_file``): the task's settings only, since a planner's
+    machine settings are the rig's. The original stays in the archive either way."""
+    notes = []
+    for stash in sorted(plan.directory.glob("planner-options.*.yml")):
+        backend = stash.name[len("planner-options.") : -len(".yml")]
+        if not profiles_mod.is_name(backend):
+            notes.append(f"{stash.name} stays in the archive")
+            continue
+        target = profiles_mod.stash_file(plan.name, backend)
+        if target.exists():
+            notes.append(f"{stash.name} stays in the archive: {target} is there already")
+            continue
+        try:
+            options = profiles_mod._read_mapping(stash)
+        except ProfileError as exc:
+            notes.append(f"{stash.name} stays in the archive: {one_line(exc.message)}")
+            continue
+        declared = _rig_options_declared(backend) or {}
+        machine = sorted(key for key in options if key in declared)
+        task = {key: value for key, value in options.items() if key not in declared}
+        target.parent.mkdir(parents=True, exist_ok=True)
+        text = profiles_mod._yaml_text(task, what=f"{backend}'s planner.options") if task else "{}\n"
+        profiles_mod._write_atomic(target, text)
+        dropped = ""
+        if machine:
+            dropped = f" (without {', '.join(machine)}: {'it is' if len(machine) == 1 else 'they are'} the rig's)"
+        notes.append(f"{stash.name} is now {target}{dropped}: `tandem planners use {backend}` restores it")
+    return notes
+
+
+def _others(plan: _Plan, archive: Path) -> list[str]:
+    """Anything else the old directory holds, which goes to the archive with it: said, because a relative path
+    in the profile that pointed at it (a checkpoint, a proposal cache) now resolves beside profiles/."""
+    try:
+        entries = sorted(entry.name for entry in plan.directory.iterdir())
+    except OSError:
+        return []
+    others = [
+        name
+        for name in entries
+        if name not in _KNOWN
+        and not name.startswith(("profile.yml", ".profile.yml", "planner-options."))
+    ]
+    if not others:
+        return []
+    return [
+        f"{', '.join(others)} {'goes' if len(others) == 1 else 'go'} to the archive ({archive}): a relative path "
+        f"to {'it' if len(others) == 1 else 'them'} in the profile now resolves beside profiles/"
+    ]
 
 
 class _CrossDevice(OSError):
@@ -518,6 +725,19 @@ def _rename(source: Path, target: Path) -> None:
         if exc.errno == errno.EXDEV:
             raise _CrossDevice(f"{source} -> {target}") from exc
         raise
+
+
+def _move_path(source: Path, target: Path) -> None:
+    """``source`` renamed to ``target``; a symlink is made again at ``target``, pointing where it pointed.
+
+    Renamed as it is, a relative link -- trajectories on a bigger disk, ``../../../bigdisk/cloth-traj`` --
+    would point somewhere else from its new place, or nowhere, and the data would be found in neither.
+    """
+    if source.is_symlink():
+        os.symlink(os.path.realpath(source), target, target_is_directory=True)
+        os.unlink(source)
+        return
+    _rename(source, target)
 
 
 def _holds_no_files(path: Path) -> bool:

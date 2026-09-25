@@ -970,18 +970,30 @@ def seed_builtins() -> list[str]:
     """Copy each of the paper's five that profiles/ does not have yet, word for word. Returns the names copied.
 
     Never over one that is there: once copied it is the user's, and their edits are the point. One they
-    deleted comes back the next time `tandem init` runs.
+    deleted comes back the next time `tandem init` runs. Nor under the name of a profile still in the old
+    layout (``held_back``): the migration would keep the copy, and give it that profile's trajectories.
     """
+    from tandem.core import layout
+
     written = []
+    waiting = set(layout.pending())
     for name in BUILTIN:
         path = path_of(name)
-        if path.exists():
+        if path.exists() or name in waiting:
             continue
         path.parent.mkdir(parents=True, exist_ok=True)
         _write_atomic(path, builtin_text(name))
         _make_trajectory_dirs(trajectories_root() / name)
         written.append(name)
     return written
+
+
+def held_back() -> list[str]:
+    """The paper's tasks ``seed_builtins`` leaves out: a profile of the same name is still in the old layout."""
+    from tandem.core import layout
+
+    waiting = set(layout.pending())
+    return [name for name in BUILTIN if name in waiting and not path_of(name).exists()]
 
 
 def source_text(name: str) -> str:
@@ -1030,9 +1042,11 @@ def create(
     from datetime import date
 
     from tandem import resources
+    from tandem.core import layout
 
     name = _checked(name)
     path = path_of(name)
+    layout.refuse_name(name)
     if path.exists() and not force:
         raise ProfileError(
             f"Profile {name!r} already exists ({path}).",

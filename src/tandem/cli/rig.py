@@ -200,7 +200,10 @@ def set_(
     key: str = typer.Argument(..., help="Dotted key: robot.host, cameras.hand.serial, planners.tiptop.robot.port, ..."),
     value: str = typer.Argument(..., help="The new value, as YAML (a serial stays text); null removes the key."),
 ) -> None:
+    from tandem.core import layout
+
     coerced = rig_mod.coerce(key, value)
+    layout.refuse_rig_change()
     rig = rig_mod.update({key: coerced})
     shown = "removed" if coerced is None else json.dumps(coerced) if not isinstance(coerced, str) else coerced
     theme.ok(f"{key} = {shown}", str(rig.file()))
@@ -210,7 +213,9 @@ def set_(
 @app.command("edit", help="Open rig.yml in $EDITOR and validate it on save (the previous file is restored if not).")
 def edit() -> None:
     from tandem.cli.editor import open_in_editor
+    from tandem.core import layout
 
+    layout.refuse_rig_change()
     path = paths.rig_file()
     created = not path.is_file()
     if created:

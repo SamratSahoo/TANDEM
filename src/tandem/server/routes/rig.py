@@ -48,7 +48,10 @@ async def change_rig(body: dict[str, Any] = Body(...)) -> dict:
     """
     if not body:
         raise TandemError("Nothing to change.", hint='Send the settings to change, such as {"robot.host": "172.16.0.5"}.')
+    from tandem.core import layout
+
     for key in body:
         rig_mod.check_key(key)
+    layout.refuse_rig_change()
     rig_mod.update(body)
     return _payload()

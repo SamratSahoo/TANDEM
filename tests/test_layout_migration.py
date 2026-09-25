@@ -207,7 +207,10 @@ def test_a_version_2_profile_is_moved_and_renders_what_it_rendered_before(bread_
     record = json.loads((archive / "migration.json").read_text())
     assert record["from_version"] == 2 and record["rig"] == "seeded rig.yml"
     assert record["profile"] == str(profile.file()) and record["trajectories"] == str(profile.trajectories_dir())
-    assert any("planner-options.toy.yml stays in the archive" in note for note in record["notes"])
+    # The stash of another planner's options goes where `tandem planners use` restores it from now.
+    assert profiles.stash_file("bread-box", "toy").read_text() == "items:\n- duck\n"
+    assert any("planner-options.toy.yml is now" in note for note in record["notes"])
+    assert (archive / "planner-options.toy.yml").is_file(), "the original stays in the archive"
 
 
 def test_the_session_tiptop_builds_after_the_move_is_the_one_it_built_before(bread_box, tmp_path, monkeypatch):
@@ -261,9 +264,11 @@ def test_the_rig_comes_from_the_active_profile_and_every_profiles_extrinsics_are
     calibration = rig.extrinsics()
     assert set(calibration) == {"14846828", "32439448", "999"}
     assert calibration["14846828"] == {"pose": [1, 1, 1, 0, 0, 0]}, "the active profile's own wins"
-    assert any("camera 14846828: aaa's extrinsics differ from zzz's" in note for note in report.notes)
     aaa = json.loads((profiles.profiles_root() / ".migrated" / "aaa" / "migration.json").read_text())
     assert aaa["rig"].startswith("differs: ") and "robot.host" in aaa["rig"]
+    (note,) = [n for n in aaa["notes"] if "differ from this machine's rig (written from zzz)" in n]
+    assert "extrinsics of camera 14846828" in note and "extrinsics of camera 999" not in note
+    assert str(profiles.profiles_root() / ".migrated" / "aaa") in note, "where its own are kept"
 
 
 def test_an_existing_rig_is_never_touched_and_differences_are_said(isolated_env):
@@ -274,7 +279,7 @@ def test_an_existing_rig_is_never_touched_and_differences_are_said(isolated_env)
     assert report.rig is None and not report.failed
     assert rig_mod.paths.rig_file().read_text() == before
     (moved,) = report.profiles
-    (note,) = [n for n in moved.notes if "differ from this machine's rig.yml" in n]
+    (note,) = [n for n in moved.notes if "differ from this machine's rig:" in n]
     assert "robot.host" in note and "cameras.hand" in note
     record = json.loads((profiles.profiles_root() / ".migrated" / "bread-box" / "migration.json").read_text())
     assert record["rig"].startswith("differs:")
@@ -290,7 +295,7 @@ def test_a_profile_whose_trajectories_would_land_on_others_is_refused_alone(isol
     _old("fine", V2)
     report = layout.migrate_all()
     by_name = {moved.name: moved for moved in report.profiles}
-    assert not by_name["clash"].ok and "merge them by hand" in by_name["clash"].error
+    assert not by_name["clash"].ok and "Move each run from" in by_name["clash"].error
     assert (clash / "profile.yml").read_text() == V2 and (clash / "trajectories").is_dir(), "left as it was"
     assert stray.read_text() == "kept"
     assert not profiles.exists("clash")
@@ -315,7 +320,8 @@ def test_a_calibration_file_already_beside_the_rig_is_kept_and_merged_into(isola
     _old("bread-box", V2, calibration={"14846828": EXTRINSICS, "32439448": EXTRINSICS})
     report = layout.migrate_all(active="bread-box")
     assert json.loads(calibration.read_text()) == {"14846828": ours, "555": ours, "32439448": EXTRINSICS}
-    assert any("camera 14846828: calibration.json already had extrinsics" in note for note in report.notes)
+    (moved,) = report.profiles
+    assert any("extrinsics of camera 14846828" in note for note in moved.notes), "its own differ, and are kept"
 
 
 def test_a_deleted_profiles_trajectories_are_moved_too(isolated_env, make_trajectory):

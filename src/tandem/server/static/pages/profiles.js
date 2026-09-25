@@ -52,6 +52,10 @@ export function renderProfiles(host, state) {
     try {
       const result = await api.addPaperProfiles();
       toast.ok(`Added ${result.added.length} of the paper's tasks`, `Active profile: ${result.active}`);
+      if ((result.held_back || []).length) {
+        toast.info(`Not added: ${result.held_back.join(", ")}`,
+          "A profile of that name is still in the old layout: tandem profile migrate moves it.");
+      }
       refresh();
     } catch (error) {
       reportError(error, "Could not add the paper's tasks");

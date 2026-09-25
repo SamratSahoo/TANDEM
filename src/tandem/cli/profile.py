@@ -291,48 +291,92 @@ def warn_planner_profile_checks(profile: profiles.Profile) -> None:
     "migrate",
     help="Move profiles written before version 3 (a directory each) into the current layout, and their "
     "robot and cameras into this machine's rig. `tandem init` does it too.",
+    # A one-time move that `tandem init` makes anyway: kept out of the listing, and in the docs.
+    hidden=True,
 )
 def migrate() -> None:
     """Every old-layout profile, moved: see ``tandem.core.layout``. Nothing is deleted; one profile that
     cannot be moved does not stop the others, and the command fails at the end if any could not."""
-    from tandem.core import layout
-
     report = run_migration()
     if report is None:
         theme.info("No profiles in the old layout.", str(profiles.profiles_root()))
         return
+    raise_if_incomplete(report)
+
+
+def raise_if_incomplete(report) -> None:
+    """The migration's failure, if it had one: nothing moved (the rig could not be set up), or some profiles
+    not moved or only partly."""
+    from tandem.core import layout
+
+    if report.aborted is not None:
+        raise report.aborted
     if report.failed:
+        partly = [moved.name for moved in report.failed if moved.done]
         raise ProfileError(
             f"{len(report.failed)} profile(s) could not be moved: {', '.join(m.name for m in report.failed)}.",
-            hint="Each one is left exactly as it was; what is wrong with it is said above. "
-            f"`tandem profile migrate` again once it is fixed. (The rest are in the archive, "
-            f"{profiles.profiles_root() / layout.ARCHIVE_DIR}.)",
+            hint="What is wrong with each is said above. "
+            + (
+                f"{', '.join(partly)} {'is' if len(partly) == 1 else 'are'} partly moved (what was done is said "
+                "above), and the rest left exactly as they were. "
+                if partly
+                else "Each one is left exactly as it was. "
+            )
+            + "`tandem profile migrate` again once it is fixed finishes the move. (The moved ones are archived "
+            f"in {profiles.profiles_root() / layout.ARCHIVE_DIR}.)",
         )
 
 
 def run_migration():
-    """Move the old-layout profiles, saying what happened to each. None when there were none. For `init` too."""
+    """Move the old-layout profiles, saying what happened to each. None when there were none. For `init` too.
+
+    Settings written before version 3 left the active profile unset when it was ``default``, the default then;
+    it is still the active one after the move when nothing else was chosen.
+    """
     from tandem.core import layout
 
     if not layout.pending():
         return None
-    report = layout.migrate_all(active=settings_mod.load().active_profile)
+    cfg = settings_mod.load()
+    report = layout.migrate_all(active=cfg.active_profile or "default")
     if report.rig:
         theme.ok("Rig written from the old profiles", report.rig)
+    if report.calibration:
+        theme.ok("Extrinsics kept", report.calibration)
     for note in report.notes:
         theme.warn(note)
     for moved in report.profiles:
         if not moved.ok:
-            theme.fail(f"{moved.name}: not moved", _one_line(moved.error or ""))
+            _say_not_moved(moved)
             continue
         if moved.file:
             theme.ok(f"{moved.name}: moved", moved.file)
         else:
-            theme.ok(f"{moved.name}: its trajectories moved", "the profile itself had been deleted")
+            theme.ok(f"{moved.name}: its trajectories moved", moved.trajectories or "")
+            theme.info(
+                "  the profile itself had been deleted: "
+                f'`tandem profile create {moved.name} --prompt "..."` makes them a profile\'s again'
+            )
         theme.info(f"  the original is in {moved.archive}")
         for note in moved.notes:
             theme.info(f"  {note}")
+    if report.aborted is not None:
+        theme.fail("Nothing was moved", _one_line(report.aborted.message))
+    elif not cfg.active_profile and profiles.exists("default"):
+        cfg.active_profile = "default"
+        settings_mod.save(cfg)
     return report
+
+
+def _say_not_moved(moved) -> None:
+    if moved.done:
+        theme.fail(f"{moved.name}: partly moved", "; ".join(moved.done))
+        theme.info(
+            f"  its old directory is still at {moved.left_at}: {_one_line(moved.error or '')}. "
+            "`tandem profile migrate` again finishes it."
+        )
+    else:
+        theme.fail(f"{moved.name}: not moved", _one_line(moved.error or ""))
 
 
 def _one_line(message: str) -> str:
