@@ -42,11 +42,12 @@ export function renderCollect(host, state) {
 
 function notReady() {
   return h("div.card",
-    h("div.card-title", "The GPU runtime is not built"),
+    h("div.card-title", "The planner's runtime is not built"),
     h("div.card-hint",
-      "Collection needs the planner stack: torch, cuRobo's compiled CUDA kernels, cuTAMP and tiptop. " +
-      "Visualizing already-collected trajectories works without it."),
-    h("div.alert.info", h("span.mono", "tandem init"), " on the workstation — the first build takes 5–20 minutes."));
+      "Collection needs the runtime of the planner this profile uses (Settings shows which, and what it " +
+      "is missing). Visualizing already-collected trajectories works without it."),
+    h("div.alert.info", h("span.mono", "tandem planners install <planner>"),
+      " on the workstation (`tandem init` does too) — a GPU planner's first build can take 5–20 minutes."));
 }
 
 // ---- start -----------------------------------------------------------------
@@ -82,7 +83,7 @@ function startForm(shell, state) {
   return h("div.card",
     h("div.card-title", `Collect under ${state.profile}`),
     h("div.card-hint",
-      "The driver warms up once — cuRobo, SAM2, the cameras, the robot — and then loops rollouts " +
+      "The driver warms up once — the planner, the cameras, the robot — and then loops rollouts " +
       "against that warm state. Warmup takes about a minute; after that each rollout starts immediately."),
     h("div.field", h("label", "Task"), taskInput,
       h("div.desc", "Also the language label stored with every episode.")),
@@ -187,6 +188,11 @@ function attachSession(shell, state, initial) {
       // toasts means the operator does not have to be watching the log.
       if (message.event === "rollout_aborted") toast.info("Rollout aborted", "The session is still warm.");
       if (message.event === "teleop_handoff_start") toast.info("Handing the arm over…", "Releasing the cameras takes ~15s.");
+      // An excluded trial never reaches the label prompt, so this is the one cue that the
+      // demonstration just given is not in the dataset.
+      if (message.event === "trial_excluded") toast.err("Trial excluded, not labeled", message.reason || "");
+      // Likewise a trial that ended part-way: there was nothing for a label to decide.
+      if (message.event === "trial_filed") toast.err(`Trial filed as ${message.outcome}, not labeled`, message.reason || "");
     }
   });
 
@@ -223,6 +229,8 @@ function renderStats(host, summary) {
     stat(String(summary.success || 0), "success", "var(--green)"),
     stat(String((summary.labeled || 0) - (summary.success || 0)), "failure", "var(--red)"),
     stat(`${summary.labeled || 0}/${summary.target || "—"}`, "labeled"),
+    // Not labeled and not in the dataset, so counted apart from both.
+    summary.excluded ? stat(String(summary.excluded), "excluded", "var(--amber)") : null,
     summary.phase_progress
       ? stat(`${summary.phase_progress[0]}/${summary.phase_progress[1]}`, "phases", "var(--violet)")
       : null,
@@ -267,6 +275,14 @@ function renderPhase(host, summary) {
     ? `${phase.description} — step ${phase.index + 1} of ${phase.total}`
     : phase.description || "Your turn";
 
+  // Only the answers the session will accept. While recording, a step done by hand has no
+  // demonstration, so "I did it" is not offered (phase.by_hand); the step goes through whoever
+  // carries out human steps (hitl.human_executor), the teleop rig unless the profile says otherwise.
+  const executor = summary.human_executor || {};
+  const byHand = phase.by_hand !== false;
+  const isTeleop = (executor.name || "teleop") === "teleop";
+  const stuck = !byHand && !executor.ready;
+
   mount(host,
     h("div.card", { style: { borderColor: "var(--violet)" } },
       h("div.card-head",
@@ -290,17 +306,28 @@ function renderPhase(host, summary) {
               ...phase.expected.map((item) => h("li", item))))
         : null,
 
+      stuck
+        ? h("div.alert", { style: { marginBottom: "14px" } },
+            h("strong", "This step is being recorded, and it cannot be done here. "),
+            `${executor.display_name || "Its executor"} is not ready on this machine: `,
+            (executor.unmet && executor.unmet.length ? executor.unmet.join("; ") : executor.error) || "it is not set up.")
+        : null,
+
       h("div.row.wrap", { style: { gap: "8px" } },
-        summary.teleop_available
+        executor.ready
           ? h("button.violet.big", {
-              title: "Take the arm through the teleop rig, then hand it back.",
-              onclick: act(() => api.teleopSwitch(id), "Could not take the arm"),
-            }, "Take the arm")
+              title: isTeleop
+                ? "Take the arm through the teleop rig, then hand it back."
+                : `Hand this step to ${executor.display_name}, then take the arm back when it is done.`,
+              onclick: act(() => api.teleopSwitch(id), "Could not hand the step over"),
+            }, isTeleop ? "Take the arm" : `Run ${executor.display_name}`)
           : null,
-        h("button.primary.big", {
-          title: "You did it by hand. The plan checks a photo before carrying on.",
-          onclick: act(() => api.humanPhaseDone(id), "Could not complete the phase"),
-        }, "✔ I did it"),
+        byHand
+          ? h("button.primary.big", {
+              title: "You did it by hand. The plan checks a photo before carrying on.",
+              onclick: act(() => api.humanPhaseDone(id), "Could not complete the phase"),
+            }, "✔ I did it")
+          : null,
         h("div.spacer"),
         h("button.ghost", {
           title: "Give up on this step, and with it this attempt at the task.",
@@ -315,7 +342,26 @@ function renderNotice(host, summary) {
   } else if (summary.handoff_error) {
     host.appendChild(h("div.alert", summary.handoff_error));
   } else if (summary.state === "awaiting_label") {
+    const trial = summary.last_trial || {};
+    if (trial.failure_stage) {
+      host.appendChild(h("div.alert", { style: { marginBottom: "8px" } },
+        h("strong", `Stopped at ${trial.failure_stage}: `), trial.reason || ""));
+    }
     host.appendChild(h("div.alert.info", "Did that rollout do the task? Watch it below, then mark it."));
+  } else if (summary.state === "awaiting_task" && summary.last_trial && summary.last_trial.excluded) {
+    host.appendChild(h("div.alert",
+      h("strong", "The last trial was excluded and not labeled. "),
+      summary.last_trial.reason || "",
+      h("div.small", { style: { marginTop: "4px" } },
+        "Its legs are kept under failure/, marked excluded, with the failing checks in hitl.json.")));
+  } else if (summary.state === "awaiting_task" && summary.last_trial
+             && summary.last_trial.labeled === false && summary.last_trial.filed_under) {
+    const trial = summary.last_trial;
+    host.appendChild(h("div.alert",
+      h("strong", `The last trial ended ${trial.outcome}${trial.failure_stage ? ` at ${trial.failure_stage}` : ""} and was not labeled. `),
+      trial.reason || "",
+      h("div.small", { style: { marginTop: "4px" } },
+        "Its plan did not finish, so it is filed under failure/ with its legs and hitl.json.")));
   } else if (summary.state === "teleop_handoff") {
     host.appendChild(h("div.alert",
       "The arm is yours — the driver has released the robot and closed its cameras. " +

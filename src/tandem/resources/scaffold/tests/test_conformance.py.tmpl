@@ -1,0 +1,24 @@
+"""tandem's conformance kit, run against {{title}}: `pytest` from the package's directory.
+
+The kit builds the planner through its factory, warms it, perceives, plans and executes, and checks
+every promise tandem's protocol makes: the keywords each verb takes, a scene the phase planner can
+use, a plan result that is JSON-safe and says what it runs, a leg stamped so tandem's merge finds it,
+hardware handed over and back, and each capability it declares actually honoured. It needs no GPU and
+no robot beyond what the planner itself needs, and it lists every problem it finds, not only the
+first. See ``tandem.planners.testing`` for the hooks (``goal``, ``make_backend``) and the settings.
+"""
+
+from tandem.planners.testing import PlannerConformance
+
+from {{module}}.planner import {{class_name}}
+
+
+class Test{{class_name}}(PlannerConformance):
+    planner = {{class_name}}
+    # TODO: True once execute() records complete legs -- robot_state.npz, the camera clips, and the
+    # record_start/record_stop/fps timing -- so the kit checks the recording and not only the stamp.
+    records_legs = False
+    # The profile's planner.options the planner is built with in these tests: the task's settings.
+    options = {}
+    # rig.yml's planners.{{name}}: this machine's settings (RIG_OPTIONS), which every profile shares.
+    rig_options = {}

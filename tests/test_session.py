@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from helpers import FakeRuntime, use_fake_backend, wait_for
+from helpers import use_fake_backend, wait_for
 
 from tandem.core import secrets
 from tandem.core.errors import SessionConflict
@@ -28,8 +28,7 @@ def backends(monkeypatch):
 @pytest.fixture
 def live_session(profile, tmp_path, monkeypatch, backends):
     monkeypatch.setattr(secrets, "gemini_api_key", lambda: "test-key")
-    runtime = FakeRuntime(tmp_path / "runtime")
-    session = Session(profile, runtime, task="pick up the block")
+    session = Session(profile, task="pick up the block")
     session.start()
     assert wait_for(lambda: session.state is State.AWAITING_TASK), f"stuck in {session.state}"
     yield session
@@ -108,7 +107,7 @@ def test_the_leg_is_stamped_with_the_trajectory_tandem_minted(live_session, back
 
 def test_max_episodes_stops_the_session(profile, tmp_path, monkeypatch, backends):
     monkeypatch.setattr(secrets, "gemini_api_key", lambda: "test-key")
-    session = Session(profile, FakeRuntime(tmp_path / "runtime"), task="one", max_episodes=1)
+    session = Session(profile, task="one", max_episodes=1)
     session.start()
     assert wait_for(lambda: session.state is State.AWAITING_TASK)
     session.next_task()
@@ -162,25 +161,14 @@ def test_the_planner_is_always_closed_even_when_the_session_fails(profile, tmp_p
     not, so releasing it belongs on every exit path, including the ones nobody planned for."""
     from fake_backend import FakeBackend
 
-    from tandem.planners import registry
-
     monkeypatch.setattr(secrets, "gemini_api_key", lambda: "test-key")
-    built = []
 
     class Exploding(FakeBackend):
         def perceive(self, **kwargs):
             raise RuntimeError("the camera fell off")
 
-    def backend_class(_name):
-        def build(runtime, **kwargs):
-            instance = Exploding(runtime, **kwargs)
-            built.append(instance)
-            return instance
-
-        return build
-
-    monkeypatch.setattr(registry, "backend_class", backend_class)
-    session = Session(profile, FakeRuntime(tmp_path / "runtime"), task="x")
+    built = use_fake_backend(monkeypatch, backend_type=Exploding)
+    session = Session(profile, task="x")
     session.start()
     assert wait_for(lambda: session.state is State.AWAITING_TASK)
     session.next_task()
@@ -204,13 +192,12 @@ def test_manager_refuses_a_second_session_for_a_profile(profile, tmp_path, monke
     from tandem.core.session import SessionManager
 
     monkeypatch.setattr(secrets, "gemini_api_key", lambda: "test-key")
-    runtime = FakeRuntime(tmp_path / "runtime")
     manager = SessionManager()
-    first = manager.create(profile, runtime, task="one")
+    first = manager.create(profile, task="one")
     try:
         assert wait_for(lambda: first.state is State.AWAITING_TASK)
         with pytest.raises(SessionConflict, match="already running"):
-            manager.create(profile, runtime, task="two")
+            manager.create(profile, task="two")
     finally:
         manager.shutdown()
 
@@ -327,12 +314,13 @@ def test_a_preempt_mid_task_still_reaches_the_label_prompt(live_session, backend
     session.label(True)
     assert wait_for(lambda: session.state is State.AWAITING_TASK)
 
-    # Now preempt one mid-flight. The stand-in records instantly, so preempt after the leg exists.
+    # A preempt that lands once the stand-in has already finished the task: still labeled. The preempt
+    # of an attempt that is still RUNNING -- the case the docstring is about -- is driven for real in
+    # tests/test_preempt.py, which holds the attempt at a human phase to preempt it there.
     session.next_task()
     assert wait_for(lambda: len(backend(backends).legs) == 2)
     session.preempt()
-    # Recorded, therefore labelable — not silently discarded.
-    assert wait_for(lambda: session.state in (State.AWAITING_LABEL, State.AWAITING_TASK))
+    assert wait_for(lambda: session.state is State.AWAITING_LABEL), f"stuck in {session.state}"
 
 
 def test_a_pass_that_records_nothing_leaves_no_phantom_episode(live_session, backends, profile):
@@ -350,6 +338,10 @@ def test_a_pass_that_records_nothing_leaves_no_phantom_episode(live_session, bac
     session.label(True)
     assert wait_for(lambda: session.labeled_count == 1)
 
+    # The label is counted before the merge that files the episode has run (it runs on a thread of its
+    # own), so what is on disk is looked at once that merge is done. A phantom never goes away, so this
+    # still fails on one; read the moment after the label, it once failed a CI run under load.
+    assert wait_for(lambda: len(trajectories.list_all(profile)) == 1)
     listed = trajectories.list_all(profile)
     assert len(listed) == 1, f"phantom episodes left behind: {[t.id for t in listed]}"
     # The perception dump is kept, just not in the dataset.
@@ -380,10 +372,31 @@ def test_a_teleop_handoff_with_no_phase_plan_gives_the_task_back_to_the_planner(
     monkeypatch.setattr(settings_mod, "load", lambda: cfg)
 
     session = live_session
+    # The driver runs inside the teleop executor, behind the phase loop's hand-off; whether it has
+    # started recording is on the session's message bus.
+    started: list[dict] = []
+
+    def on_message(message: dict) -> None:
+        if message.get("type") == "teleop_event" and message.get("event") == "rollout_start":
+            started.append(message)
+
+    session.subscribe(on_message)
+    # The hand-off is honoured at the loop's first turn, and the stand-in reaches the end of the task
+    # in a few milliseconds: a test thread slowed down (a loaded CI runner) requested the arm after
+    # the task had already finished, and waited for a hand-off that never came. So the first
+    # perception pass is held until the request is in, and the hand-off lands at the first turn
+    # every time -- as test_hitl.py holds reacquire_hardware.
+    import threading
+
+    fake = backend(backends)
+    requested = threading.Event()
+    perceive = fake.perceive
+    fake.perceive = lambda **kw: (requested.wait(timeout=5.0), perceive(**kw))[1]
     session.next_task()
     session.request_teleop()
+    requested.set()
     assert wait_for(lambda: session.state is State.TELEOP_HANDOFF), f"stuck in {session.state}"
-    assert wait_for(lambda: session._teleop is not None and session._teleop._recording)
+    assert wait_for(lambda: bool(started))
     session.resume_from_teleop()
 
     assert wait_for(lambda: session.state is State.AWAITING_LABEL), f"stuck in {session.state}"

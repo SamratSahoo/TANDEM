@@ -1,520 +1,239 @@
-<div align="center">
+# TANDEM
 
-<h1>tandem</h1>
+**TANDEM** (Task and Motion Planning with As-Needed Demonstrations) collects demonstrations for fine-tuning
+vision-language-action (VLA) models. A vision-language model splits an instruction into robot and human phases,
+inventing predicates and human-executed "magic operators" for what the planner cannot do. The robot runs its
+phases with task and motion planning (TAMP), a person teleoperates the rest, each human phase is verified from a
+fresh image, and every trial is recorded as one demonstration. The planner is pluggable, and
+[TiPToP](https://github.com/SamratSahoo/tiptop/tree/TANDEM) is built in.
 
-**Human-in-the-loop TAMP data collection for real robots.**
+[Paper website](https://prpl-group.com/tandem/) · [How it works](docs/METHOD.md) · [Docs](docs/README.md)
 
-Plan with a GPU TAMP solver, watch it run, step in when it goes wrong, and keep the data.
+## Setup
 
-[![CI](https://github.com/SamratSahoo/tandem/actions/workflows/ci.yml/badge.svg)](https://github.com/SamratSahoo/tandem/actions/workflows/ci.yml)
-[![Python](https://img.shields.io/badge/python-3.10%2B-4f9dff)](https://www.python.org/)
-[![License](https://img.shields.io/badge/license-MIT%20%2B%20NVIDIA-a371f7)](NOTICE)
-[![Platform](https://img.shields.io/badge/platform-linux%20%C2%B7%20cuda%2012-3fb950)](#requirements)
+**Requirements:** a Linux x86-64 workstation with an NVIDIA GPU, CUDA 12 and about 25 GB of free disk; a Franka
+FR3 or Panda with a Robotiq 2F-85 and its polymetis NUC; 2–3 ZED cameras and the
+[ZED SDK](https://www.stereolabs.com/developers/release); ffmpeg; [pipx](https://pipx.pypa.io) or
+[uv](https://docs.astral.sh/uv/); a [Gemini API key](https://aistudio.google.com/apikey); and, for human phases,
+a [DROID fork](https://github.com/SamratSahoo/droid) checkout and environment with a VR headset or a SpaceMouse.
 
-```bash
-pipx install git+https://github.com/SamratSahoo/tandem.git && tandem init
-```
+Unless noted, every code block runs on the workstation.
 
-</div>
-
----
-
-## What it is
-
-`tandem` collects real-robot manipulation trajectories where a **planner does the work and a
-human stays in the loop**. You give it a task in plain language. It perceives the scene,
-searches for a task-and-motion plan on the GPU, and executes it on the arm — while you watch,
-preempt a bad rollout, take the arm yourself when the plan can't finish, and label what
-happened.
-
-```
-   "put the toys on the plate"
-              │
-              ▼
-   ┌──────────────────────┐
-   │  perceive            │   ZED stereo → Gemini → SAM2 → M2T2 grasps
-   ├──────────────────────┤
-   │  plan                │   cuTAMP task+motion search  ·  cuRobo trajectories
-   ├──────────────────────┤
-   │  execute             │   Franka FR3 + Robotiq, encoders sampled at 30 Hz
-   ├──────────────────────┤        ▲                        │
-   │  label  ✔ / ✖        │        │  you take over ────────┘
-   └──────────────────────┘        └─── replan from where you left the arm
-              │
-              ▼
-   trajectories/success/2026-08-16_21-14-02/
-```
-
-The loop **warms up once** — solver, segmentation, cameras, robot — and then runs rollout
-after rollout against that warm state. A bad episode costs you one preempt, not a two-minute
-restart.
-
-**Three things a human can do, at any point:**
-
-| | |
-|---|---|
-| **Preempt** | Abort the rollout in flight. The session stays warm; you are back at the task prompt in a second. |
-| **Hand off** | Take the arm mid-task. The planner parks at a plan-step boundary, releases the robot and cameras, and waits. When you hand back, it replans the *same* task from wherever you left the arm — no homing, no dropped object. All the legs merge into **one** trajectory. |
-| **Label** | Mark the rollout success or failure while watching the video of it. |
-
-### Phase planning
-
-The loop above still leaves the human's part *outside* the system: you have to notice the
-planner cannot fold a cloth, carve that clause out of the instruction by hand, and remember to
-press the button. Nothing knows your part was ever part of the task, and nothing checks it
-happened.
-
-Turn on `hitl.enabled` and a VLM does that carving itself. It breaks the instruction into an
-**ordered list of phases** — each one either a sub-goal for the planner or something only a
-person can do — invents the predicate it needs to describe your part, hands that phase over
-with written instructions, and verifies from a photo that you did it.
-
-```
-   "put the toy on the cloth, then fold it"
-                    │
-        ┌───────────┴────────────┐
-        ▼                        ▼
-   phase 1  robot            phase 2  human
-   On(toy, cloth)            Folded(cloth)
-   → cuTAMP plans it         → "Fold the near edge of the cloth
-                                over the toy so it is covered."
-                             → checked from a photo afterwards
-```
-
-Phases rather than one final-state goal because **the ordering runs both ways**: that task
-needs the human last, "open the box, then put the toy in" needs the robot last, and some tasks
-need an intermediate state no final-state goal can express at all.
-
-If the check says it did not happen you are told what is still missing and given another go,
-rather than losing the demonstration to one bad classifier call. Every rollout drops a
-`hitl.json` — the phases, the invented predicates, which clauses of the instruction each phase
-covered, and every verdict — plus a `vlm/` folder holding each image sent to the model and a
-rendered PNG of what it said, rejected attempts included. When a run goes wrong the question is
-always "what did the model see, and what did it decide", and that is unanswerable afterwards
-without it.
-
-**Check the decomposition before the arm moves.** The phase planner is tandem's own code and
-needs no planner, no GPU and no robot to run, so you can ask for a plan from a photograph:
-
-```bash
-tandem plan "put the toy on the cloth, then fold it" --image workspace.png
-```
-
-It prints the ordered phases, who does each, the sub-goal the planner would be handed, the
-invented predicates and their classifiers, and — loudly — any clause it could not express. That
-last one matters: the usual cause is an object the instruction names that perception did not
-detect, and the remedy (put it on the table, or reword the task) is only available *before* you
-start collecting.
-
-**A phase the planner cannot plan becomes yours.** tandem decides who does what, so when the
-planner fails to find a plan for a robot phase the sub-goal is described to you, you do it by
-hand, and the same check verifies it — the task carries on instead of ending. Set
-`hitl.on_robot_phase_failure` to `abort` for the older behaviour, or `replan` to hand the
-failure back to the model.
-
-Off by default, and disabled nothing in it runs.
-
----
-
-## Install
-
-`tandem` is a command-line tool, so install it with [pipx](https://pipx.pypa.io) — that gives
-it a private environment and puts just the `tandem` command on your PATH:
+### 1. Install
 
 ```bash
 pipx install git+https://github.com/SamratSahoo/tandem.git
-tandem init
+pipx inject tandem-tamp av pyarrow huggingface_hub   # only for `tandem export lerobot`
+# or, with uv, both at once:
+uv tool install git+https://github.com/SamratSahoo/tandem.git --with av --with pyarrow --with huggingface_hub
 ```
 
-`uv tool install git+https://github.com/SamratSahoo/tandem.git` does the same thing if you
-prefer uv.
+### 2. Initialize
 
-> **Not on PyPI yet**, so the install is from git. Once it is published this becomes
-> `pipx install tandem-tamp`.
->
-> Plain `pip install` works *inside a virtualenv*, but on Debian and Ubuntu it fails against
-> the system Python with `externally-managed-environment`. pipx exists for exactly this.
-
-That is the whole install. `tandem` itself is pure Python — the heavy stack (torch, cuRobo's
-compiled CUDA kernels, cuTAMP, tiptop) is built by `tandem init` into a self-contained
-runtime under `~/.local/share/tandem/`. The sources for all three ship inside the package, so
-that build needs no network and no `git`.
-
-<table>
-<tr><td width="50%">
-
-**On the robot workstation**
+Install the ZED SDK first, so the runtime build adds its Python API. Without it the runtime still builds, but
+ZED cameras won't open until you install the SDK and run `tandem planners install tiptop` again.
 
 ```bash
-tandem init
+tandem init   # builds TiPToP's runtime (5–20 min), asks for the Gemini key, the robot's address (the NUC),
+              # the arm and the camera serials, adds the paper's five tasks as profiles and offers teleop
+              # (step 6); safe to re-run
+# to redo one step: tandem planners install tiptop, tandem rig set KEY VALUE, or tandem config set-gemini-key
 ```
 
-Probes the GPU, installs [pixi](https://pixi.sh) if needed, compiles the planner
-(5–20 min the first time), takes your Gemini key, and creates a profile.
+Without a terminal: `tandem init -y --robot-host 172.16.0.2 --camera hand=SERIAL --camera external=SERIAL`.
 
-</td><td width="50%">
+On a laptop, `tandem init --viz-only` sets up only for reviewing trajectories
+(`tandem config set data_root DIR` points it at them); `tandem plan` there also needs
+`tandem config set-gemini-key`.
 
-**On a laptop**
+### 3. Robot
+
+On the NUC, start DROID's server before the shim: it launches polymetis's robot server (port 50051) and gripper
+server (port 50052), killing any already running, and teleop drives the arm through it. Then copy TiPToP's
+[`bamboo_polymetis_shim.py`](https://github.com/SamratSahoo/tiptop/blob/682047493b88e5301c6b2b49da914ea4f173e5d9/bamboo_polymetis_shim.py)
+to the NUC and run it in an environment with polymetis, pyzmq, msgpack, numpy and scipy:
 
 ```bash
-tandem init --viz-only
-tandem ui
+# on the NUC
+python scripts/server/run_server.py   # in the DROID checkout and its polymetis environment; without teleop,
+                                      # droid/franka/launch_robot.sh and launch_gripper.sh are enough
+python bamboo_polymetis_shim.py       # in a second terminal
 ```
 
-No GPU, no robot, no cameras. Browse and visualize trajectories collected elsewhere —
-just point the data root at them.
+Check that the shim's log shows `PolymetisGripper connected to localhost:50052`. tandem reaches the NUC at the
+address `tandem init` asked for; `tandem rig set robot.host 172.16.0.5` changes it.
 
-</td></tr>
-</table>
+### 4. Perception servers
 
-Working on tandem itself? An editable install in a virtualenv instead:
+TiPToP expects an M2T2 grasp server at `http://localhost:8123` and a FoundationStereo depth server at
+`http://localhost:1234`; `tandem doctor` checks both. On another machine:
+`tandem rig set planners.tiptop.perception.m2t2.url http://HOST:8123` (or `...foundation_stereo.url`).
+Install each as TiPToP's
+[installation guide](https://github.com/SamratSahoo/tiptop/blob/682047493b88e5301c6b2b49da914ea4f173e5d9/docs/installation.md#installing-m2t2)
+describes, and run each in its own terminal:
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e '.[export,dev]'
-```
-
-Already have a [`hitl-tamp-vla`](https://github.com/SamratSahoo/tamp-vla) checkout? Import its
-setup instead of retyping it:
-
-```bash
-tandem init --import-from ~/hitl-tamp-vla
-```
-
-Robot config, camera serials, extrinsics (including the per-workspace layers) and any
-`cfg/tamp/*.yml` come across as a profile.
-
----
-
-## Quickstart
-
-```console
-$ tandem init
-  ✔ nvidia driver          NVIDIA GeForce RTX 5090 · driver 580.95 · 32607 MiB
-  ✔ cuda runtime           12.8
-  ✔ pixi                   pixi 0.70.2
-  ▸ pixi env               solving
-  ▸ planners               compiling cuRobo CUDA kernels — 5–20 minutes the first time
-  ✔ Runtime built          ~/.local/share/tandem/runtime
-  ◆ Gemini API key ›       ••••••••••••••••
-  ✔ Created profile 'default'
-
-$ tandem collect
-╭─ tandem · collect · default ────────────────────────────────────────────╮
-│ task   place the toys on the plate with no collisions                   │
-│ state  ●warm  ●perceive  ◐plan  ○execute  ○label        elapsed 00:41   │
-│                                                                          │
-│ 3 success  ·  1 failure  ·  4/20 labeled                                │
-├─────────────────────────────────────────────────────────────────────────┤
-│ 21:14:02  cuTAMP: skeleton 3/12  cost 0.83  particles 256               │
-│ 21:14:07  motion_gen: 4 segments, 6.2 s, tdf 0.20                       │
-├─────────────────────────────────────────────────────────────────────────┤
-│  s success   f failure   p preempt   t hand to human   q finish         │
-╰─────────────────────────────────────────────────────────────────────────╯
-
-$ tandem ui
-  ✔ Serving   http://localhost:8787
-```
-
----
-
-## The UI
-
-`tandem ui` opens a browser view of everything a profile has collected. It is served by the
-package itself — no Node, no build step, no CDN.
-
-- **Trajectories** — every rollout, with its camera videos and per-frame plots. Click a chart
-  to seek all three videos to that frame. A merged hand-off trajectory gets a ribbon showing
-  which stretch the planner drove and which stretch you did; click a stretch to jump to it.
-- **Collect** — run a session from the browser, with the same preempt / hand-off / label
-  controls as the terminal, and an inline review at the label prompt so you decide while
-  looking at the rollout rather than from memory.
-- **Profiles** — edit a profile and see exactly what the planner will receive.
-- **Settings** — credentials, paths, runtime status, and the full diagnostic report.
-
-The plots show something worth knowing: the shaded bands are the frames that π₀.₅-DROID's
-non-idle filter will **throw away at training time**. A rollout that looks fine can be 40%
-idle. `tandem` runs the real filter, at full resolution, on the clipped action the dataset
-actually stores — so what you see is what training sees.
-
----
-
-## Profiles
-
-A **profile** is one collection setup and everything collected under it: the robot, the
-cameras, the task, the TAMP settings, and the trajectories.
-
-```
-~/tandem-data/profiles/fold-cloth/
-├── profile.yml            the whole setup
-├── calibration.json       camera extrinsics, keyed by serial
-└── trajectories/
-    ├── eval/              collected, not yet labeled
-    ├── success/
-    └── failure/
+git clone https://github.com/williamshen-nz/M2T2.git && cd M2T2
+pixi run setup && pixi run download-weights
+pixi run server   # port 8123
 ```
 
 ```bash
-tandem profile create fold-cloth --prompt "place the toy on the cloth and fold it"
-tandem profile use fold-cloth
-tandem profile edit fold-cloth        # $EDITOR, validated on save
+git clone https://github.com/williamshen-nz/FoundationStereo.git && cd FoundationStereo
+pixi run setup && pixi run download-checkpoints
+pixi run server   # port 1234
 ```
 
-Switching profiles re-points collection, inspection and export in one move. Two robots, two
-tasks, or two TAMP regimes you want to compare — each is a profile.
+### 5. Cameras and calibration
 
-### TAMP settings
+The robot and cameras are this machine's [rig](docs/CONFIGURATION.md#the-rig), shared by every profile.
+`tandem init` asked for them; change one setting at a time:
 
-The `tamp:` block goes straight to the planner, using **tiptop's own key names**, so anything
-documented upstream works verbatim and an existing `cfg/tamp/*.yml` can be pasted in
-unchanged.
-
-```yaml
-tamp:
-  num_particles: 256              # cuTAMP coverage per skeleton
-  opt_steps_per_skeleton: 250
-  traj_length_norm: inf           # charge moves the infinity-norm, not Euclidean
-  grasp_pose_change_weight: 0.1   # prefer grasps that reorient the wrist less
-  vae_manifold_weight: 25000      # pull trajectories toward the DROID motion manifold
-  joint_density_weight: 5000
-  blend_trajectory: true          # one continuous stroke per operation
-  blend_ops: [Pick, Place, GoToInitial]
-  blend_boundary_speed: 0.3       # never fully stop at gripper events
+```bash
+tandem rig show                                   # the robot, cameras and which have extrinsics
+tandem rig set robot.type panda_robotiq           # a Panda
+tandem rig set cameras.external_2.serial SERIAL   # roles: hand, external, external_2
 ```
 
-**Unknown keys are rejected at load time, with a suggestion.** This is deliberate. In the
-system tandem is extracted from, a config shipped `blend_ops: [Pick, MoveFree. MoveHolding]`
-— one typo'd period — and the planner silently ignored the whole list for months. A setting
-that quietly does nothing is the one failure mode that looks exactly like success.
+Extrinsics go in the rig's `calibration.json` (`tandem rig path --calibration`), keyed by serial. External
+cameras' poses come from DROID's own calibration: copy each `<serial>_left` pose in DROID's
+`droid/calibration/calibration_info.json` into it under the bare serial. Calibrate the wrist camera as
+TiPToP's
+[guide](https://github.com/SamratSahoo/tiptop/blob/682047493b88e5301c6b2b49da914ea4f173e5d9/docs/getting-started.md)
+describes, skipping its Bamboo controller step (the shim replaces it). `tandem runtime run` points its
+scripts at the rig: your NUC, your cameras, and this calibration file.
 
-Phase planning is configured separately, because it changes what a dataset *contains* rather
-than how the arm moves:
-
-```yaml
-hitl:
-  enabled: true
-  verify_retries: 1        # extra goes at a step the check says did not happen
-  verify_enforced: true    # false records the verdict and carries on
+```bash
+tandem runtime run calibrate-wrist-cam                 # writes the wrist camera's extrinsics
+tandem runtime run viz-calibration                     # checks the wrist camera
+tandem runtime run viz-calibration --camera external   # checks an external one
 ```
 
-```console
-$ tandem profile show fold-cloth --tamp
-◆ planner overrides  passed as --curobo-overrides
-{
-  "blend_ops": ["Pick", "Place", "GoToInitial"],
-  "blend_trajectory": true,
-  "traj_length_norm": "inf",
-  ...
+### 6. Teleop
+
+Human phases run TANDEM's teleop driver in the DROID fork's environment, through the DROID server from step 3.
+The fork's `droid/misc/parameters.py` must name your NUC (`nuc_ip`, the rig's `robot.host`). `tandem init`
+offers to set this up, or:
+
+```bash
+tandem config set teleop.enabled true
+tandem config set teleop.droid_dir /path/to/droid
+tandem config set teleop.python /path/to/droid/env/bin/python
+tandem config set teleop.device spacemouse   # default vr; teleop.controller left|right picks the VR hand
+tandem executors list                        # teleop should say `ready`
+```
+
+### 7. Check the setup
+
+```bash
+tandem doctor   # every check and what to do about it; --no-hardware skips the robot, camera and server probes
+```
+
+Common problems are in [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+
+## Usage
+
+### 1. Choose a task
+
+A profile is one task (its prompt, phase planning and TAMP settings) in one YAML file,
+`~/tandem-data/profiles/<name>.yml`. `tandem init` added the paper's five, each with the settings the paper
+collected it with. Pick one:
+
+```bash
+tandem profile use store-bread-in-closed-box   # or cover-bread-rolls, solve-constrained-puzzle,
+                                               # sort-and-cover-snacks, open-obstructed-book
+```
+
+Or make your own, with the paper's settings:
+
+```bash
+tandem profile create my-task --prompt "put the cup on the plate" --use
+tandem profile edit my-task                    # optional: opens my-task.yml, validated on save
+```
+
+`--from PROFILE` copies a profile instead ([every setting](docs/CONFIGURATION.md#profiles)). The paper's
+settings run planned motions at their own pace, not slowed by the rig's `time_dilation_factor`: keep a hand on
+the E-stop.
+
+### 2. Check the plan
+
+```bash
+tandem plan "place the bread inside the box" --image workspace.png   # -o LABEL (repeatable) pins object labels
+```
+
+This needs only the photo and the Gemini key. It prints the phases and who does each, each human phase's magic
+operator, the invented predicates, and any part of the instruction the plan cannot express. That is usually an
+object that was not detected: put it on the table, or reword the task.
+
+### 3. Collect
+
+```bash
+tandem collect   # in the terminal; --episodes N, --task "...", --no-execute (plan only), --no-record
+tandem ui        # or in the browser, at http://127.0.0.1:8787
+```
+
+The session warms the planner once, then waits for you; the footer shows the keys each state accepts:
+
+- Task prompt: Enter runs the task, `n` types a new one. `q` ends the session from any state and parks the arm.
+- Planning or executing: `p` preempts (the current motion segment still finishes; the E-stop is the only hard
+  stop). `t` lends you the arm at the next plan-step boundary; the planner then replans from where you leave it.
+- Human phase: `t` takes the arm to teleoperate, `a` gives up on the task, and `d` marks the step done by hand
+  (refused while recording, by default).
+- While you have the arm: `r` gives it back.
+- Label prompt: `s` success, `f` failure.
+
+At a human phase the screen says what to do. Once you give the arm back, a fresh camera image must show the step
+done; if not, you get one more try, and a trial that still fails is saved as excluded and never exported. A
+robot phase the planner cannot plan ends the trial. More in [docs/USAGE.md](docs/USAGE.md).
+
+### 4. Review and export
+
+```bash
+tandem traj list                   # newest first; --status eval|success|failure
+tandem traj relabel <id> failure   # move one between success, failure and eval
+tandem export lerobot --repo <hf-user>/my-task            # LeRobot v3.0 from success/, in ~/tandem-data/exports/
+tandem export lerobot --repo <hf-user>/my-task --push     # and upload (tandem config set-hf-token, or HF_TOKEN)
+```
+
+Each trial becomes one episode, with its robot and human legs merged
+([on-disk format](docs/DATA.md)).
+
+## Adding a planner
+
+A planner perceives the scene, plans one goal in it, and executes and records that plan; the rest stays in TANDEM.
+
+```bash
+tandem planners new myplanner       # scaffold ./tandem-myplanner (--sidecar: it runs in its own environment)
+# then run the two commands it prints: install the package where tandem runs, and run the conformance kit
+tandem planners list                # myplanner is now listed
+tandem planners install myplanner   # build its runtime, if it declares one
+tandem planners use myplanner       # the active profile now plans with it
+```
+
+Subclass `tandem.planners.Planner`, register it under the `tandem.planners` entry point, and pass the
+conformance kit (`tandem.planners.testing.PlannerConformance`); see [ADDING_A_PLANNER.md](docs/ADDING_A_PLANNER.md).
+Human phases run the `teleop` executor unless the profile names another (`tandem executors use NAME`), which a
+package can register ([ADDING_A_HUMAN_EXECUTOR.md](docs/ADDING_A_HUMAN_EXECUTOR.md)).
+
+## Citation
+
+```bibtex
+@misc{sahoo2026tandem,
+  title  = {{TANDEM}: Task and Motion Planning with As-Needed Demonstrations for Efficient
+            Vision-Language-Action Model Fine-tuning},
+  author = {Sahoo, Samrat and Ji, Liang and Silver, Tom and Huang, Yixuan},
+  year   = {2026}
 }
 ```
 
----
+## License and acknowledgements
 
-## Commands
+TANDEM is released under the [MIT License](LICENSE). cuRobo and cuTAMP, which the TiPToP planner runs on and
+`tandem planners install` fetches, are under NVIDIA's license, which limits their use to research and
+evaluation ([NOTICE](NOTICE)).
 
-| | |
-|---|---|
-| `tandem init` | Set up this machine. Idempotent — re-run it any time. |
-| `tandem doctor` | Every check, what it found, and what to do about it. |
-| `tandem collect [profile]` | Run a session in the terminal. |
-| `tandem plan "<task>" --image photo.png` | Decompose a task into phases from a photo, with no robot and no GPU. Prints who does each step, the sub-goal the planner gets, and anything the model could not express. |
-| `tandem ui` | Serve the browser UI. |
-| `tandem profile list \| show \| create \| use \| edit \| delete` | Manage profiles. |
-| `tandem traj list \| show \| open \| relabel \| rm \| merge` | Inspect trajectories. `open` is a 3D replay in Rerun; `merge` re-joins a hand-off's legs if the automatic merge failed. |
-| `tandem export lerobot` | Build a LeRobot v3.0 dataset and optionally push it to the Hub. |
-| `tandem config set-gemini-key` | Store the Gemini key. `--stdin` keeps it out of shell history. |
-| `tandem runtime status \| build \| shell \| run` | The GPU runtime. |
-
-The commands that report state — `doctor`, `profile list|show`, `traj list|show`,
-`runtime status`, `config list` — all take `--json`. `NO_COLOR` is honoured.
-
----
-
-## What a trajectory looks like
-
-The on-disk format is unchanged from the system tandem was extracted from, so data moves
-between the two in either direction.
-
-```
-trajectories/success/2026-08-16_21-14-02/
-├── external_cam.mp4  external_cam_2.mp4  hand_cam.mp4
-├── tiptop_plan.json        the TAMP plan that was executed
-├── robot_state.npz         the per-frame arrays below
-├── _meta.json              instruction, fps, timestamps, lineage
-├── hitl.json               the phase plan and its verdicts   (phase planning only)
-└── vlm/                    every image sent to the model, and what it said
-```
-
-| array | shape | what it is |
-|---|---|---|
-| `joint_position` | `[F,7]` | **measured** arm encoders — no lead, no lag, no plan fallback |
-| `gripper_position` | `[F]` | **measured** gripper closedness, continuous in `[0,1]` |
-| `cmd_joint_position` | `[F,7]` | **commanded** joint targets from the plan |
-| `cmd_joint_velocity` | `[F,7]` | **commanded** joint velocities from the plan |
-| `cmd_gripper` | `[F]` | the plan's gripper command, **binary** 0 or 1 |
-| `frame_time` | `[F]` | wall clock, float64 (float32 would collapse every frame to one timestamp) |
-
-Proprioception and action are **decoupled on purpose**. When the action is a lagged copy of
-the measured state, a policy learns to echo it — and a fine-tuned policy that has learned to
-echo the gripper never closes it. `tandem export lerobot` refuses an episode whose
-`cmd_gripper` is not binary, rather than write a dataset with that defect in it.
-
----
-
-## Requirements
-
-**To collect**
-
-- Linux, NVIDIA GPU with CUDA 12 or newer, a recent driver
-- ~25 GB free disk for the runtime
-- Franka FR3 (or UR5) with a Robotiq 2F-85, reachable over the bamboo-polymetis shim —
-  started with `--state-port` so encoders stay readable while the arm moves
-- 2–3 ZED cameras and the [ZED SDK](https://www.stereolabs.com/developers/release)
-- An M2T2 grasp server
-- A [Gemini API key](https://aistudio.google.com/apikey)
-
-**To visualize** — Python 3.10+. That is all.
-
-`tandem doctor` checks every one of these and tells you which are missing.
-
----
-
-## Troubleshooting
-
-<details>
-<summary><b>A preempt didn't stop the arm</b></summary>
-
-It can't, and no software button can. The controller is handed a whole trajectory segment in
-one request and has no abort, so the motion runs to the end of that segment. Preempt stops
-*further plan steps*. **The physical E-stop is the only instant stop.**
-</details>
-
-<details>
-<summary><b>A camera won't open / shows serial number 0</b></summary>
-
-Serial `0` means "not yours yet" — another process still holds it. After a teleop hand-off the
-cameras take about 15 seconds to release, because the save workers inherited the device
-descriptors and have to exit first. Wait, then retry. If it persists, another tandem or tiptop
-process is still running.
-</details>
-
-<details>
-<summary><b>"No extrinsics for camera serial …"</b></summary>
-
-Extrinsics are keyed by camera serial, and a serial with no entry aborts at warmup. Add it to
-the profile's `calibration.json`, or import from a checkout that has it:
-`tandem profile create <name> --import-from <path>`.
-</details>
-
-<details>
-<summary><b>The cuRobo build failed</b></summary>
-
-The full log is under `~/.local/state/tandem/logs/`. The usual causes are no `nvcc`, a
-torch/CUDA mismatch, or running out of disk mid-compile. `tandem runtime build` retries; the
-build fingerprint means an unchanged, already-compiled kernel is skipped.
-</details>
-
-<details>
-<summary><b>My TAMP setting seems to do nothing</b></summary>
-
-Run `tandem profile show <name> --tamp`. That is exactly the JSON the planner receives — if
-your key is not in it, it never applied. Unknown keys are rejected at load time, so a typo
-shows up as an error rather than silence.
-</details>
-
-<details>
-<summary><b>The videos won't scrub in the browser</b></summary>
-
-They are served with HTTP Range support, so this should not happen. If it does, check that
-nothing is proxying `/api/media/` without passing Range headers through.
-</details>
-
----
-
-## How it is put together
-
-```
-src/tandem/
-├── cli/           the command tree (Typer + Rich)
-├── core/          profiles, trajectories, the session state machine, the runtime
-├── planning/      phase planning: proposal, invented predicates, verification
-├── planners/      the planner backends, behind one narrow protocol
-│   └── tiptop/    a capability declaration, a client, and a sidecar
-├── server/        FastAPI + a no-build single-page app
-├── export/        LeRobot v3.0 writer
-├── teleop/        the hand-off driver, run under a DROID environment
-├── resources/     the annotated profile template
-└── _vendor/       tiptop · cuTAMP · cuRobo, pinned and trimmed
-```
-
-The **session engine** (`core/session.py`) walks a task's phases: it decides who does each one,
-calls the planner for the robot's, hands the arm to a person for theirs, checks from a photo that
-their step happened, and mints the trajectory id that joins every leg into one episode. It survives
-being preempted, re-warmed and handed over mid-task, and appends a line per event to a JSONL file
-so a session that went wrong can be read off disk after the process is gone. The same object backs
-both `tandem collect` and the browser UI, so the state machine exists once.
-
-**tandem plans the task; a planner plans the motion.** `planning/` breaks an instruction into
-an ordered list of phases and decides which are the robot's and which are yours. For a robot
-phase it asks a planner for one thing — *achieve this goal in this scene, and record what you
-did* — and that request is the whole of `planners/base.py`. Everything tandem knows about a
-particular planner is a `Capabilities` declaration: which predicates a goal may be stated
-over, which of them the planner supplies for itself, whether one plan can pick the same object
-twice. Nothing about any planner is hardcoded in the phase planner, so pointing tandem at a
-different task-and-motion planner means writing a backend, not patching the planner.
-
-A backend needs torch, CUDA kernels, a camera SDK and a robot client; tandem needs none of
-those and never will. So a hosted backend runs as a child process inside the GPU runtime and
-answers verbs over newline-delimited JSON:
-
-```
-tandem (pure python, no CUDA)              the pixi runtime (CUDA)
-  planning/          phases                  planners/tiptop/sidecar.py   ← tandem's code
-  planners/base.py   the protocol            │  import tiptop, cutamp
-  planners/tiptop/backend.py  ──JSON──►      │  run_perception(goal_builder=…)
-                              ◄──JSON──      │  run_planning / execute / record
-```
-
-`sidecar.py` is tandem's own file executed by the runtime's interpreter — it imports nothing
-from `tandem`, and every line of it is a call to a **public function of an unmodified
-planner**. Goals reach cuTAMP through `run_perception`'s existing `goal_builder` hook, so
-there is no planner-side change to keep alive. That is the difference from the design this
-replaces, where the phase planner lived inside a fork of the planner and every planner tandem
-wanted to drive had to be forked with it.
-
-With phase planning off there is nothing to decompose, so the goal is the one the planner's own
-translator made of the instruction during perception — the same translator, the same atoms, one
-code path, and no extra model call. A session with the feature off behaves exactly as it always
-did.
-
-The **runtime** mirrors the source monorepo's directory layout on purpose. Three separate
-modules resolve default asset paths by walking up from `__file__` to what they assume is a
-repo root; reproducing that shape makes them all resolve correctly with no patching, and
-means an imported legacy config works unchanged.
-
-Vendored sources are pinned by commit in `src/tandem/_vendor/VENDOR.toml`, with the trimmed
-paths and applied patches recorded alongside. Re-vendor with:
-
-```bash
-python tools/vendor.py --source /path/to/hitl-tamp-vla
-```
-
----
-
-## Credits & license
-
-Built on work by others:
-
-- **[TiPToP](https://github.com/SamratSahoo/tiptop)** — the real-robot TAMP pipeline tandem
-  drives as its default backend, used unmodified. MIT. William Shen, Nishanth Kumar, and
-  contributors. The phase planner is tandem's own (`src/tandem/planning/`); its design and its
-  prompts began life as `tiptop.hitl` on the `feat/hitl-phase-planning` branch of
-  [LJ1356/tiptop](https://github.com/LJ1356/tiptop).
-- **[cuTAMP](https://github.com/SamratSahoo/cuTAMP)** — GPU-parallel task-and-motion planning.
-  NVIDIA License.
-- **[cuRobo](https://github.com/NVlabs/curobo)** — GPU motion generation and collision-aware IK.
-  NVIDIA License. NVIDIA Seattle Robotics Lab.
-
-tandem's own code is MIT. **cuRobo and cuTAMP are under NVIDIA's source-available license,
-whose use limitation is research and evaluation only — which means tandem as distributed is
-too.** See [NOTICE](NOTICE) for the details and for how to build without them.
+TANDEM builds on [TiPToP](https://github.com/SamratSahoo/tiptop) (MIT; William Shen, Nishanth Kumar and
+contributors), [cuTAMP](https://github.com/SamratSahoo/cuTAMP) and [cuRobo](https://github.com/NVlabs/curobo)
+(NVIDIA Seattle Robotics Lab), and [DATAFARM](https://github.com/SamratSahoo/DATAFARM)'s checkpoints. The
+phase planner's design and prompts began as `tiptop.hitl` on the `feat/hitl-phase-planning` branch of
+[LJ1356/tiptop](https://github.com/LJ1356/tiptop/tree/feat/hitl-phase-planning).

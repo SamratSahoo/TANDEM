@@ -77,7 +77,9 @@ def check_platform() -> Check:
             "operating system",
             WARN,
             system,
-            "Collection needs Linux (CUDA, the ZED SDK and the robot stack). Visualization works anywhere.",
+            # Not "collection needs Linux": that is TiPToP's stack, and a planner states its own needs.
+            "Collection with the planner and robot stack tandem ships (TiPToP: CUDA, the ZED SDK) needs "
+            "Linux; `tandem planners info NAME` says what a planner needs. Visualization works anywhere.",
         )
     return Check("operating system", OK, f"{system} {platform.release()}")
 
@@ -97,7 +99,8 @@ def check_disk(path: Path, need_gb: float = 25.0) -> Check:
             "disk space",
             FAIL if free_gb < 10 else WARN,
             detail,
-            f"The runtime needs roughly {need_gb:.0f} GB (CUDA toolkit, torch, compiled kernels).",
+            f"A planner runtime can need roughly {need_gb:.0f} GB (TiPToP's: the CUDA toolkit, torch, "
+            "compiled kernels).",
             group="runtime",
         )
     return Check("disk space", OK, detail, group="runtime")
@@ -159,8 +162,8 @@ def check_nvcc() -> Check:
             "nvcc",
             WARN,
             "not on PATH",
-            "cuRobo compiles CUDA kernels at install time. tandem's runtime brings its own "
-            "cuda-toolkit, so this is only a problem if that build fails.",
+            "A planner that compiles CUDA kernels at install time (cuRobo's, for TiPToP) needs it. A runtime "
+            "recipe brings its own cuda-toolkit, so this is only a problem if that build fails.",
             group="gpu",
         )
     version = ""
@@ -213,74 +216,15 @@ def check_ffmpeg() -> Check:
 
 
 # --------------------------------------------------------------------------- hardware
+#
+# Which hardware a session needs is its planner's to say (a planner's ``doctor_checks``), so the probes
+# of one rig's robot shim or grasp server live with that planner -- TiPToP's in
+# ``tandem/planners/tiptop/probe.py``. What stays here is the one thing every such probe is made of.
 
 
-def check_zed_sdk() -> Check:
-    root = Path("/usr/local/zed")
-    if not root.is_dir():
-        return Check(
-            "zed sdk",
-            WARN,
-            "not installed",
-            "Cameras need the ZED SDK from stereolabs.com. Only required to collect.",
-            group="hardware",
-        )
-    version_file = root / "settings" / "ZED_SDK_version.txt"
-    detail = version_file.read_text().strip() if version_file.is_file() else str(root)
-    return Check("zed sdk", OK, detail, group="hardware")
-
-
-def check_robot(host: str, port: int, *, timeout: float = 1.5) -> Check:
-    """The bamboo shim's control port. A closed port is normal when the robot is off."""
-    return _check_port("robot control", host, port, timeout, group="hardware",
-                       hint="Start the bamboo-polymetis shim on the NUC.")
-
-
-def check_robot_state_port(host: str, port: int, *, timeout: float = 1.5) -> Check:
-    return _check_port(
-        "robot state port",
-        host,
-        port,
-        timeout,
-        group="hardware",
-        hint=(
-            "Start the shim with --state-port so encoders can be read while the arm moves. "
-            "Without it, capture aborts rather than falling back to plan positions."
-        ),
-    )
-
-
-def check_m2t2(url: str, *, timeout: float = 1.5) -> Check:
-    """Reach the grasp server, or say why the address cannot even be used.
-
-    A malformed URL is reported, never raised. `doctor` is the command you run *because*
-    something is wrong, so a probe that throws takes down the one tool that was going to tell
-    you what to fix — and it hides every check after it.
-    """
-    from urllib.parse import urlparse
-
-    try:
-        parsed = urlparse(url)
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
-        host = parsed.hostname
-    except ValueError as exc:
-        return Check(
-            "m2t2 grasp server", FAIL, f"{url} — {exc}",
-            "That is not a usable address. An unresolved ${oc.env:...} here means an import "
-            "left OmegaConf's own syntax behind; set perception.m2t2.url to a plain URL with "
-            "`tandem profile edit`.",
-            group="hardware",
-        )
-    if not host:
-        return Check(
-            "m2t2 grasp server", FAIL, f"{url or '(empty)'} — no host",
-            "Set perception.m2t2.url to something like http://localhost:8123.",
-            group="hardware",
-        )
-    return _check_port(
-        "m2t2 grasp server", host, port, timeout, group="hardware",
-        hint="Start the M2T2 server; perception asks it for grasps every rollout.",
-    )
+def check_port(name: str, host: str, port: int, *, timeout: float = 1.5, group: str = "hardware", hint: str = "") -> Check:
+    """Whether ``host:port`` accepts a connection. A closed port is a warning: the thing is off, not broken."""
+    return _check_port(name, host, port, timeout, group=group, hint=hint)
 
 
 def _check_port(name: str, host: str, port: int, timeout: float, *, group: str, hint: str) -> Check:
@@ -303,8 +247,8 @@ def check_gemini_key() -> Check:
             "gemini api key",
             FAIL,
             "not set",
-            "Run `tandem config set-gemini-key`. Perception calls Gemini once per rollout to turn "
-            "the task string into objects and goal predicates, so collection cannot run without it.",
+            "Run `tandem config set-gemini-key`. Phase planning asks Gemini to split each task into "
+            "steps and to check each human one; a planner that calls it as well says so in its own row.",
             group="credentials",
         )
     return Check(

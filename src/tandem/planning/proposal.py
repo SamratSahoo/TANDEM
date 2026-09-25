@@ -9,6 +9,12 @@ came to be planned before "open the box".
 Every fact about the planner used here comes from ``Capabilities``: which predicates a robot phase
 may use, which names are already taken, what the object types are called. Nothing is hardcoded, so
 the same validator works for a backend with a different goal language.
+
+A human phase must carry its magic operator (``Open(box)`` with preconditions, add effects and delete
+effects), and the whole plan is checked as a unit before it is accepted: every robot phase must be
+achievable, and when ``check_plan_effects`` is on, no phase may need something an earlier one undid.
+Both checks run INSIDE the repair loop, so a plan that fails them is sent back to the model with the
+reason rather than failing the trial -- a broken plan is cheapest to fix while it is still text.
 """
 
 from __future__ import annotations
@@ -20,18 +26,28 @@ from pathlib import Path
 from typing import Any
 
 from tandem.planners.base import Capabilities
+from tandem.planning import contracts, feasibility
 from tandem.planning.cache import ProposalCache
 from tandem.planning.config import PlanningConfig
 from tandem.planning.prompts import PLAN_SCHEMA, plan_prompt
-from tandem.planning.structs import Phase, SceneTypes, TaskSpecification, VLMPredicate
+from tandem.planning.structs import HumanOperator, Phase, SceneTypes, TaskSpecification, VLMPredicate
 from tandem.planning.symbols import Atom, Parameter, Predicate, ProposalError
 
 _log = logging.getLogger(__name__)
 
 # A predicate name has to survive being written into JSON, a filename and a prompt. Anything that is
 # not an identifier is refused rather than sanitised, so the name the model chose is the name used
-# everywhere and there is never a second spelling.
+# everywhere and there is never a second spelling. An operator's name is held to the same rule: it is
+# written into the same record, and read back from its signature (``HumanOperator.from_json``).
 _NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+
+# One phase as the proposal wrote it: (executor, description, atom entries, instructions, the raw
+# `operator` entry or None). Kept raw until the scene's types are known, because grounding an
+# operator's atoms needs them and they are computed from every phase at once.
+_PhaseEntry = tuple[str, str, list[tuple[str, list[str]]], str, Any]
+
+# The three atom lists of an `operator` entry, in the order they are read.
+_OPERATOR_ATOM_KEYS = ("preconditions", "add_effects", "delete_effects")
 
 
 def proposal_cache(cfg: PlanningConfig) -> ProposalCache | None:
@@ -65,8 +81,8 @@ def _atom_entries(data: Any, key: str) -> list[tuple[str, list[str]]]:
     return out
 
 
-def _phase_entries(data: Any) -> list[tuple[str, str, list[tuple[str, list[str]]], str]]:
-    """Parse the ``phases`` list into (executor, description, atom entries, instructions)."""
+def _phase_entries(data: Any, caps: Capabilities) -> list[_PhaseEntry]:
+    """Parse ``phases`` into (executor, description, atom entries, instructions, raw operator)."""
     entries = _field(data, "phases", [])
     if not isinstance(entries, list) or not entries:
         raise ProposalError("The plan must contain at least one phase.")
@@ -86,12 +102,40 @@ def _phase_entries(data: Any) -> list[tuple[str, str, list[tuple[str, list[str]]
             raise ProposalError(
                 f"The human phase {description!r} needs `instructions` telling the person what to do."
             )
-        out.append((executor, description, atoms, instructions))
+        operator = entry.get("operator")
+        if executor == "robot" and operator:
+            # The robot's operators are the planner's own, and they are fixed. A proposal that
+            # declares one is describing a step it has misjudged -- most often a human step written
+            # as a robot phase, which is the failure the `operator` field exists to make visible.
+            # Refused here, in words aimed at the proposer; Phase.__post_init__ is only a backstop.
+            raise ProposalError(
+                f"The ROBOT phase {description!r} declares an `operator`. Only a human phase does "
+                f"that: the robot's operators are fixed (it can only {caps.robot_description}). If "
+                "this step needs an operator of its own, it is a human phase."
+            )
+        out.append((executor, description, atoms, instructions, operator))
     return out
 
 
+def _operator_predicate_uses(phases: Sequence[_PhaseEntry]) -> list[tuple[str, list[str]]]:
+    """Every (predicate, args) pair named inside an operator, so one can type a predicate.
+
+    An invented predicate may be named ONLY in an operator -- a precondition or a delete effect
+    never has to appear in any phase's `atoms` -- and ``_build_invented`` types a predicate from its
+    uses. Without counting these, such a predicate has no uses at all and is rejected as unused,
+    which would make "the human closes what an earlier phase opened" unstatable.
+    """
+    uses: list[tuple[str, list[str]]] = []
+    for _, _, _, _, raw in phases:
+        if not isinstance(raw, dict):
+            continue
+        for key in _OPERATOR_ATOM_KEYS:
+            uses.extend(_atom_entries(raw, key))
+    return uses
+
+
 def _scene_types(
-    phases: Sequence[tuple[str, str, list[tuple[str, list[str]]], str]],
+    phases: Sequence[_PhaseEntry],
     objects: Sequence[str],
     table_name: str,
     caps: Capabilities,
@@ -104,10 +148,13 @@ def _scene_types(
     between two phases of the same task.
 
     Only the planner's OWN goal predicates contribute: an invented predicate's parameter types are
-    read off its uses, which is the step after this one, so it has nothing to say here.
+    read off its uses, which is the step after this one, so it has nothing to say here. And only the
+    phases' own ``atoms``: an operator's atoms are typed against this split, never the other way
+    round, so a precondition cannot quietly turn an object the plan never places anything on into a
+    surface -- and with it, into a static obstacle for the planner.
     """
     surfaces = {table_name}
-    for _, _, atoms, _ in phases:
+    for _, _, atoms, _, _ in phases:
         for name, args in atoms:
             predicate = caps.goal_predicates.get(name)
             if predicate is None:
@@ -223,6 +270,96 @@ def _ground_atom(
     return predicate.ground(*args)
 
 
+def _build_operator(
+    raw: Any,
+    *,
+    description: str,
+    phase_atoms: frozenset[Atom],
+    invented: dict[str, VLMPredicate],
+    scene_types: SceneTypes,
+    caps: Capabilities,
+) -> HumanOperator:
+    """One human phase's ``operator`` entry -> a grounded :class:`HumanOperator`.
+
+    Every atom is grounded through the same ``_ground_atom`` the phase's own atoms go through, with
+    ``executor="human"``, so an invented predicate is legal here and an unknown one is rejected with
+    the same message. What is checked beyond that is the operator's internal coherence, because the
+    camera and the plan-time contract check both take it at its word: an add effect that is also a
+    delete effect says nothing (and could not be verified -- one image cannot show an atom both true
+    and false), and an operator whose effects contradict its own phase's ``atoms`` is contradicting
+    the phase it belongs to.
+
+    Every rejection here goes back to the proposer in the repair prompt, so each names the operator
+    and says what to change. ``HumanOperator`` and ``Phase`` have backstops of their own; they are
+    not what the model should ever see.
+    """
+    if not isinstance(raw, dict):
+        raise ProposalError(
+            f"The human phase {description!r} needs an `operator` object saying what the action is "
+            "(`name`, `args`) and what it does (`preconditions`, `add_effects`, `delete_effects`)."
+        )
+    name = str(_field(raw, "name")).strip()
+    if not name:
+        raise ProposalError(f'The operator for {description!r} needs a `name`, e.g. "Push".')
+    if not _NAME.match(name):
+        raise ProposalError(
+            f"'{name}' is not a valid operator name. Use one word: a letter followed by letters, "
+            'digits or underscores, e.g. "Open" or "Unplug".'
+        )
+    args = _field(raw, "args", [])
+    if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+        raise ProposalError(f"The args of the operator {name} must be a list of strings, got {args!r}.")
+    args = [str(a) for a in args]
+    # type_of raises with the available object names, which is the message the model can act on.
+    # Typed the way an invented predicate's parameters are: from the scene, never from the model.
+    parameters = tuple(Parameter(f"x{i}", scene_types.type_of(a)) for i, a in enumerate(args))
+
+    def atoms(key: str) -> frozenset[Atom]:
+        return frozenset(
+            _ground_atom(n, a, invented, scene_types, "human", caps) for n, a in _atom_entries(raw, key)
+        )
+
+    preconditions, add_effects, delete_effects = (atoms(k) for k in _OPERATOR_ATOM_KEYS)
+
+    def listed(found: frozenset[Atom]) -> str:
+        return ", ".join(sorted(str(a) for a in found))
+
+    if not add_effects:
+        raise ProposalError(
+            f"The operator {name} has no `add_effects`, so nothing about the workspace changes when "
+            "the person does it and there is no way to tell it happened."
+        )
+    both = add_effects & delete_effects
+    if both:
+        raise ProposalError(
+            f"The operator {name} both adds and deletes {listed(both)}. An atom can be one or the other."
+        )
+    # Before the coverage check below, not after: once `atoms` is known to be covered by the add
+    # effects, the rule just above has already ruled this out, and the model would never be told the
+    # more useful thing -- that its operator undoes the very atom its phase promises.
+    contradicted = phase_atoms & delete_effects
+    if contradicted:
+        raise ProposalError(
+            f"The operator {name} deletes {listed(contradicted)}, which the phase {description!r} says "
+            "must be TRUE afterwards. Take it out of `delete_effects`, or out of the phase's `atoms`."
+        )
+    uncovered = phase_atoms - add_effects
+    if uncovered:
+        raise ProposalError(
+            f"The phase {description!r} says {listed(uncovered)} must be true afterwards, but its "
+            f"operator {name} does not make that true. Every atom in a phase's `atoms` must appear "
+            "in its operator's `add_effects`."
+        )
+    return HumanOperator(
+        name=name,
+        args=tuple(args),
+        parameters=parameters,
+        preconditions=preconditions,
+        add_effects=add_effects,
+        delete_effects=delete_effects,
+    )
+
+
 def check_coverage(data: Any, phase_count: int, unrepresented: Sequence[dict[str, str]]) -> tuple[dict, ...]:
     """Check the clause-by-clause mapping the proposer was asked for.
 
@@ -280,38 +417,130 @@ def parse_plan_response(
     table_name: str,
     caps: Capabilities,
 ) -> TaskSpecification:
-    """Validate a plan response into the phases the rest of the system executes."""
-    phase_entries = _phase_entries(data)
+    """Validate a plan response into the phases the rest of the system executes.
+
+    This is the per-phase half of the validation: every atom, every operator and the coverage are
+    checked on their own. Whether the phases hang together as a PLAN is ``check_plan``, which
+    ``propose_plan`` runs on what this returns.
+    """
+    phase_entries = _phase_entries(data, caps)
     scene_types = _scene_types(phase_entries, objects, table_name, caps)
 
     # An invented predicate's signature comes from its uses, where every argument is a concrete
     # object whose type this scene has already fixed.
     declared = {str(_field(e, "name")) for e in (data.get("new_predicates") or [])}
     arg_types: dict[str, list[list[str]]] = {}
-    for _, _, atoms, _ in phase_entries:
-        for name, args in atoms:
-            if name in declared:
-                arg_types.setdefault(name, []).append([scene_types.type_of(a) for a in args])
+    uses = [(n, a) for _, _, atoms, _, _ in phase_entries for n, a in atoms]
+    # Uses inside an operator count too: a precondition or a delete effect may be the only place an
+    # invented predicate is named, and an unused predicate is rejected.
+    uses += _operator_predicate_uses(phase_entries)
+    for name, args in uses:
+        if name in declared:
+            arg_types.setdefault(name, []).append([scene_types.type_of(a) for a in args])
     invented = _build_invented(data.get("new_predicates"), arg_types, caps)
 
-    phases = tuple(
-        Phase(
-            executor=executor,
-            description=description,
-            atoms=frozenset(_ground_atom(n, a, invented, scene_types, executor, caps) for n, a in atoms),
-            instructions=instructions,
+    phases = []
+    for executor, description, atoms, instructions, raw_operator in phase_entries:
+        grounded = frozenset(_ground_atom(n, a, invented, scene_types, executor, caps) for n, a in atoms)
+        operator = None
+        if executor == "human":
+            # Mandatory. A human phase with no operator has no stated preconditions and no stated
+            # delete effects, so neither the camera nor the contract check could hold it to anything
+            # beyond its atoms -- and the prompt asks for one, so a plan without it is incomplete.
+            operator = _build_operator(
+                raw_operator,
+                description=description,
+                phase_atoms=grounded,
+                invented=invented,
+                scene_types=scene_types,
+                caps=caps,
+            )
+        phases.append(
+            Phase(
+                executor=executor,
+                description=description,
+                atoms=grounded,
+                instructions=instructions,
+                operator=operator,
+            )
         )
-        for executor, description, atoms, instructions in phase_entries
-    )
     unrepresented = parse_unrepresented(data)
     return TaskSpecification(
         instruction=instruction,
-        phases=phases,
+        phases=tuple(phases),
         scene_types=scene_types,
         invented=tuple(invented.values()),
         unrepresented=unrepresented,
         coverage=check_coverage(data, len(phases), unrepresented),
     )
+
+
+def check_plan(spec: TaskSpecification, cfg: PlanningConfig, caps: Capabilities) -> None:
+    """Refuse a plan whose phases are each fine but which cannot work as a whole.
+
+    Raises ``ProposalError`` phrased for the proposer, because it runs inside the repair loop: a plan
+    refused here goes back to the model with the reason, which is the whole point of checking it
+    before anything moves. The checks:
+
+      * every robot phase is achievable by some robot operator (``feasibility.check_robot_phases``).
+        It used to run after the proposal was accepted, where a failure could only end the trial;
+        the model that wrote the phase never heard why.
+      * every robot LEG, as the plan will cut them (``conjoin_robot_phases``), gives the planner a
+        goal (``feasibility.robot_leg_without_a_goal``). A leg of nothing but atoms the planner
+        supplies for itself (TipTop's ``HandEmpty``) is achievable and still unplannable, and the
+        loop could only end the trial over it.
+      * no phase asks for two atoms that claim one exclusive slot (``contracts.exclusive_conflicts``):
+        ``On(toy, box)`` and ``On(toy, shelf)`` at once is a goal no planner can reach, and one that
+        cuTAMP searches for until its timeout rather than refusing.
+      * when ``cfg.check_plan_effects``, no phase needs something an earlier phase deleted
+        (``contracts.check_plan_effects``). The starting workspace is unknown here -- nothing has
+        been classified yet -- so only what the plan itself makes false is held against it.
+
+    A malformed ``Capabilities`` declaration raises ``TandemError`` from the contract checks instead,
+    on purpose: that is not the model's mistake, and reprompting it would only burn the attempts.
+    """
+    # What a robot phase can usefully be stated with: achievable, AND something the planner can be
+    # handed. A predicate with no wire name (HandEmpty) is achievable too, but a phase stated only
+    # with it is the empty-goal leg refused below, so suggesting it would steer the repair straight
+    # into the next rejection.
+    statable = sorted(
+        p
+        for p in set(caps.goal_predicates) & caps.achievable_predicates
+        if caps.goal_predicate_wire_names.get(p)
+    )
+    unachievable = feasibility.check_robot_phases(spec, caps)
+    if unachievable is not None:
+        fix = f"Either state that phase with {', '.join(statable)}, or make it" if statable else "Make it"
+        raise ProposalError(
+            f"This plan cannot be carried out: {unachievable}. The robot can only "
+            f"{caps.robot_description}. {fix} a human phase with an operator."
+        )
+    empty = feasibility.robot_leg_without_a_goal(spec, caps, conjoin=cfg.conjoin_robot_phases)
+    if empty is not None:
+        named = " or ".join([", ".join(statable[:-1]), statable[-1]] if len(statable) > 1 else statable)
+        state = f"state what the robot must achieve with {named}, " if statable else ""
+        raise ProposalError(
+            f"This plan cannot be carried out: {empty}. Either {state}fold that phase into a "
+            "neighbouring robot phase, or leave it out."
+        )
+    for i, phase in enumerate(spec.phases):
+        # Every phase, a person's included: an operator that adds both is as impossible to verify
+        # as a robot goal holding both is to plan -- one of the two verdicts fails whatever the
+        # person does.
+        clash = contracts.exclusive_conflicts(phase.add_effects, caps=caps)
+        if clash:
+            first, other = clash[0]
+            thing = first.values[caps.exclusive_arguments[first.predicate]]
+            raise ProposalError(
+                f"This plan cannot be carried out: phase {i} ({phase.description!r}) asks for both "
+                f"{first} and {other}, but {thing} can be {first.predicate} only one thing at a time, "
+                "so the two can never hold together. Keep the one this phase is for, or split it into "
+                "phases in the order they should happen."
+            )
+    if cfg.check_plan_effects:
+        broken = contracts.check_plan_effects(spec, caps=caps)
+        if broken:
+            raise ProposalError(f"This plan does not hang together: {broken}")
 
 
 async def propose_plan(
@@ -321,19 +550,29 @@ async def propose_plan(
     table_name: str,
     cfg: PlanningConfig,
     caps: Capabilities,
+    *,
+    feedback: str | None = None,
 ) -> TaskSpecification:
-    """The instruction becomes an ordered plan of robot and human phases."""
+    """The instruction becomes an ordered plan of robot and human phases.
+
+    ``feedback`` is a section appended to the prompt verbatim, the way a repair is: why an earlier
+    plan for this task could not be carried out (``plan.build_plan`` writes it). A proposal with
+    feedback never touches the cache. It is by definition a request for a DIFFERENT answer, and the
+    same failure fed back the same way would otherwise replay the plan that just failed.
+    """
     from tandem.planning.llm import query_json
 
-    prompt = plan_prompt(
-        instruction,
-        list(objects),
-        predicate_menu=caps.predicate_menu(),
-        robot_description=caps.robot_description,
-    )
+    prompt = plan_prompt(instruction, list(objects), caps=caps)
+    if feedback:
+        prompt = f"{prompt}\n\n{feedback}"
 
     def parse(data: Any) -> TaskSpecification:
-        return parse_plan_response(data, instruction, objects, table_name, caps)
+        spec = parse_plan_response(data, instruction, objects, table_name, caps)
+        # Inside `parse`, so a plan that cannot be carried out, or whose operators contradict each
+        # other, is REPROMPTED with the reason rather than failing the trial. It also means a cached
+        # response the checks now refuse is asked for again rather than replayed.
+        check_plan(spec, cfg, caps)
+        return spec
 
     spec = await query_json(
         prompt,
@@ -343,7 +582,7 @@ async def propose_plan(
         image=image,
         max_attempts=cfg.max_attempts,
         label="task plan",
-        cache=proposal_cache(cfg),
+        cache=None if feedback else proposal_cache(cfg),
     )
     _log.info(f"plan for {instruction!r}: {len(spec.phases)} phase(s)")
     for i, phase in enumerate(spec.phases):
@@ -353,6 +592,24 @@ async def propose_plan(
             _log.info(f"phase {i} instructions: {phase.instructions}")
     for predicate in spec.invented:
         _log.info(f"invented predicate {predicate.name}: {predicate.instructions}")
+    for i, phase in enumerate(spec.phases):
+        if phase.operator is None:
+            continue
+        op = phase.operator
+        _log.info(
+            f"phase {i} operator {op.display}: pre "
+            f"{sorted(str(a) for a in op.preconditions) or 'none'} -> add "
+            f"{sorted(str(a) for a in op.add_effects)} del "
+            f"{sorted(str(a) for a in op.delete_effects) or 'none'}"
+        )
+    # A warning, deliberately NOT a rejection. Two consecutive robot phases moving the same object are
+    # a SUPPORTED shape -- `feasibility.conjoinable_run` splits exactly there and the robot-to-robot
+    # continuation is built on it -- so refusing the plan would make that path unreachable. But it is
+    # also what a misclassified human step looks like, and the operator finding out by watching the
+    # arm do the same pick twice is the outcome this line exists to prevent.
+    wasted = contracts.wasted_robot_move(spec.phases, caps=caps)
+    if wasted:
+        _log.warning(f"this plan repeats work -- {wasted}")
     for dropped in spec.unrepresented:
         _log.warning(
             f"NOT part of the plan -- {dropped['clause']!r}: {dropped['reason']}. "

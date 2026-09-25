@@ -23,6 +23,9 @@ def lerobot(
     push: bool = typer.Option(False, "--push", help="Upload to the Hub after building."),
     private: bool = typer.Option(None, "--private/--public", help="Repo visibility when pushing."),
     max_episodes: int = typer.Option(None, "--max-episodes", "-n", help="Only export the first N."),
+    force: bool = typer.Option(
+        False, "--force", help="Replace what is at the destination even if tandem did not build it."
+    ),
 ) -> None:
     """Matches `lerobot/droid_1.0.1`'s schema, so the result feeds a π₀.₅-DROID finetune."""
     try:
@@ -36,7 +39,7 @@ def lerobot(
             ),
         ) from exc
 
-    profile = profiles.load(profile_name)
+    profile = profiles.load(profile_name, require_installed=False)
     cfg = settings_mod.load()
 
     repo_id = repo or profile.export.hf_repo
@@ -112,6 +115,7 @@ def lerobot(
             max_episodes=max_episodes,
             token=token,
             on_episode=on_episode,
+            force=force,
         )
 
     theme.blank()
@@ -123,10 +127,9 @@ def lerobot(
         for name, reason in result["skipped"]:
             table.add_row(name, f"[faint]{reason}[/faint]")
         theme.console().print(table)
+    # A build that writes nothing raises, so there is no "nothing to push" left to say here.
     if result["pushed"]:
         theme.ok("Pushed", f"https://huggingface.co/datasets/{repo_id}")
-    elif push:
-        theme.warn("Nothing to push", "no episodes were written")
 
 
 @app.command("manifest", help="Write a JSON index of a profile's trajectories.")
@@ -135,7 +138,7 @@ def manifest(
     out: Path = typer.Option(None, "--out", help="Where to write it (default: stdout)."),
 ) -> None:
     """A dependency-free description of what was collected — handy for custom pipelines."""
-    profile = profiles.load(profile_name)
+    profile = profiles.load(profile_name, require_installed=False)
     items = trajectories.list_all(profile, with_size=True)
     payload = {
         "profile": profile.model_dump(mode="json"),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 
@@ -42,6 +43,31 @@ def root(
         theme.set_no_color(True)
     if debug:
         os.environ["TANDEM_DEBUG"] = "1"
+    _show_profile_notices()
+
+
+class _NoticeHandler(logging.Handler):
+    """A notice about the profiles or the rig (old-layout profiles, and how to move them; a planner's
+    settings kept for one not installed here) as a warning line on stderr.
+
+    stderr, so a `--json` on stdout stays parseable; a handler of tandem's own, so the line looks like
+    every other warning rather than a bare logging record.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        from rich.text import Text
+
+        line = Text()
+        line.append(f"  {theme.WARN} ", style="warn")
+        line.append(record.getMessage())
+        theme.err_console().print(line)
+
+
+def _show_profile_notices() -> None:
+    for name in ("tandem.core.profiles", "tandem.core.rig"):
+        logger = logging.getLogger(name)
+        if not any(isinstance(handler, _NoticeHandler) for handler in logger.handlers):
+            logger.addHandler(_NoticeHandler(logging.WARNING))
 
 
 # Subcommands are imported here (not at module top) so `tandem --help` stays fast and a
@@ -49,10 +75,13 @@ def root(
 from tandem.cli import collect as _collect  # noqa: E402
 from tandem.cli import config as _config  # noqa: E402
 from tandem.cli import doctor as _doctor  # noqa: E402
+from tandem.cli import executors as _executors  # noqa: E402
 from tandem.cli import export as _export  # noqa: E402
 from tandem.cli import init as _init  # noqa: E402
 from tandem.cli import plan as _plan  # noqa: E402
+from tandem.cli import planners as _planners  # noqa: E402
 from tandem.cli import profile as _profile  # noqa: E402
+from tandem.cli import rig as _rig  # noqa: E402
 from tandem.cli import runtime as _runtime  # noqa: E402
 from tandem.cli import traj as _traj  # noqa: E402
 from tandem.cli import ui as _ui  # noqa: E402
@@ -62,11 +91,24 @@ app.command("doctor", help="Check that everything tandem needs is present and wo
 app.command("collect", help="Run a human-in-the-loop collection session.")(_collect.collect)
 app.command("plan", help="Decompose a task from a photo, with no robot and no GPU.")(_plan.plan)
 app.command("ui", help="Serve the web UI for collecting and visualizing trajectories.")(_ui.ui)
-app.add_typer(_profile.app, name="profile", help="Create and manage collection profiles.")
+app.add_typer(_profile.app, name="profile", help="Create and manage collection profiles: one task each.")
+app.add_typer(
+    _rig.app, name="rig", help="This machine's robot, cameras and calibration, shared by every profile."
+)
 app.add_typer(_config.app, name="config", help="Global settings and credentials.")
 app.add_typer(_traj.app, name="traj", help="Inspect collected trajectories.")
 app.add_typer(_export.app, name="export", help="Export trajectories to other dataset formats.")
-app.add_typer(_runtime.app, name="runtime", help="The GPU runtime that `tandem init` builds.")
+app.add_typer(
+    _planners.app,
+    name="planners",
+    help="The task and motion planners tandem can drive: list, install, choose, or scaffold your own.",
+)
+app.add_typer(
+    _executors.app, name="executors", help="Who carries out a human phase: list them, choose one."
+)
+app.add_typer(
+    _runtime.app, name="runtime", help="The runtime of the active profile's planner, which `tandem init` builds."
+)
 
 
 def main() -> None:

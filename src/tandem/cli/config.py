@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
-import subprocess
 import sys
 
 import typer
@@ -14,7 +12,10 @@ from tandem.core import paths, secrets
 from tandem.core import settings as settings_mod
 from tandem.core.errors import TandemError
 
-app = typer.Typer(no_args_is_help=True, help="Global settings and credentials.")
+app = typer.Typer(
+    no_args_is_help=True,
+    help="Global settings and credentials. This machine's robot and cameras are `tandem rig`.",
+)
 
 
 @app.command("list", help="Show every setting and where credentials come from.")
@@ -32,6 +33,7 @@ def list_settings(
                 "runtime_dir": str(cfg.resolved_runtime_dir()),
                 "config_file": str(paths.config_file()),
                 "credentials_file": str(paths.credentials_file()),
+                "rig_file": str(paths.rig_file()),
             },
             "credentials": {
                 "gemini_api_key": {
@@ -57,6 +59,8 @@ def list_settings(
             ("data root", cfg.resolved_data_root()),
             ("runtime", cfg.resolved_runtime_dir()),
             ("profiles", cfg.profiles_root()),
+            ("trajectories", cfg.trajectories_root()),
+            ("rig", f"{paths.rig_file()}  (`tandem rig` changes it)"),
         ]
     )
 
@@ -87,7 +91,11 @@ def set_(
     theme.ok(f"{key} = {settings_mod.get_dotted(updated, key)}", str(path))
 
 
-@app.command("set-gemini-key", help="Store the Gemini API key tiptop's perception uses.")
+@app.command(
+    "set-gemini-key",
+    help="Store the Gemini API key: phase planning uses it, and so does a planner whose perception calls "
+    "Gemini (TiPToP's does).",
+)
 def set_gemini_key(
     from_stdin: bool = typer.Option(
         False,
@@ -147,8 +155,9 @@ def edit() -> None:
     paths.ensure_dir(path.parent)
     if not path.is_file():
         settings_mod.save(settings_mod.load())
-    editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "vi"
-    subprocess.call([editor, str(path)])
+    from tandem.cli.editor import open_in_editor
+
+    open_in_editor(path)
     # Re-read so a syntax error is reported now, not at the next command.
     settings_mod.load(force=True)
     theme.ok("config is valid", str(path))

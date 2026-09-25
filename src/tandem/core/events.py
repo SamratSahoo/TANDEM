@@ -1,7 +1,9 @@
 """The events file the collection driver reports its progress through.
 
-tiptop appends one JSON object per line to ``$TIPTOP_EVENTS_FILE``. That file — not
-screen-scraping the driver's stdin prompts — is how we know what state the session is in.
+The session appends one JSON object per line to its events file, and so do the processes it
+drives: a planner's sidecar (TiPToP's finds it through ``$TIPTOP_EVENTS_FILE``) and the teleop
+driver. That file — not screen-scraping the driver's stdin prompts — is how we know what state
+the session is in.
 It is a deliberately dumb channel, which is why it survives the driver being preempted,
 re-warmed, or handed off to a teleop process mid-task.
 
@@ -19,6 +21,24 @@ re-warmed, or handed off to a teleop process mid-task.
     {"event":"teleop_handoff_warning","message":"…"}
     {"event":"awaiting_teleop_resume"}                 released; blocked on "resume"
     {"event":"teleop_handoff_done"}                    reconnected; about to replan
+
+With phase planning on, tandem's own session file also says what the camera checks found and how
+each trial ended (``tandem.core.phase_loop``, ``tandem.core.session``):
+
+    {"event":"phase_preconditions_checked","phase_index":1,"what":"human phase",
+     "ok":false,"enforced":false,"verdicts":[…]}      ok is null when the check could not run
+    {"event":"human_phase_verified","phase_index":1,"attempt":1,"ok":true,"verdicts":[…]}
+                                                       ok null + "skipped"/"unchecked" when not judged
+    {"event":"phase_effects_checked","phase_index":0,"what":"robot leg","ok":true,…}
+    {"event":"trial_outcome","outcome":"excluded","failure_stage":"verification","reason":"…"}
+                                                       the loop ended the trial itself
+    {"event":"trial_excluded","dir":"…","outcome":"excluded","filed_under":"failure",…}
+                                                       filed without a label prompt
+    {"event":"trial_filed","dir":"…","outcome":"failure","failure_stage":"tamp_execution",…}
+                                                       ended part-way (or "aborted"); no label
+    {"event":"trial_unlabeled","dir":"…","outcome":null,"filed_under":null,…}
+                                                       stopped at the label prompt; left in eval/
+    {"event":"labeled",…,"outcome":"success","failure_stage":null}
 """
 
 from __future__ import annotations
@@ -52,6 +72,21 @@ KNOWN = frozenset(
         "awaiting_teleop_resume",
         "homing",
         "homed",
+        # The phase loop's. A trial the loop ended itself never reaches `awaiting_label`, so
+        # `trial_excluded` (excluded) and `trial_filed` (failed part-way, or aborted) are the only
+        # events that tell a UI why it went back to the task prompt. `trial_unlabeled` is a trial the
+        # session stopped before anybody labeled it, left in eval/ with its phase record.
+        "instruction_not_fully_represented",
+        "awaiting_human_phase",
+        "phase_preconditions_checked",
+        "human_phase_verified",
+        "phase_effects_checked",
+        "phase_plan_failed",
+        "phase_complete",
+        "trial_outcome",
+        "trial_excluded",
+        "trial_filed",
+        "trial_unlabeled",
     }
 )
 

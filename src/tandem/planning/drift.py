@@ -20,7 +20,8 @@ def match_drifted_names(missing: Sequence[str], detected: Sequence[str]) -> dict
 
     The rule is deliberately conservative and needs no extra model call: a name matches when it is a
     whole-word subset of exactly one detected label (or the other way round). Anything ambiguous
-    returns None, and the caller re-plans as before rather than guessing which object was meant.
+    returns None rather than guessing which object was meant, and the phase loop then ends the
+    attempt (``PhaseLoop._rebind``, failure stage ``tamp_planning``).
     """
     available = list(detected)
     mapping: dict[str, str] = {}

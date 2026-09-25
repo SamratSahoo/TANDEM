@@ -1,15 +1,74 @@
 """Shared fixtures.
 
-Every test runs against an isolated config/data root, so nothing touches a real install.
+Every test runs against an isolated config/data root, so nothing touches a real install. The run as a
+whole runs under a home of its own too, and fails if anything was written under the real one anyway
+(``home_guard``).
 """
 
 from __future__ import annotations
 
+# First, before anything reads the environment it remembers.
+import home_guard  # isort: skip
+
 import json
+import shutil
+import tempfile
 from pathlib import Path
 
 import numpy as np
 import pytest
+
+_RUN_ROOT = pytest.StashKey[Path]()
+_BEFORE = pytest.StashKey[dict]()
+_WRITTEN = pytest.StashKey[list]()
+
+
+def pytest_configure(config):
+    """Give the run a home, XDG directories and tandem roots of its own, under a temporary directory.
+
+    ``isolated_env`` does the same for each test, but only for the test: a thread that outlives it --
+    a merge, a session still ending -- runs on after the environment is put back, and resolved the
+    real ~/tandem-data. With this underneath, whatever resolves late still lands somewhere temporary.
+    """
+    root = Path(tempfile.mkdtemp(prefix="tandem-tests-"))
+    config.stash[_RUN_ROOT] = root
+    config.stash[_BEFORE] = home_guard.snapshot()
+    home_guard.apply(root)
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Fail the run if anything was written under the real home's tandem directories while it ran."""
+    config = session.config
+    if _BEFORE not in config.stash:
+        return
+    written = home_guard.changes(config.stash[_BEFORE], home_guard.snapshot())
+    if written:
+        config.stash[_WRITTEN] = written
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    written = config.stash.get(_WRITTEN, None)
+    if not written:
+        return
+    terminalreporter.section("the test run wrote into the real home", sep="!", red=True, bold=True)
+    terminalreporter.line(
+        "Every tandem root is a temporary directory during the run, so something resolved a path outside "
+        "them -- most likely a background thread that outlived its test, or a path read before conftest "
+        "moved HOME. What changed:",
+        red=True,
+    )
+    for line in written[:40]:
+        terminalreporter.line(f"  {line}", red=True)
+    if len(written) > 40:
+        terminalreporter.line(f"  ... and {len(written) - 40} more", red=True)
+
+
+def pytest_unconfigure(config):
+    home_guard.restore()
+    root = config.stash.get(_RUN_ROOT, None)
+    if root is not None:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)
@@ -26,37 +85,66 @@ def isolated_env(tmp_path, monkeypatch):
     for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
         monkeypatch.delenv(name, raising=False)
 
-    # These modules cache the loaded settings; a stale cache leaks one test's config into
-    # the next.
+    # These modules cache what they loaded (the settings, the rig) and say some things once per
+    # process; a stale cache leaks one test's config into the next.
+    from tandem.core import profiles
+    from tandem.core import rig as rig_mod
     from tandem.core import settings as settings_mod
 
-    settings_mod._cache = None
+    def forget() -> None:
+        settings_mod._cache = None
+        rig_mod._cache = None
+        rig_mod._stamp = None
+        rig_mod._noticed.clear()
+        profiles._noticed_old_layout = False
+
+    forget()
     yield tmp_path
-    settings_mod._cache = None
+    forget()
+
+
+#: The rig's cameras in every test that collects: a wrist and a third-person ZED, perception reading the latter.
+RIG_CAMERAS = {"hand": "14846828", "external": "32439448"}
 
 
 @pytest.fixture
-def profile(isolated_env):
-    """A saved profile named `test`, built from the shipped template.
+def machine_rig(isolated_env):
+    """This machine's rig, as a workstation that collects has it: rig.yml with a wrist and an external
+    camera, and extrinsics for both in its calibration.json.
 
-    Extrinsics are filled in for every configured camera: collection refuses to start without
-    them (a serial with no entry aborts at warmup), so a fixture missing them would make every
-    session test fail for a reason that has nothing to do with what it is testing.
+    Extrinsics are filled in for every camera: collection refuses to start without them (a serial with no
+    entry aborts at warmup), so a fixture missing them would make every session test fail for a reason
+    that has nothing to do with what it is testing. Named machine_rig, not rig: a test module has a
+    rig() helper of its own.
     """
-    from tandem import resources
-    from tandem.core import profiles
+    from tandem.core import rig as rig_mod
 
-    prof = profiles.load_file(resources.path("profile_template.yml"), name="test")
-    profiles.save(prof)
-    prof.calibration_file().write_text(
+    rig = rig_mod.update(
+        {
+            "cameras.perception": "external",
+            **{f"cameras.{role}": {"serial": serial} for role, serial in RIG_CAMERAS.items()},
+        }
+    )
+    rig.calibration_file().write_text(
         json.dumps(
-            {
-                camera.serial: {"pose": [0.4, 0.0, 0.6, 0.0, 0.0, 0.0], "timestamp": 0}
-                for camera in prof.cameras.configured().values()
-            },
+            {serial: {"pose": [0.4, 0.0, 0.6, 0.0, 0.0, 0.0], "timestamp": 0} for serial in RIG_CAMERAS.values()},
             indent=2,
         )
     )
+    return rig_mod.load(force=True)
+
+
+@pytest.fixture
+def profile(machine_rig):
+    """A saved profile named `test` (tests/fixtures/profiles/test_v3.yml), on the `machine_rig` rig.
+
+    Not built from the shipped template: that holds whatever settings new profiles should start with, and
+    a test's premises (phase planning off, four TAMP overrides) must not move when it does.
+    """
+    from tandem.core import profiles
+
+    prof = profiles.load_file(Path(__file__).parent / "fixtures" / "profiles" / "test_v3.yml", name="test")
+    profiles.save(prof)
     return prof
 
 

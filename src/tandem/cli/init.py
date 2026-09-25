@@ -1,25 +1,31 @@
 """`tandem init` — the onboarding wizard.
 
+It sets the machine up -- the planner and its runtime, the Gemini key, the rig (the robot's address,
+the arm, the cameras), teleop -- and adds the paper's five tasks as profiles. Everything a profile holds
+is a task; everything asked about this machine goes to the rig, which every profile shares.
+
 Idempotent and resumable: every step checks its own postcondition first and says
 "already done" rather than redoing work. Interrupting it and re-running is safe — cuRobo's
 build fingerprint means even the expensive kernel compile is skipped when nothing changed.
+Without a terminal (or with --yes) it asks nothing: --robot-host, --robot-type and --camera say
+what it would have asked.
 """
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import typer
 
-from tandem import resources
 from tandem.cli import runtime as runtime_cli
 from tandem.cli import theme
-from tandem.core import importers, paths, probe, profiles, secrets
-from tandem.core import runtime as runtime_mod
+from tandem.core import layout, paths, probe, profiles, secrets
+from tandem.core import rig as rig_mod
 from tandem.core import settings as settings_mod
-from tandem.core.errors import TandemError
+from tandem.core.errors import ProfileError, TandemError, one_line
+from tandem.planners import registry
 
 
 def init(
@@ -29,17 +35,34 @@ def init(
         help="Set up for browsing and visualizing trajectories only — no GPU runtime, no robot.",
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Accept every default; ask nothing."),
-    repair: bool = typer.Option(False, "--repair", help="Redo steps that are already done."),
-    profile_name: str = typer.Option("default", "--profile", help="Name for the profile to create."),
-    import_from: Path = typer.Option(
+    repair: bool = typer.Option(
+        False,
+        "--repair",
+        help="Redo steps that are already done: rebuild the planner's runtime, and ask again for the key, "
+        "the robot and cameras, and the teleop settings. No profile is ever touched by it.",
+    ),
+    planner: str = typer.Option(
         None,
-        "--import-from",
-        help="Import robot, camera and TAMP settings from a hitl-tamp-vla checkout.",
-        exists=True,
-        file_okay=False,
+        "--planner",
+        help="The planner to set this machine up for, and the one new profiles get (see `tandem planners "
+        "list`). Default: the machine's default (tiptop).",
+    ),
+    profile_name: str = typer.Option(
+        None, "--profile", help="Make this profile the active one (default: keep it, else cover-bread-rolls)."
+    ),
+    robot_host: str = typer.Option(
+        None, "--robot-host", help="The robot computer's address (the NUC), such as 172.16.0.2."
+    ),
+    robot_type: str = typer.Option(None, "--robot-type", help="The arm, such as fr3_robotiq or panda_robotiq."),
+    cameras: list[str] = typer.Option(
+        None,
+        "--camera",
+        help="A camera's serial by role: hand=SERIAL, external=SERIAL or external_2=SERIAL. Repeatable.",
     ),
 ) -> None:
     interactive = theme.is_tty() and not yes
+    # Checked before anything is asked or built: a typo in a flag is said now, not after a twenty-minute build.
+    rig_flags = _rig_flags(robot_host=robot_host, robot_type=robot_type, cameras=cameras or [])
     theme.banner("setup")
 
     cfg = settings_mod.load()
@@ -63,23 +86,8 @@ def init(
     theme.rule("checking this machine")
     checks = _preflight(viz_only=viz_only)
     _render_checks(checks)
-
-    blocking = [c for c in checks if c.state == probe.FAIL]
-    if blocking and not viz_only:
-        theme.blank()
-        for check in blocking:
-            theme.fail(check.name, check.detail)
-            if check.hint:
-                theme.console().print(f"    [faint]{check.hint}[/faint]")
-        theme.blank()
-        if interactive:
-            if not typer.confirm("  Continue anyway?", default=False):
-                raise typer.Abort()
-        else:
-            raise TandemError(
-                "Preflight found blocking problems: " + ", ".join(c.name for c in blocking),
-                hint="Fix them and re-run `tandem init`, or use --viz-only for a laptop setup.",
-            )
+    if not viz_only:
+        _stop_on_blocking(checks, interactive=interactive, unapplied=rig_flags)
     theme.blank()
 
     # ---- 3. where data lives ------------------------------------------------
@@ -94,36 +102,63 @@ def init(
     theme.ok("Data root", str(data_root))
     theme.blank()
 
-    # ---- 4. the GPU runtime -------------------------------------------------
-    if not viz_only:
-        theme.rule("gpu runtime")
-        runtime = runtime_mod.Runtime(cfg.resolved_runtime_dir())
-        status = runtime.status()
+    # ---- 3b. profiles in the layout before version 3 ------------------------
+    # Before anything reads the profiles: until they are moved they are not loaded at all, and the rig
+    # this machine needs is set up from them when it has none yet.
+    if layout.pending():
+        from tandem.cli import profile as profile_cli
 
-        if status.ready and not repair:
-            theme.ok("Runtime is already built", str(runtime.root))
-        else:
-            if probe.find_pixi() is None:
-                theme.info("pixi is the environment manager the planner stack needs.")
-                theme.info("It installs to ~/.pixi and touches nothing else.")
-                if interactive and not typer.confirm("  Install pixi now?", default=True):
-                    raise TandemError(
-                        "pixi is required to build the runtime.",
-                        hint="Install it from https://pixi.sh, then re-run `tandem init`.",
-                    )
-                theme.busy("Installing pixi")
-                runtime_cli.install_pixi(log=lambda _line: None)
-                theme.ok("pixi installed")
-
-            theme.info("Building the planner stack: torch, cuRobo (CUDA kernels), cuTAMP, tiptop.")
-            theme.info("The first build compiles 5 CUDA extensions and takes 5–20 minutes.")
-            if interactive and not typer.confirm("  Build it now?", default=True):
-                theme.warn("Skipped", "run `tandem runtime build` when you are ready")
-            else:
-                runtime_cli.run_build(runtime, force=repair)
+        theme.rule("profiles in the old layout")
+        report = profile_cli.run_migration()
+        if report is not None and report.aborted is not None:
+            # The rig comes from these profiles, and every later step reads the rig: nothing is set up over it.
+            raise report.aborted
+        if report is not None and report.failed:
+            theme.warn(
+                f"{len(report.failed)} profile(s) could not be moved, or only partly",
+                "`tandem profile migrate` again once each is fixed",
+            )
         theme.blank()
 
-    # ---- 5. the Gemini key --------------------------------------------------
+    # After the data root is settled and old profiles are moved, before twenty minutes go into a build.
+    if profile_name is not None:
+        _check_profile_to_activate(profile_name)
+
+    # ---- 4. the rig: this machine's robot and cameras -----------------------
+    # Before the planner's checks and its build: it needs no GPU, and --robot-host and --camera given to an
+    # init that a missing driver then stops are written all the same, not dropped without a word.
+    if not viz_only:
+        theme.rule("robot and cameras")
+        _setup_rig(rig_flags, interactive=interactive, repair=repair)
+        theme.blank()
+    elif rig_flags:
+        theme.warn(
+            "--robot-host, --robot-type and --camera were not applied",
+            "a visualization-only machine has no robot; `tandem rig set` sets them on one that does",
+        )
+
+    # ---- 5. the planner -----------------------------------------------------
+    # Chosen before anything is built: the runtime step builds THIS planner's runtime. A laptop builds
+    # nothing; a planner named on its command line is still made the one its new profiles get.
+    if not viz_only:
+        theme.rule("planner")
+        planner = _choose_planner(planner, interactive=interactive)
+        _planner_preflight(planner, interactive=interactive, repair=repair)
+        theme.blank()
+    if planner is not None:
+        from tandem.cli import planners as planners_cli
+
+        # The planner this machine is for, so the one its new profiles get. No existing profile is
+        # switched: that is `tandem planners use`, and a profile's planner is its own.
+        planners_cli.set_default_planner(planner)
+
+    # ---- 6. the planner's runtime -------------------------------------------
+    if not viz_only:
+        theme.rule("planner runtime")
+        _build_runtime(planner, interactive=interactive, repair=repair)
+        theme.blank()
+
+    # ---- 7. the Gemini key --------------------------------------------------
     theme.rule("gemini api key")
     source = secrets.gemini_key_source()
     if source != "none" and not repair:
@@ -131,8 +166,8 @@ def init(
     elif viz_only:
         theme.info("Not needed for visualization — skipping.")
     else:
-        theme.info("Perception calls Gemini once per rollout to turn the task string")
-        theme.info("into object bounding boxes and goal predicates.")
+        theme.info("Phase planning asks Gemini to split each task into steps and to check each human one,")
+        theme.info("and a planner may call it too (TiPToP's perception does, every rollout).")
         theme.info("Get a key at https://aistudio.google.com/apikey")
         if interactive:
             key = typer.prompt("  Gemini API key (blank to skip)", default="", hide_input=True).strip()
@@ -145,49 +180,178 @@ def init(
             theme.warn("No key set", "run `tandem config set-gemini-key`")
     theme.blank()
 
-    # ---- 6. the first profile -----------------------------------------------
-    theme.rule("profile")
-    if profiles.exists(profile_name) and not repair:
-        theme.ok(f"Profile {profile_name!r} already exists", str(profiles.profiles_root() / profile_name))
-    else:
-        _create_profile(
-            profile_name, import_from=import_from, interactive=interactive, viz_only=viz_only
-        )
-    cfg = settings_mod.load()
-    cfg.active_profile = profile_name
-    settings_mod.save(cfg)
+    # ---- 8. the paper's five tasks, and the active profile ------------------
+    theme.rule("profiles")
+    active = _setup_profiles(profile_name)
+    if planner is not None and not viz_only:
+        _say_when_the_planners_differ(active, planner)
     theme.blank()
 
-    # ---- 7. teleop hand-off (optional) --------------------------------------
+    # ---- 9. teleop hand-off (optional) --------------------------------------
     if not viz_only:
         theme.rule("teleop hand-off  (optional)")
         _setup_teleop(interactive=interactive, repair=repair)
         theme.blank()
 
-    # ---- 8. done ------------------------------------------------------------
-    _summary(viz_only=viz_only, profile_name=profile_name)
+    # ---- 10. done -----------------------------------------------------------
+    _summary(viz_only=viz_only, profile_name=active, planner=planner)
 
 
 # --------------------------------------------------------------------------- steps
 
 
-def _preflight(*, viz_only: bool) -> list[probe.Check]:
-    cfg = settings_mod.load()
-    checks = [probe.check_python(), probe.check_platform()]
-    if viz_only:
-        checks.append(probe.check_ffmpeg())
-        return checks
+def _choose_planner(requested: str | None, *, interactive: bool) -> str:
+    """Which planner this machine is set up for: the catalog shown, one chosen, and checked.
 
-    checks += [
-        probe.check_nvidia_driver(),
-        probe.check_cuda_runtime(),
-        probe.check_nvcc(),
-        probe.check_disk(cfg.resolved_runtime_dir()),
-        probe.check_pixi(),
-        probe.check_ffmpeg(),
-        probe.check_zed_sdk(),
-    ]
+    ``--planner`` wins; otherwise the machine's default, which at a terminal with more than one planner
+    to choose from is offered as the answer to a question. Whichever it is becomes the default, so a
+    re-run sets the same planner up again and new profiles plan with it. The choice is checked against
+    the registry here, before twenty minutes go into a runtime.
+    """
+    from tandem.cli import planners as planners_cli
+
+    payload = planners_cli.catalog_payload()
+    planners_cli.render_catalog(payload["planners"])
+    for row in payload["planners"]:
+        if row["status"] == planners_cli.BROKEN:
+            theme.fail(f"{row['name']}: {row['detail']}")
+
+    usable = [row["name"] for row in payload["planners"] if row["ok"]]
+    if requested:
+        choice = requested
+    elif interactive and len(usable) > 1:
+        default = payload["default_planner"] if payload["default_planner"] in usable else usable[0]
+        choice = typer.prompt("  Planner", default=default).strip()
+    else:
+        choice = payload["default_planner"]
+
+    info = registry.info(choice)  # unknown or broken: the registry's own error, with the nearest name
+    theme.ok(f"Planner: {info.title}", "new profiles plan with it")
+    return choice
+
+
+def _build_runtime(planner: str, *, interactive: bool, repair: bool) -> None:
+    """Build ``planner``'s runtime, with the optional steps its recipe can take on this machine.
+
+    The consent flow for pixi and the build itself are `tandem planners install`'s (``cli/runtime``),
+    so the wizard and the command cannot drift apart. `init` is "accept every default" when it cannot
+    ask, so without a terminal it installs pixi rather than failing. A runtime that is built but has an
+    optional step it can take now -- the ZED Python API, once the ZED SDK is installed -- is built again,
+    which does that step and skips everything already done.
+    """
+    planner, runtime = runtime_cli.planner_runtime(planner=planner)
+    title = registry.info(planner).title
+    if runtime is None:
+        theme.ok(f"{title} is pure Python", "there is no runtime to build")
+        return
+    status = runtime.status()
+    pending = runtime_cli.optional_steps_to_run(runtime)
+
+    if status.installed and not repair and not pending:
+        theme.ok("Runtime is already built", str(status.path))
+        runtime_cli.say_notes(status)
+        return
+
+    if runtime_cli.needs_pixi(runtime):
+        runtime_cli.ensure_pixi(title, ask=interactive, allowed=True)
+
+    if status.installed and not repair:
+        theme.ok("Runtime is already built", f"{status.path}; now installing {', '.join(pending)}")
+    else:
+        for note in getattr(getattr(runtime, "recipe", None), "notes", ()) or ():
+            theme.info(note)
+    if interactive and not typer.confirm("  Build it now?", default=True):
+        theme.warn("Skipped", f"run `tandem planners install {planner}` when you are ready")
+    else:
+        runtime_cli.run_build(runtime, force=repair, planner=planner)
+
+
+def _preflight(*, viz_only: bool) -> list[probe.Check]:
+    """What tandem itself needs of the machine. What the planner needs is asked once it is chosen.
+
+    Disk space and pixi are not asked here. They are what a planner's RUNTIME needs, and before the
+    planner is chosen there is no telling whether it has one: a pure-Python planner needs neither, and
+    stopping on a missing pixi before init has had the chance to install it stopped `init --yes` on
+    every fresh machine.
+    """
+    checks = [probe.check_python(), probe.check_platform()]
+    checks.append(probe.check_ffmpeg())
     return checks
+
+
+def _runtime_checks(planner: str, *, repair: bool) -> list[probe.Check]:
+    """Disk and pixi, for the chosen planner's runtime only, and only when it is about to be built.
+
+    A missing pixi is not a blocking problem here: the runtime step installs it (with consent at a
+    terminal, and under --yes without asking, as "accept every default" promises).
+    """
+    cfg = settings_mod.load()
+    try:
+        rt = registry.runtime(planner, cfg)
+    except Exception:  # the runtime step reports a planner whose runtime cannot be located
+        return []
+    if rt is None:
+        return [probe.Check("runtime", probe.SKIP, f"not needed · {planner} is pure Python", group="runtime")]
+    status = rt.status()
+    if status.installed and not repair:
+        return []
+    checks = [probe.check_disk(Path(status.path) if status.path else cfg.resolved_runtime_dir())]
+    if runtime_cli.needs_pixi(rt):
+        pixi = probe.check_pixi()
+        if pixi.state == probe.FAIL:
+            pixi = probe.Check("pixi", probe.WARN, "not found · init installs it, into ~/.pixi", group="runtime")
+        checks.append(pixi)
+    return checks
+
+
+def _planner_preflight(planner: str, *, interactive: bool, repair: bool = False) -> None:
+    """What the chosen planner needs of this machine -- disk and pixi for its runtime, a GPU, a camera SDK
+    -- before its runtime is built.
+
+    The runtime's needs as `tandem doctor` asks them, then the planner's own doctor checks, with no
+    profile yet: they are the only ones that know. Stops on a failure the same way the machine checks
+    do, so twenty minutes are not spent building a runtime that cannot run here.
+    """
+    checks = _runtime_checks(planner, repair=repair)
+    checks += registry.doctor_checks(planner, None, settings=settings_mod.load(), probe_hardware=True)
+    if not checks:
+        return
+    theme.blank()
+    theme.info(f"what {registry.info(planner).title} needs of this machine")
+    _render_checks(checks)
+    _stop_on_blocking(checks, interactive=interactive)
+
+
+def _stop_on_blocking(
+    checks: list[probe.Check], *, interactive: bool, unapplied: dict[str, Any] | None = None
+) -> None:
+    """Stop on a failed check: asked at a terminal, refused without one. ``unapplied``: the rig flags this
+    stop leaves unwritten, which the refusal says rather than drop them without a word."""
+    blocking = [c for c in checks if c.state == probe.FAIL]
+    if not blocking:
+        return
+    theme.blank()
+    for check in blocking:
+        theme.fail(check.name, check.detail)
+        if check.hint:
+            theme.console().print(f"    [faint]{check.hint}[/faint]")
+    theme.blank()
+    if interactive:
+        if not typer.confirm("  Continue anyway?", default=False):
+            raise typer.Abort()
+    else:
+        runtime_only = all(c.group == "runtime" for c in blocking)
+        raise TandemError(
+            "Preflight found blocking problems: " + ", ".join(c.name for c in blocking),
+            hint="Fix them and re-run `tandem init`."
+            + ("" if runtime_only else " On a laptop, --viz-only sets up for browsing only.")
+            + (
+                " --robot-host, --robot-type and --camera were not applied: give them again then, or "
+                "`tandem rig set KEY VALUE` now."
+                if unapplied
+                else ""
+            ),
+        )
 
 
 def _render_checks(checks: list[probe.Check]) -> None:
@@ -200,79 +364,212 @@ def _render_checks(checks: list[probe.Check]) -> None:
     theme.console().print(table)
 
 
-def _create_profile(
-    name: str, *, import_from: Path | None, interactive: bool, viz_only: bool = False
-) -> None:
-    calibration: dict = {}
-    notes: list[str] = []
-
-    if import_from is None and interactive:
-        theme.info("A profile holds the robot, the cameras, the task and the TAMP settings.")
-        guess = _guess_monorepo()
-        if guess is not None:
-            prompt = f"  Import settings from {guess}?"
-            if typer.confirm(prompt, default=True):
-                import_from = guess
-
-    if import_from is not None:
-        tamp_config = None
-        options = importers.list_tamp_configs(import_from)
-        if options and interactive:
-            theme.info(f"{len(options)} TAMP config(s) found in that checkout.")
-            for i, path in enumerate(options[:12], 1):
-                theme.console().print(f"    [accent]{i:>2}[/accent]  [faint]{path.stem}[/faint]")
-            if len(options) > 12:
-                theme.console().print(f"    [faint]… and {len(options) - 12} more[/faint]")
-            answer = typer.prompt("  Import one? (number, or blank for none)", default="").strip()
-            if answer.isdigit() and 1 <= int(answer) <= len(options):
-                tamp_config = options[int(answer) - 1]
-        profile, calibration, notes = importers.build_profile(
-            name, root=import_from, tamp_config=tamp_config
-        )
-        origin = f"imported from {import_from}"
-    else:
-        profile = profiles.load_file(resources.path("profile_template.yml"), name=name)
-        origin = "from the built-in template"
-
-    if viz_only and import_from is None:
-        # On a laptop a profile is just a folder of trajectories collected elsewhere. Keeping
-        # the template's cameras would mean warning about extrinsics for hardware that is not
-        # here and never will be.
-        profile.cameras = profiles.CamerasSpec()
-        profile.description = profile.description or "trajectories collected elsewhere"
-
-    if interactive:
-        profile.task.prompt = typer.prompt("  Task prompt", default=profile.task.prompt).strip()
-
-    path = profiles.save(profile)
-    if calibration:
-        profile.calibration_file().write_text(json.dumps(calibration, indent=2) + "\n")
-
-    theme.ok(f"Created profile {name!r}", origin)
-    theme.info(str(path))
-    for note in notes:
-        theme.info(note)
-
-    missing = profiles.missing_calibration(profile)
-    if missing:
-        theme.warn(
-            f"No extrinsics for camera serial(s) {', '.join(missing)}",
-            "collection will refuse to start until they exist",
-        )
+# --------------------------------------------------------------------------- the rig
 
 
-def _guess_monorepo() -> Path | None:
-    """Look for a hitl-tamp-vla checkout next to the current directory.
+def _rig_flags(*, robot_host: str | None, robot_type: str | None, cameras: list[str]) -> dict[str, Any]:
+    """``--robot-host``, ``--robot-type`` and ``--camera ROLE=SERIAL`` as rig changes, each checked as typed."""
+    import difflib
 
-    Only a suggestion — it is always confirmed before anything is read.
+    changes: dict[str, Any] = {}
+    if robot_host is not None:
+        changes["robot.host"] = _checked_rig_value("robot.host", robot_host)
+    if robot_type is not None:
+        changes["robot.type"] = _checked_rig_value("robot.type", robot_type)
+    for given in cameras:
+        role, sep, serial = given.partition("=")
+        role, serial = role.strip(), serial.strip()
+        if not sep or not serial:
+            raise TandemError(
+                f"--camera {given!r} is not ROLE=SERIAL.",
+                hint="For example --camera hand=14846828 --camera external=32439448.",
+            )
+        if role not in rig_mod.ROLES:
+            close = difflib.get_close_matches(role, rig_mod.ROLES, n=1, cutoff=0.5)
+            raise TandemError(
+                f"--camera {given!r}: {role!r} is not a camera role"
+                + (f" (did you mean {close[0]!r}?)." if close else "."),
+                hint=f"The roles are {', '.join(rig_mod.ROLES)}.",
+            )
+        changes[f"cameras.{role}.serial"] = _checked_rig_value(f"cameras.{role}.serial", serial)
+    return changes
+
+
+def _checked_rig_value(key: str, value: str) -> str:
+    """``value`` for the rig's ``key``, or a TandemError saying what is wrong with it -- before it is written."""
+    from pydantic import ValidationError
+
+    field = key.rsplit(".", 1)[-1]
+    model = rig_mod.RobotSpec if key.startswith("robot.") else rig_mod.CameraSpec
+    try:
+        model.model_validate({field: value} if model is rig_mod.RobotSpec else {"serial": value})
+    except ValidationError as exc:
+        problem = "; ".join(str(err["msg"]).removeprefix("Value error, ") for err in exc.errors())
+        raise TandemError(f"{key}: {problem}") from None
+    return value.strip()
+
+
+def _setup_rig(flags: dict[str, Any], *, interactive: bool, repair: bool) -> None:
+    """This machine's rig: the robot's address and arm, and the cameras by role.
+
+    Asked at a terminal when there is no rig yet (and again with --repair), each question defaulting to
+    what the rig says now; the flags are applied either way, and are the defaults of the questions. One
+    write, validated whole. A rig already there is otherwise left as it is and shown: `tandem rig set`
+    changes one setting at any time.
+
+    A planner's machine settings are not written: its defaults stay its own (so a later tandem's better
+    default reaches this machine), and `tandem rig show` lists each with its default beside the ones set.
     """
-    here = Path.cwd().resolve()
-    for base in (here, *here.parents):
-        for name in ("hitl-tamp-vla", "tamp-vla"):
-            candidate = base / name
-            if candidate.is_dir() and importers.find_sources(candidate)["tiptop_config"]:
-                return candidate
-    return None
+    from tandem.cli import rig as rig_cli
+
+    layout.refuse_rig_change()  # old profiles that could not be moved still hold this machine's rig
+    existed = rig_mod.exists()
+    rig = rig_mod.load()  # a rig.yml that does not validate stops here, naming the line and `tandem rig edit`
+    asked = interactive and (not existed or repair)
+    changes = dict(flags)
+    if asked:
+        changes.update(_ask_rig(rig, flags))
+    changes = {key: value for key, value in changes.items() if _differs(rig, key, value)}
+    if changes or not existed:
+        rig = rig_mod.update(changes)
+    rig_mod.ensure_calibration_file(rig)  # a planner's calibration script writes into it
+
+    theme.ok(
+        f"Rig: {rig.summary()}",
+        str(rig.file()) if asked or not existed else f"{rig.file()} · `tandem rig set KEY VALUE` changes a setting",
+    )
+    configured = rig.cameras.configured()
+    if configured:
+        missing = rig.missing_calibration()
+        theme.info(
+            "cameras: " + ", ".join(f"{role} {cam.serial}" for role, cam in configured.items()),
+            f"{len(configured) - len(missing)} of {len(configured)} with extrinsics in {rig.calibration_file()}",
+        )
+    else:
+        theme.warn(
+            "No cameras yet: this machine cannot collect until it has them",
+            "`tandem rig set cameras.hand.serial SERIAL` and `tandem rig set cameras.external.serial SERIAL`",
+        )
+    # What the planner says will stop it collecting on this rig -- extrinsics it reads that are missing, an arm
+    # it does not drive -- in its own words, with its own fix.
+    rig_cli.warn_planner_rig_checks()
+
+
+def _ask_rig(rig: rig_mod.Rig, flags: dict[str, Any]) -> dict[str, Any]:
+    """The rig's questions, each defaulting to what a flag gave, else to what the rig says now."""
+    changes: dict[str, Any] = {}
+    changes["robot.host"] = _ask("Robot address (the NUC)", "robot.host", flags.get("robot.host", rig.robot.host))
+    changes["robot.type"] = _ask("Arm type", "robot.type", flags.get("robot.type", rig.robot.type))
+    labels = {"hand": "Wrist camera serial", "external": "External camera serial", "external_2": "Second external camera serial"}
+    for role in rig_mod.ROLES:
+        cam = getattr(rig.cameras, role)
+        current = flags.get(f"cameras.{role}.serial", cam.serial if cam is not None else NONE)
+        serial = _ask(f"{labels[role]} ('{NONE}' if there is none)", f"cameras.{role}.serial", current, blank=True)
+        if serial == NONE:
+            changes[f"cameras.{role}"] = None
+        else:
+            changes[f"cameras.{role}.serial"] = serial
+    perception = rig.cameras.perception
+    while True:
+        answer = typer.prompt("  Which camera does perception read? [external/hand]", default=perception).strip()
+        if answer in ("external", "hand"):
+            break
+        theme.warn(f"{answer!r} is neither external nor hand")
+    changes["cameras.perception"] = answer
+    return changes
+
+
+#: What a camera question takes for "this machine has no such camera".
+NONE = "none"
+
+
+def _ask(label: str, key: str, default: str, *, blank: bool = False) -> str:
+    """One rig question, asked again until the answer is a value the rig takes."""
+    while True:
+        answer = typer.prompt(f"  {label}", default=default).strip()
+        if blank and answer.lower() in (NONE, ""):
+            return NONE
+        try:
+            return _checked_rig_value(key, answer)
+        except TandemError as exc:
+            theme.warn(exc.message)
+
+
+def _differs(rig: rig_mod.Rig, key: str, value: Any) -> bool:
+    """Whether setting ``key`` to ``value`` changes the rig: an unchanged answer leaves the file alone."""
+    node: Any = rig.model_dump(mode="python")
+    for part in key.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return value is not None
+        node = node[part]
+    return node != value
+
+
+# --------------------------------------------------------------------------- profiles
+
+
+def _setup_profiles(requested: str | None) -> str:
+    """Add the paper's five tasks that are missing, and settle the active profile. Returns its name.
+
+    `--profile` if given (it must exist), else the active profile when it exists, else the first of the
+    paper's. None of them is ever overwritten: once copied, a profile is its owner's.
+    """
+    written = profiles.seed_builtins()
+    if written:
+        theme.ok(
+            f"Added the paper's {'five tasks' if len(written) == len(profiles.BUILTIN) else ', '.join(written)}",
+            str(profiles.profiles_root()),
+        )
+    elif not profiles.held_back():
+        theme.ok("The paper's five tasks are here", str(profiles.profiles_root()))
+    for name in profiles.held_back():
+        theme.warn(
+            f"{name} was not added: a profile of that name is still in the old layout",
+            "`tandem profile migrate` moves it; `tandem init` again then adds the rest",
+        )
+
+    cfg = settings_mod.load()
+    if requested is not None:
+        _check_profile_to_activate(requested)
+        active = requested
+    elif profiles.exists(cfg.active_profile):
+        active = cfg.active_profile
+    else:
+        active = profiles.BUILTIN[0]
+    if cfg.active_profile != active:
+        cfg.active_profile = active
+        settings_mod.save(cfg)
+    theme.ok(f"Active profile: {active}", "`tandem profile use NAME` switches")
+    return active
+
+
+def _check_profile_to_activate(name: str) -> None:
+    """--profile names a profile that exists, or one of the paper's (which the profiles step adds)."""
+    if profiles.exists(name) or name in profiles.BUILTIN:
+        return
+    import difflib
+
+    known = sorted({*profiles.list_names(), *profiles.BUILTIN})
+    close = difflib.get_close_matches(name, known, n=1, cutoff=0.6)
+    raise ProfileError(
+        f"--profile {name!r}: there is no such profile to make active.",
+        hint=(f"Did you mean {close[0]!r}? " if close else "")
+        + f'`tandem profile create {name} --prompt "..."` makes it; `tandem profile list` shows the rest.',
+    )
+
+
+def _say_when_the_planners_differ(active: str, planner: str) -> None:
+    """A machine set up for one planner, whose active profile plans with another, is told how to line them up."""
+    try:
+        backend = profiles.load(active, require_installed=False).planner.backend
+    except TandemError:
+        return
+    if backend != planner:
+        theme.info(
+            f"Profile {active!r} plans with {backend}, and this machine is set up for {planner}",
+            f'`tandem profile create NAME --prompt "..." --use` makes a profile that plans with {planner}; '
+            f"`tandem planners use {planner}` switches this one",
+        )
 
 
 def _setup_teleop(*, interactive: bool, repair: bool) -> None:
@@ -310,20 +607,32 @@ def _setup_teleop(*, interactive: bool, repair: bool) -> None:
     theme.ok("Teleop hand-off enabled", cfg.teleop.droid_dir)
 
 
-def _summary(*, viz_only: bool, profile_name: str) -> None:
+def _summary(*, viz_only: bool, profile_name: str, planner: str | None) -> None:
     cfg = settings_mod.load()
     theme.rule("ready")
+    try:
+        planner, runtime = runtime_cli.planner_runtime(planner=planner, profile_name=profile_name)
+        where = runtime.status().path if runtime is not None else "none needed (pure Python)"
+    except TandemError as exc:
+        planner, where = "unknown", one_line(exc.message)
+    if rig_mod.exists():
+        rig_row = f"{paths.rig_file()}"
+    else:
+        rig_row = "none (visualization only)" if viz_only else "not written"
     theme.kv(
         [
             ("profile", profile_name),
+            ("planner", planner),
             ("data root", cfg.resolved_data_root()),
-            ("runtime", "not installed (visualization only)" if viz_only else cfg.resolved_runtime_dir()),
+            ("rig", rig_row),
+            ("runtime", "not installed (visualization only)" if viz_only else where),
             ("config", paths.config_file()),
         ]
     )
     steps = [("tandem doctor", "confirm everything is wired up")]
     if not viz_only:
-        steps.append(("tandem collect", "run a collection session in the terminal"))
+        steps.append(("tandem collect", f"collect with {profile_name}"))
+        steps.append(('tandem profile create NAME --prompt "..."', "a task of your own, with the paper's settings"))
     steps.append(("tandem ui", "browse and visualize trajectories in the browser"))
     theme.next_steps(steps)
     theme.blank()

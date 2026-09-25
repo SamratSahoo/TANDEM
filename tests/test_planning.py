@@ -51,6 +51,13 @@ PLAN_RESPONSE = {
             "description": "open the box",
             "instructions": "Open the white_box and fold its flaps back.",
             "atoms": [{"predicate": "IsOpen", "args": ["white_box"]}],
+            "operator": {
+                "name": "Open",
+                "args": ["white_box"],
+                "preconditions": [{"predicate": "HandEmpty", "args": []}],
+                "add_effects": [{"predicate": "IsOpen", "args": ["white_box"]}],
+                "delete_effects": [],
+            },
         },
         {
             "executor": "robot",
@@ -90,12 +97,7 @@ def test_the_prompt_actually_contains_the_instruction():
     # the response parses, validates, and plans perfectly well; it is just answering another question.
     from tandem.planning.prompts import plan_prompt
 
-    prompt = plan_prompt(
-        "open the box and put the toy in it",
-        ["blue_toy", "white_box"],
-        predicate_menu=CAPS.predicate_menu(),
-        robot_description=CAPS.robot_description,
-    )
+    prompt = plan_prompt("open the box and put the toy in it", ["blue_toy", "white_box"], caps=CAPS)
     assert "open the box and put the toy in it" in prompt
     assert "blue_toy" in prompt and "white_box" in prompt
 
@@ -446,6 +448,15 @@ SORT_RESPONSE = {
             "description": "cover both bowls with the cloth",
             "instructions": "Drape the blue_cloth over both bowls.",
             "atoms": [{"predicate": "AreCoveredBy", "args": ["blue_bowl", "green_bowl", "blue_cloth"]}],
+            "operator": {
+                "name": "Drape",
+                "args": ["blue_cloth", "blue_bowl", "green_bowl"],
+                "preconditions": [{"predicate": "HandEmpty", "args": []}],
+                "add_effects": [
+                    {"predicate": "AreCoveredBy", "args": ["blue_bowl", "green_bowl", "blue_cloth"]}
+                ],
+                "delete_effects": [],
+            },
         },
     ],
 }
@@ -517,7 +528,10 @@ def test_a_run_stops_at_a_phase_moving_an_object_the_run_already_moved():
 
 def test_a_backend_that_allows_repeated_picks_conjoins_them_anyway():
     # The stopping rule is the backend's declaration, not a fact about every planner. One that can
-    # pick the same object twice in a plan says so, and the same two phases become one goal.
+    # pick the same object twice in a plan says so, and the same two phases become one goal -- as
+    # long as it also declares no exclusivity. With TipTop's `On: 0` the conjoined goal holds the toy
+    # in two places at once, which stops the run whatever one_pick_per_object says
+    # (tests/test_review_method.py); this backend's goal language says no such thing.
     import dataclasses
 
     spec = parse(
@@ -534,7 +548,7 @@ def test_a_backend_that_allows_repeated_picks_conjoins_them_anyway():
             },
         )
     )
-    caps = dataclasses.replace(CAPS, one_pick_per_object=False)
+    caps = dataclasses.replace(CAPS, one_pick_per_object=False, exclusive_arguments={})
     walk = PhasePlan(cfg=CFG, caps=caps, instruction=spec.instruction, trajectory_id="t", spec=spec)
     assert len(walk.robot_run()) == 2
 
@@ -557,22 +571,19 @@ def test_a_leg_is_not_gated_on_an_object_only_a_later_human_phase_names():
     assert "blue_cloth" in walk.objects_needed_now()
 
 
-def test_a_name_the_plan_already_owns_is_never_a_re_binding_candidate():
-    # The re-binding pool is `detected - scene_types.all_names`, NOT `detected - objects_named()`.
-    # objects_named() covers only the phases still to come, so an object named solely by a COMPLETED
-    # phase drops out of it while remaining a plan object -- and offering it as a target lets
-    # match_drifted_names fold two objects into one, pointing this leg at the thing the robot has
-    # already put away.
+def test_a_name_the_plan_already_owns_stays_the_plans_after_its_phase_is_done():
+    # The facts the re-binding pool rests on. The pool is `detected - scene_types.all_names`, NOT
+    # `detected - objects_named()`: objects_named() covers only the phases still to come, so an object
+    # named solely by a COMPLETED phase drops out of it while remaining a plan object -- and offering it
+    # as a target lets match_drifted_names fold two objects into one, pointing this leg at the thing the
+    # robot has already put away. The pool itself is tested through the loop, in tests/test_rebind_pool.py.
     walk = _sort_walk()
     walk.advance()  # both robot phases done; only the human phase remains
 
     owned = walk.spec.scene_types.all_names
     assert {"blue_toy", "green_toy"} <= owned, "the sorted toys are still the plan's objects"
     assert not ({"blue_toy", "green_toy"} & walk.objects_named()), "but no remaining phase names them"
-
-    detected = {"blue_toy", "green_toy", "blue_bowl", "green_bowl", "table", "red_ball"}
-    assert sorted(detected - owned) == ["red_ball"]
-    # The rule the guard rests on: a nested pair would otherwise match.
+    # The rule the guard is there for: a nested pair would otherwise match.
     assert match_drifted_names(["green_toy"], ["toy"]) == {"green_toy": "toy"}
 
 
@@ -619,6 +630,17 @@ def test_only_camera_settleable_atoms_are_put_to_the_model():
                     {"predicate": "On", "args": ["blue_toy", "table"]},
                     {"predicate": "HandEmpty", "args": []},
                 ],
+                "operator": {
+                    "name": "Open",
+                    "args": ["white_box"],
+                    "preconditions": [{"predicate": "HandEmpty", "args": []}],
+                    "add_effects": [
+                        {"predicate": "IsOpen", "args": ["white_box"]},
+                        {"predicate": "On", "args": ["blue_toy", "table"]},
+                        {"predicate": "HandEmpty", "args": []},
+                    ],
+                    "delete_effects": [],
+                },
             }
         ]
     )
@@ -626,12 +648,12 @@ def test_only_camera_settleable_atoms_are_put_to_the_model():
     phase = spec.phases[0]
     asked = []
 
-    async def fake_classify_all(image, atoms, descriptions, cfg):
+    async def fake_classify_all(image, atoms, descriptions, cfg, *, expected=True, role="effect"):
         asked.extend(atoms)
-        return [Verdict(a, describe(a, descriptions), True, "") for a in atoms]
+        return [Verdict(a, describe(a, descriptions), True, "", expected=expected, role=role) for a in atoms]
 
     with mock.patch.object(grounding, "classify_all", fake_classify_all):
-        ok, _ = asyncio.run(grounding.verify_phase(None, phase, spec.invented, CFG, CAPS))
+        ok, _ = asyncio.run(grounding.verify_effects(None, phase, spec.invented, CFG, CAPS))
     assert ok
     assert {str(a) for a in asked} == {"IsOpen(white_box)", "On(blue_toy, table)"}
 
@@ -707,7 +729,7 @@ def test_a_proposal_that_never_validates_raises_the_last_reason():
 
 def test_config_defaults_to_off_and_rejects_a_bad_failure_policy():
     assert PlanningConfig().enabled is False
-    assert PlanningConfig(enabled=True).on_robot_phase_failure == "teleop"
+    assert PlanningConfig(enabled=True).on_robot_phase_failure == "abort"
     with pytest.raises(ValueError, match="on_robot_phase_failure must be one of"):
         PlanningConfig(on_robot_phase_failure="panic")
     with pytest.raises(ValueError, match="max_attempts must be at least 1"):
@@ -724,7 +746,7 @@ def test_the_profile_is_the_definition_of_these_settings():
 
     resolved = HitlSpec(enabled=True, verify_retries=2).to_planning_config()
     assert resolved.enabled and resolved.verify_retries == 2
-    assert resolved.on_robot_phase_failure == "teleop"
+    assert resolved.on_robot_phase_failure == "abort"
     with pytest.raises(ValidationError, match="enable"):
         HitlSpec(enable=True)
     with pytest.raises(ValidationError, match="on_robot_phase_failure"):

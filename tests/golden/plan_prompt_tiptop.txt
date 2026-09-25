@@ -1,0 +1,50 @@
+A robot and a human share a workspace. Break the instruction below into an ORDERED list of phases. Each phase is done either by the robot or by the human, and they happen in the order you give.
+
+THE INSTRUCTION:
+place the bread on the plate, and then open the box and place the bread in the box
+
+The image shows the workspace as it is right now. Plan the INSTRUCTION -- the picture is context for where things are, not a task in itself.
+
+The workspace contains exactly these objects RIGHT NOW, and no others:
+- bread
+- cardboard_box
+- plate
+
+The robot can do one thing: pick an object up and place it on a surface. That is all. It plans and executes each of its phases itself; you only say what must be TRUE when the phase is finished, using these predicates:
+- On(?obj: movable, ?surface: surface): {0} is resting on top of {1}
+- Holding(?obj: movable): the robot's gripper is holding {0}
+- HandEmpty(): the robot's gripper is empty
+
+WHAT On MEANS. On({0}, {1}) means {0} has been let go of and is RESTING somewhere on or inside {1}, and nothing more. That covers setting something down on a surface AND dropping it into anything with an opening it fits through -- a bin, a basket, a pot, a drawer that is pulled out. Words like "in", "into" and "inside" in an instruction usually mean exactly this: if the object only has to end up loosely somewhere within the container, it is On(object, container) and it is the robot's job -- including when a human phase first had to open, uncover or empty the container to make room for it. What On CANNOT say is a precise fit. The robot places by opening its gripper above a spot, so it cannot fit, insert, slot, thread, plug, screw, seat, close, or align one thing to another. If a clause needs the object in one particular position or orientation -- a key in a lock, a plug in a socket, a lid seated on a jar, a peg in its matching hole -- that is a HUMAN phase, however much it looks like a pick-and-place. The same goes for anything soft that has to be spread, draped, wrapped or folded over something: that is manipulation, not placement. Say either with an invented predicate, not with On.
+
+The human can do anything the robot cannot -- open, close, fold, unfold, tie, flatten, rotate, manipulate cloth. Give a human phase `instructions` addressed to the person, and `atoms` saying what should be true afterwards. That is what a camera will be used to check, so it must be visible.
+
+EVERY HUMAN PHASE IS AN OPERATOR, AND YOU MUST SAY WHAT IT IS. Give the phase an `operator` with:
+- `name`: what the action is, one word, capitalised -- Push, Unplug, Staple, Insert, Tie, Wipe.
+- `args`: the objects it acts on, from the object list, in the order the name reads.
+- `preconditions`: what must ALREADY be true for the person to be able to do it. Write them with On, Holding, HandEmpty or a predicate you invented. HandEmpty() belongs here whenever the person needs the robot to be out of the way -- which is almost always.
+- `add_effects`: what becomes true. Every atom you put in the phase's `atoms` must appear here.
+- `delete_effects`: what STOPS being true. This is the one most often forgotten. If the person moves something off a surface, the old On(...) is a delete effect; if they unplug what an earlier phase plugged in, the IsPluggedIn(...) is. An empty list is fine and means "this takes nothing away" -- but say it.
+
+The preconditions and effects are CHECKED against a camera image, before and after the person acts, and they are checked against each other across your whole plan. So they have to be true statements about the world, not decoration: do not list a precondition that nothing in your plan makes true, and do not delete something a later phase still needs.
+
+How to divide the work:
+- Give the robot every pick-and-place. A human phase that includes moving an object from A to B is taking the robot's work away from it.
+- Use a human phase only for something the robot genuinely cannot do.
+- ORDER MATTERS AND IS YOURS TO SET. If a jar must be unscrewed before anything can go in it, the human's "unscrew the lid" phase comes BEFORE the robot's "put the coin in the jar" phase. If a rubber band goes around a bundle of pencils, the robot places the pencils first and the human puts the band on afterwards. Think about what has to be true for the next phase to be physically possible.
+- Intermediate states are fine and often necessary. "Take the mug off the notebook, sign the notebook, put the mug back" is three phases, and the first one ends with the mug somewhere else -- On(mug, table). Each robot phase is planned fresh, so an object may be picked up in more than one phase.
+- Do not add phases the instruction does not ask for, and do not merge two of its steps into one.
+
+PLAN THE WHOLE INSTRUCTION. Work through it clause by clause and give every clause a phase, in the order stated. Fill in `coverage` with one entry per clause, naming the phase that carries it out (the index in your `phases` list), or -1 if you had to leave it out. Phases are numbered from 0: the first phase is 0, and the last is one less than the number of phases. The most common mistake is to plan the first clause carefully and stop; the last phase must leave the workspace as the END of the instruction describes.
+
+Rules, all of which are checked:
+- A ROBOT phase's atoms may use ONLY On, Holding and HandEmpty. The robot cannot achieve a predicate you invent -- if a phase needs one, it is a human phase.
+- Give a whole pick-and-place ONE phase, ending with On(?obj, ?surface). Do not split it into a "pick it up" phase and a "put it down" phase; the robot does both as one piece of work.
+- Two ROBOT phases in a row must not move the same object twice. The second placement throws the first one away, so the first is wasted motion -- and it almost always means a step that is not really a pick-and-place was given to the robot. If a human phase belongs between them, put it there; if the second phase is the one the robot cannot do, make IT the human phase.
+- Every phase needs at least one atom, and a human phase needs `instructions` and an `operator` too.
+- An operator's `add_effects` must include every atom in its phase's `atoms`, and no atom may be in both `add_effects` and `delete_effects`.
+- An operator's `preconditions` must be reachable: either true in the workspace to begin with, or made true by an earlier phase. Do not require something no phase establishes, and do not delete something a later phase's preconditions still need.
+- Every object name must be one of the objects listed above, spelled exactly. Do not name an object any other way.
+- Invent a new predicate only for something no existing predicate can express. A new predicate is evaluated by a vision-language model looking at a camera image of the workspace, so it needs `instructions`: a description of what must be VISIBLE in the image for it to be true. Write the text with {0}, {1}, ... standing in for the arguments, in the order they are declared.
+
+If some clause CANNOT be expressed, put it in `unrepresented` with the reason, and leave it out of the phases. The usual reason is that it refers to something not in the object list and nothing in your plan produces it -- "pick another cup" when only one cup was detected, and no phase makes a second one. Never invent an object to satisfy a clause, and never bind it to a different object that happens to be present. Saying you could not do it is always better than quietly doing something else: a human is watching, and can put the missing object on the table and start again.

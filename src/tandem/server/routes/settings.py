@@ -7,7 +7,6 @@ from pydantic import BaseModel
 
 from tandem import __version__
 from tandem.core import paths, probe, secrets
-from tandem.core import runtime as runtime_mod
 from tandem.core import settings as settings_mod
 
 router = APIRouter(tags=["settings"])
@@ -34,6 +33,7 @@ async def get_settings() -> dict:
         "settings": {key: value for key, value in settings_mod.flatten(cfg)},
         "paths": {
             "config": str(paths.config_file()),
+            "rig": str(paths.rig_file()),
             "credentials": str(paths.credentials_file()),
             "data_root": str(cfg.resolved_data_root()),
             "runtime": str(cfg.resolved_runtime_dir()),
@@ -71,11 +71,12 @@ async def update_secrets(body: SecretBody) -> dict:
 
 
 @router.get("/runtime")
-async def runtime_status() -> dict:
-    cfg = settings_mod.load()
-    runtime = runtime_mod.Runtime(cfg.resolved_runtime_dir())
-    status = runtime.status()
-    return {**status.to_dict(), "root": str(runtime.root)}
+async def runtime_status(profile: str | None = None) -> dict:
+    """The runtime of the planner the profile (the active one by default) uses: the same payload as
+    `tandem runtime status --json`, so the page and the terminal can never disagree about it."""
+    from tandem.cli.runtime import runtime_payload
+
+    return runtime_payload(profile_name=profile)
 
 
 @router.get("/doctor")

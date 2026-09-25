@@ -100,29 +100,39 @@ def write_meta(
     trajectory_id=None,
     segment_source="teleop",
     source="teleop",
+    phase_index=None,
+    n_phases=None,
+    phase_description=None,
 ) -> None:
     """Write ``_meta.json``.
 
     ``trajectory_id`` / ``segment_source`` mark this episode as one LEG of a hand-off, which
     the merge later joins into a single trajectory. Both are None for a standalone episode.
+
+    ``phase_index`` / ``n_phases`` / ``phase_description`` say which phase of a phase-planned
+    task the leg records. Each is written only when given: an absent key means "not known",
+    which a null would blur with "known to be nothing".
     """
-    Path(path).write_text(
-        json.dumps(
-            {
-                "instruction": instruction,
-                "fps": CONTROL_HZ,
-                "n_frames": int(n_frames),
-                "config_id": config_id,
-                "timestamp": timestamp,
-                "source": source,
-                "cameras": cameras,
-                "record_start": float(record_start),
-                "record_stop": float(record_stop),
-                "trajectory_id": trajectory_id,
-                "segment_source": segment_source,
-            }
-        )
-    )
+    meta = {
+        "instruction": instruction,
+        "fps": CONTROL_HZ,
+        "n_frames": int(n_frames),
+        "config_id": config_id,
+        "timestamp": timestamp,
+        "source": source,
+        "cameras": cameras,
+        "record_start": float(record_start),
+        "record_stop": float(record_stop),
+        "trajectory_id": trajectory_id,
+        "segment_source": segment_source,
+    }
+    if phase_index is not None:
+        meta["phase_index"] = int(phase_index)
+    if n_phases is not None:
+        meta["n_phases"] = int(n_phases)
+    if phase_description is not None:
+        meta["phase_description"] = str(phase_description)
+    Path(path).write_text(json.dumps(meta))
 
 
 def write_video(frames, path) -> None:

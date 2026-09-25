@@ -5,12 +5,24 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tandem-tamp"
 version = "0.1.0"
-description = "Human-in-the-loop TAMP data collection for real robots"
+description = "TANDEM: task and motion planning with as-needed human demonstrations, for collecting vision-language-action fine-tuning data on real robots"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [{ name = "Samrat Sahoo" }]
-keywords = ["robotics", "tamp", "human-in-the-loop", "data-collection", "manipulation"]
+keywords = [
+    "robotics",
+    "tamp",
+    "task-and-motion-planning",
+    "human-in-the-loop",
+    "teleoperation",
+    "demonstrations",
+    "data-collection",
+    "manipulation",
+    "vision-language-action",
+    "vla",
+    "vlm",
+]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
@@ -50,36 +62,47 @@ rerun = ["rerun-sdk==0.27.3"]
 dev = ["pytest>=8.0", "pytest-cov", "ruff>=0.5", "httpx>=0.27"]
 
 [project.urls]
-Homepage = "https://github.com/SamratSahoo/tandem"
+Homepage = "https://prpl-group.com/tandem/"
+Repository = "https://github.com/SamratSahoo/tandem"
+Documentation = "https://github.com/SamratSahoo/tandem/tree/main/docs"
 Issues = "https://github.com/SamratSahoo/tandem/issues"
 
 [project.scripts]
 tandem = "tandem.cli.app:main"
 
+# Planners a profile's `planner.backend` can name. A planner in its own package registers here the
+# same way, under its own name, and tandem finds it without being changed (tandem.planners.registry).
+# TiPToP also ships built in; this entry is the same factory, and says so to anything reading the
+# group rather than tandem's own table.
+[project.entry-points."tandem.planners"]
+tiptop = "tandem.planners.tiptop:FACTORY"
+
+# Who carries out a human phase (hitl.human_executor). tandem registers its own in code as well, so an
+# install whose metadata predates this table still finds it; a package that ships another executor
+# declares it the same way, pointing at an ExecutorFactory. See tandem/executors/base.py.
+[project.entry-points."tandem.human_executors"]
+teleop = "tandem.executors.teleop:FACTORY"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["tandem*"]
 
+# No planner sources ship in the wheel: a planner's runtime recipe fetches them, pinned, at install
+# (tandem/planners/runtime.py). What a planner package does ship is small and its own -- the patches its
+# recipe applies to the fetched trees, and files no public repository has (TiPToP's two checkpoints).
+# tandem's own resources include the paper's five tasks as profiles (resources/profiles/).
 [tool.setuptools.package-data]
 tandem = [
     "resources/**/*",
     "server/static/**/*",
-    "_vendor/VENDOR.toml",
-    "_vendor/patches/*",
-    "_vendor/tiptop/**/*",
-    "_vendor/cuTAMP/**/*",
-    "_vendor/curobo/**/*",
-    "_vendor/vae/**/*",
-    "_vendor/rnd/**/*",
+    "planners/*/patches/*",
+    "planners/*/assets/**/*",
 ]
 
 [tool.ruff]
 line-length = 110
 target-version = "py310"
-# Third-party sources we vendor verbatim. Reformatting them would make every upstream diff
-# unreadable, which is the opposite of what vendoring with pinned commits is for.
 extend-exclude = [
-    "src/tandem/_vendor",
     "src/tandem/export/lerobot_v3.py",
     "src/tandem/teleop/driver.py",
     "src/tandem/teleop/spacemouse.py",

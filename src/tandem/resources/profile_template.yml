@@ -1,187 +1,96 @@
 # ─────────────────────────────────────────────────────────────────────────────────────────
-#  tandem profile
+#  A new task, with the TANDEM paper's collection settings.
 #
-#  A profile is one collection setup — the robot, the cameras, the task, the TAMP settings —
-#  together with every trajectory collected under it. Trajectories live beside this file in
-#  trajectories/{eval,success,failure}/<timestamp>/.
+#  `tandem profile create NAME --prompt "..."` starts every new profile from this file. It holds
+#  what the paper's five tasks share: phase planning on, and the TAMP and DATAFARM settings common
+#  to hitl-tamp-vla's five *_v3.yml configs, plus three switches every v3 run had on. A task's own
+#  extras (surface-fitted placement, a finer voxel size) are in the paper profiles that use them.
+#  Two hitl keys follow the paper rather than hitl-tamp-vla's code: on_verification_failure:
+#  exclude (its code asked for a label instead) and verify_final_phase: true (its code left the
+#  last step to that label).
 #
-#  Edit with `tandem profile edit <name>`; it re-validates on save and refuses to write a
-#  file that would fail at session start.
+#  A profile is only the task. This machine's robot, cameras and calibration are its rig
+#  (`tandem rig show`), which every profile shares.
 # ─────────────────────────────────────────────────────────────────────────────────────────
-version: 1
-name: default
-description: Franka FR3 + Robotiq 2F-85
+version: 3
+description: ''
 
 task:
-  # The language label stored with every episode — what a policy trained on this data reads.
-  prompt: Place the toys on the plate with no collisions
-  # The goal handed to the planner, when it has to differ from the label above (e.g. the
-  # demonstration does something the on()/holding() goal language cannot express). Leave
-  # null and the two are the same thing.
+  # What to do: the label stored with every episode, and what phase planning splits into steps.
+  prompt: describe the task here
+  # The goal handed to the planner, only when it has to differ from the prompt.
   goal: null
   target_episodes: 20
 
-robot:
-  type: fr3_robotiq           # fr3_robotiq | ur5 | franka | panda_robotiq
-  dof: 7
-  host: 172.16.0.2            # the NUC running the bamboo-polymetis shim
-  port: 5555                  # control
-  gripper_port: 5559
-  # The shim's --state-port. Encoders are read here while the control thread is parked in a
-  # blocking move; without it, capture aborts rather than falling back to plan positions.
-  state_port: 5557
-  # BE CAUTIOUS. 0.2 is 20% speed. Raise it only once you trust the setup.
-  time_dilation_factor: 0.2
-  q_home: [0.0, -0.628, 0.0, -2.513, 0.0, 1.885, 0.0]
-  q_capture: [-0.034, 0.09, 0.08, -1.319, -0.003, 1.253, 0.03]
-
-cameras:
-  # Which camera perception reads.
-  #   external  a static third-person camera. Its pose comes straight from calibration, so
-  #             the arm stays at q_home instead of driving into the shot.
-  #   hand      the wrist camera. Its pose is only known through the arm, so the arm first
-  #             drives to q_capture and the pose is recomputed by forward kinematics.
-  # Either way both cameras are opened and recorded.
-  perception: external
-  hand:
-    serial: '14846828'
-    type: zed
-    resolution: HD720
-    # 15, not 30 — three ZEDs at HD720@30 exceed the USB bandwidth budget and fail to open.
-    # The export resamples to 15 Hz anyway, so nothing is lost.
-    fps: 15
-  external:
-    serial: '32439448'
-    type: zed
-    resolution: HD720
-    fps: 15
-  # A second exterior camera, recorded as DROID exterior_2. Leave it out for a deliberate
-  # two-camera rig: when it IS listed but fails to open, collection aborts before any
-  # rollout rather than quietly record an episode with a camera missing.
-  # external_2:
-  #   serial: '31425515'
-  #   type: zed
-  #   resolution: HD720
-  #   fps: 15
-
-perception:
-  gemini:
-    model: gemini-robotics-er-1.6-preview
-    temperature: null
-  m2t2:
-    url: http://localhost:8123
-    apply_bounds: true
-  sam_mode: local
-  # Frames grabbed back-to-back at the capture pose and per-pixel median-fused to suppress
-  # depth noise. 1 disables smoothing.
-  depth_smoothing_frames: 5
-  # Padding on the robot's collision spheres before they are projected out of a third-person
-  # point cloud. Raise it if a rim of arm survives in the cloud.
-  robot_mask_margin_m: 0.02
-  depth_trunc_m: 5.0
-  voxel_downsample_size: 0.0075
-  contact_threshold_m: 0.01
-  mask_erosion_pixels: 3
-
-# ─────────────────────────────────────────────────────────────────────────────────────────
-#  TAMP settings
-#
-#  These are passed straight through to the planner. The key names are tiptop's own, so
-#  anything documented upstream works here verbatim and an existing cfg/tamp/*.yml can be
-#  pasted in unchanged. Unknown keys are rejected at load time — a silently ignored override
-#  is the one failure mode that looks like success.
-#
-#  Run `tandem profile show <name> --tamp` to see exactly what the planner will receive.
-# ─────────────────────────────────────────────────────────────────────────────────────────
-tamp:
-  # Solver effort. More particles cover the grasp/placement space better per skeleton; more
-  # steps optimize each skeleton harder. Both cost GPU memory and planning time.
-  num_particles: 256
-  opt_steps_per_skeleton: 250
-
-  # Charge each move the infinity-norm ||q1 - q2||_inf (max joint displacement) instead of
-  # the default Euclidean distance. Must be the string "inf" — this round-trips through JSON,
-  # which has no Infinity literal. tandem accepts `inf`, `.inf` or `infinity` and normalises.
-  traj_length_norm: inf
-
-  # Prefer grasps that reorient the wrist less: weight on the geodesic angle between each
-  # grasp's EE orientation and the arm's initial one. Absent or 0 disables it.
-  grasp_pose_change_weight: 0.1
-
-# ─────────────────────────────────────────────────────────────────────────────────────────
-#  Phase planning  —  the deep human-in-the-loop mode
-#
-#  Off by default. Turned on, a VLM breaks the instruction into an ORDERED list of phases,
-#  each one either a sub-goal for the planner or something only a person can do. It invents
-#  the predicate it needs to describe the human's part, hands that phase over with written
-#  instructions, and checks from a photo that it happened.
-#
-#  Phases rather than one final-state goal because the ordering runs both ways: "put the toy
-#  on the cloth, then fold it" needs the human last, "open the box, then put the toy in"
-#  needs the robot last, and some tasks need an intermediate state no final-state goal can
-#  express at all.
-#
-#  Each rollout then drops a hitl.json (the phases, the invented predicates, per-clause
-#  coverage and every verification verdict) and a vlm/ folder holding each image sent to the
-#  model and a rendered PNG of what it answered — rejected attempts included.
-#
-#  Disabled, none of this is even imported and a session behaves exactly as it always has;
-#  you can still hand the arm over yourself whenever you like.
-# ─────────────────────────────────────────────────────────────────────────────────────────
+# Phase planning: a model splits the prompt into robot steps and human steps, and checks each
+# human step from a photo. These are the paper's settings.
 hitl:
-  enabled: false
-  # Splitting a task and inventing a predicate is reasoning, not localisation, so this is a
-  # general model with thinking left on — not the detection model perception uses.
-  proposal_model: gemini-2.5-pro
-  # Grounding ("is the cloth folded?") is one visual judgement over one image, and it is the
-  # query a run pays for repeatedly.
-  vlm_model: gemini-2.5-flash
-  # Reprompts allowed when a proposal comes back unparseable. The error is fed back to the
-  # model, which is what makes a second attempt worth making.
-  max_attempts: 3
-  # Classify the invented predicates on the first image, before anything runs. Off by
-  # default: a human is asked precisely because the predicate is false. Worth turning on for
-  # a scene that may start already solved.
+  enabled: true
+  proposal_model: gemini-2.5-pro      # splits the task, and invents the human steps' predicates
+  vlm_model: gemini-2.5-flash         # answers each check
+  max_attempts: 3                     # proposals tried, each rejection fed back to the next
   classify_initial: false
-  # Extra chances at a human phase the check says did not happen. A demonstration should not
-  # be thrown away because one classifier call went the wrong way.
-  verify_retries: 1
-  # Treat a failed check as a rollout failure. Set false while calibrating the classifier
-  # prompts: the verdict is still recorded, the run just carries on.
+  verify_retries: 1                   # one more try at a human step whose check failed
   verify_enforced: true
-  save_vlm_io: true
-  # SQLite cache for proposals only, useful while iterating on prompts. Never applied to
-  # grounding or verification.
-  cache_path: null
-  # What happens when the planner cannot plan one of the robot's phases.
-  #   teleop  the sub-goal is described to you and you do it by hand, checked exactly as any
-  #           other human step, and the task carries on
-  #   abort   the attempt ends and the episode is labeled a failure
-  #   replan  the failure is handed back to the model, which decomposes the task differently
-  # `teleop` is the option the old design could not offer at all: who did what was decided at
-  # planning time inside the planner's own process, so a phase it turned out not to be able to
-  # plan could only end the run.
-  on_robot_phase_failure: teleop
-  # Which camera the verification photo comes from. Third-person by default: after a hand-off
-  # the arm is wherever you left it, so a wrist view points nowhere useful.
+  on_verification_failure: exclude    # a step still failing: kept out of the dataset (or: label)
+  verify_final_phase: true
   verification_camera: external
+  check_plan_effects: true            # the steps checked against each other before the arm moves
+  check_human_effects: true           # a human step's effects checked from a photo after it
+  check_human_preconditions: false
+  check_tamp_preconditions: false
+  check_tamp_effects: false
+  precondition_enforced: false
+  on_robot_phase_failure: abort       # no plan for a robot step: the trial fails (or: replan, teleop)
+  conjoin_robot_phases: true
+  human_executor: teleop
+  human_executor_options: {}
+  allow_unrecorded_human_phase: false
+  save_vlm_io: true                   # every image sent to the model, and its answer, kept in vlm/
+  cache_path: null
 
-# ─────────────────────────────────────────────────────────────────────────────────────────
-#  planner  —  which task and motion planner tandem calls
-#
-#  tandem plans the task itself: it decides the phases, which are yours and which are the
-#  robot's, runs your legs as teleop, and asks a planner only for "achieve this goal in this
-#  scene". Which planner that is, is a setting — an unknown name is an error, never a silent
-#  fallback, because a dataset collected against a different planner from the one the config
-#  named is a dataset nobody can interpret afterwards.
-# ─────────────────────────────────────────────────────────────────────────────────────────
+# Which planner plans and runs the robot's steps, and its settings for this task.
 planner:
   backend: tiptop
+  options:
+    tamp:   # TiPToP's cuTAMP and cuRobo overrides, by tiptop's own key names
+      # DATAFARM: plan motions that look like the DROID teleoperation data
+      vae_manifold_weight: 25000.0
+      vae_path: vae/checkpoints/vae_full_v2.pt
+      vae_retiming: false
+      joint_density_weight: 0.0
+      uniform_velocity_weight: 0.0
+      posture_selection_seeds: 12
+      posture_grasp_roll: true
+      transit_apex_height: 0.075
+      transit_apex_min_dist: 0.1
+      # trajectory blending, timed by the VAE
+      blend_trajectory: true
+      blend_mode: vae
+      blend_ops: [Pick, MoveFree, MoveHolding, Place, GoToInitial]
+      blend_smoothing: 0.0003
+      blend_boundary_speed: 0.07
+      blend_vae_sample_target: false
+      blend_max_duration_mult: 2.0
+      blend_vel_slack: 1.0
+      blend_acc_slack: 1.0
+      # Planned motions run at blending's pace, not slowed by the rig's robot speed, as in the
+      # paper's runs: keep a hand on the E-stop.
+      time_dilation_factor_literal: 1.0
+      # cuTAMP search and grasps
+      num_particles: 512
+      opt_steps_per_skeleton: 600
+      traj_length_norm: inf
+      grasp_pose_change_weight: 0.0
+      m2t2_num_runs: 60
+      require_m2t2_grasps: false
+      # What LJ1356's tiptop always did, so every v3 run had them
+      table_plane_support_vote: true
+      disjoint_object_masks: true
+      blend_stretch_to_caps: true
 
-# recording: whether camera video is captured during execution, and at what rate.
 recording:
   enabled: true
-  fps: 15
 
 # Where `tandem export lerobot` pushes. Leave hf_repo blank until you need it.
 export:

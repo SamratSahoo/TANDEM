@@ -71,6 +71,12 @@ export function mount(el, ...children) {
 
 // ---- formatting ------------------------------------------------------------
 
+/** JSON for a settings editor: indented, but a list of plain values on one line ([0, -0.628, 0]), not one per line. */
+export function prettyJson(value) {
+  return JSON.stringify(value, null, 2).replace(
+    /\[\s+([^\[\]{}]*?)\s+\]/g, (_, inner) => `[${inner.split(/,\s+/).join(", ")}]`);
+}
+
 export function fmtDuration(seconds) {
   if (!seconds && seconds !== 0) return "—";
   const s = Math.round(seconds);

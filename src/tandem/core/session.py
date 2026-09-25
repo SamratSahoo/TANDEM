@@ -6,7 +6,8 @@ which is why a session is kept alive across a bad episode rather than restarted.
 
 **tandem drives the task; the planner only plans motion.** A task is broken into an ordered list of
 phases (``tandem.planning``), and this engine walks them: a robot phase becomes one call to the
-planner backend, a human phase becomes a teleop leg, and every leg of one task shares a trajectory
+planner backend, a human phase becomes a leg of the human executor (``hitl.human_executor``, a
+person at the teleop rig by default), and every leg of one task shares a trajectory
 id so they merge into a single episode. The planner is reached through ``tandem.planners`` and is
 never modified — it is asked for one thing, "achieve this goal in this scene, and record it".
 
@@ -15,12 +16,20 @@ planner's own process. tandem could see a rollout start and had to guess which p
 it could not reorder a phase, retry one, or hand a person a step the planner turned out not to be
 able to do. Now it holds the plan.
 
+The walk itself is ``tandem.core.phase_loop``, and so is the custody transfer of a hand-off: the
+loop releases the arm, lets the human executor (``tandem.executors``) carry out the leg, and takes
+the arm back. This module is everything around it: the state machine, the prompts a person
+answers, what the executor is built with, and the label. Filing and merging the finished legs is
+``tandem.core.episodes``.
+
 Threads and a callback bus, no asyncio out here, so the identical object drives both
 `tandem collect` (synchronous, Rich Live) and `tandem ui` (FastAPI, bridged to SSE). The state
 machine exists once.
 
     spawning → warming → rolling → awaiting_label → labeling → awaiting_task → rolling …
-                            │
+                            │  │
+                            │  └── ended by the loop (excluded, failed, aborted):
+                            │      filed under failure/ with no label ──→ awaiting_task
                             ├── a phase only a person can do
                             ↓
                      awaiting_human_phase → handing_off → teleop_handoff ──"resume"──→ rolling
@@ -29,56 +38,60 @@ Three behaviours are load-bearing and were each learned expensively:
 
 * **Preempt is not stop.** It abandons the task attempt and returns to the task prompt with
   everything still warm. It sets no end reason and ends no session; only `stop()` does that. It
-  cannot stop the arm mid-motion: the planner is handed a whole trajectory segment in one request
-  and has no abort, so the motion runs to the end of that segment. The physical E-stop is the only
-  instant stop.
-* **Stopping parks the arm.** Nothing homes at the end of a task, so `stop()` asks the backend to
+  cannot stop the arm mid-motion: unless the planner declares cooperative stop, it is handed a whole
+  trajectory segment in one request and has no abort, so the motion runs to the end of that segment.
+  The physical E-stop is the only instant stop.
+* **Stopping parks the arm, and stops the task where it is.** A stop is a step boundary like a
+  preempt: nothing is perceived, planned or executed after it, a person's step it cut short is not
+  checked, and the legs already recorded are filed (or, at the label prompt, kept unlabeled in eval/
+  with their phase record). Nothing homes at the end of a task, so `stop()` asks the backend to
   park before closing it. The gripper is deliberately NOT opened — nothing here can know the arm is
   not holding something.
 * **A hand-off is a custody transfer.** The planner holds the robot and the cameras exclusively, so
-  every teleop leg is bracketed by `release_hardware()` / `reacquire_hardware()`, and the teleop
-  child is not started until the release has actually completed.
+  every human leg is bracketed by `release_hardware()` / `reacquire_hardware()`, and the executor
+  (the teleop driver, by default) is not started until the release has actually completed. That
+  bracket is the phase loop's (``PhaseLoop._lend_arm``); the session supplies the states it passes
+  through and the "return control" that ends it (`_SessionIO.arm_lent`).
 """
 
 from __future__ import annotations
 
+import functools
 import json
-import os
-import signal
-import subprocess
 import threading
 import time
 import uuid
+import warnings
 from collections import deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
-from tandem.core import events as events_mod
-from tandem.core import paths, render, secrets
+from tandem import executors
+from tandem.core import episodes, paths, profiles, secrets
+from tandem.core import rig as rig_mod
 from tandem.core import settings as settings_mod
 from tandem.core.errors import SessionConflict, TandemError
+from tandem.core.phase_loop import TELEOP, HumanPhase, PhaseLoop, TrialOutcome
 from tandem.core.profiles import Profile
-from tandem.core.runtime import Runtime
+from tandem.executors.base import CustodyError, ExecutorContext
+from tandem.planners import registry
 
 LOG_BUFFER = 4000
+# How long a session that is ending waits for the episode merges it started. A merge joins several
+# GB of video, and it runs on a thread of its own so the next task need not wait for it -- but a
+# process that exits under one kills it half-done, leaving the legs split between success/ and eval/.
+MERGE_GRACE = 300.0
 # How long a caller should wait for `stop()` to finish. It has to cover the session thread
 # unwinding, the arm's park-and-exit move, and the planner letting go of the cameras — the backend
 # bounds those at HARDWARE_TIMEOUT and the channel at EXIT_GRACE, so this is deliberately longer
-# than their sum rather than a guess.
-STOP_GRACE = 300.0
-# Closing the cameras blocks for the SDK teardown — measured at ~14 s for two — and the teleop
-# driver only exits after that, so the wait for it to release the hardware has to be generous.
-TELEOP_EXIT_GRACE = 60.0
-# How long a human phase waits for the person before the session is considered abandoned. Long:
-# the whole point is that somebody is doing something with their hands.
+# than their sum rather than a guess — and then the merges still running (MERGE_GRACE).
+STOP_GRACE = 300.0 + MERGE_GRACE
+# How long a human phase, or a lent arm, waits for the person before the session is considered
+# abandoned. Long: the whole point is that somebody is doing something with their hands.
 HUMAN_PHASE_TIMEOUT = 3600.0
-# How many times one task attempt may be decomposed again after the planner failed to plan a phase
-# (`on_robot_phase_failure: replan`). Bounded, because a goal the planner genuinely cannot reach
-# fails identically every time, and an unbounded retry would perceive and re-propose forever with
-# an operator watching an arm that never moves.
-MAX_REPLANS = 2
 
 
 class State(str, Enum):
@@ -101,15 +114,19 @@ class State(str, Enum):
 class _Preempted(Exception):
     """Raised inside the session loop to abandon one task attempt and keep everything warm."""
 
+    # What the trial's record says ended it (`PhaseLoop.interrupted`).
+    reason = "preempted by the operator"
 
-class _CustodyLost(Exception):
-    """Raised when the robot or the cameras cannot be got back. Ends the session.
 
-    Deliberately not caught by the per-task handler: a session that has lost custody is not warm
-    and cannot run the next task, so reporting it as one bad attempt and returning to the prompt
-    would leave an operator staring at a ready-looking session that fails at every rollout — and an
-    arm nothing will ever park.
+class _Stopped(_Preempted):
+    """Raised inside the session loop because the session is stopping: the attempt ends where it is.
+
+    A preempt as far as the phase loop is concerned -- raised from the same boundary checks, so a
+    stop can never be read as a step finished or let one more leg start -- but it ends the session
+    rather than returning to the task prompt.
     """
+
+    reason = "the session was stopped"
 
 
 TERMINAL = frozenset({State.STOPPED, State.FAILED})
@@ -126,36 +143,6 @@ class LogLine:
 
     def to_dict(self) -> dict:
         return {"stream": self.stream, "text": self.text, "at": self.at}
-
-
-@dataclass
-class HumanPhase:
-    """A step of the task the plan says only a person can do.
-
-    `instructions` is what the operator is shown; `expected` is what the VLM will be asked
-    about afterwards — the same list, so nobody is checked against a hidden standard.
-    """
-
-    description: str
-    instructions: str
-    expected: list[str] = field(default_factory=list)
-    index: int = 0
-    total: int = 0
-    attempt: int = 1
-    verified: bool | None = None
-    missing: list[str] = field(default_factory=list)
-
-    def to_dict(self) -> dict:
-        return {
-            "description": self.description,
-            "instructions": self.instructions,
-            "expected": self.expected,
-            "index": self.index,
-            "total": self.total,
-            "attempt": self.attempt,
-            "verified": self.verified,
-            "missing": self.missing,
-        }
 
 
 @dataclass
@@ -183,17 +170,41 @@ class Session:
     def __init__(
         self,
         profile: Profile,
-        runtime: Runtime,
+        runtime: Any = None,
         *,
         task: str | None = None,
         execute: bool = True,
         record: bool | None = None,
         max_episodes: int | None = None,
         session_id: str | None = None,
+        rig: Any = None,
     ) -> None:
         self.id = session_id or uuid.uuid4().hex[:12]
-        self.profile = profile
-        self.runtime = runtime
+        # Where everything this session writes goes, fixed now, on the thread that made it. Its legs are
+        # filed and merged from threads of their own, which can outlive the environment the session was
+        # started in; resolving the data root there again is how a merge once wrote into the real home.
+        self.profile = profile.pinned()
+        # The planner's runtime is its factory's to find, from the settings, so a session takes none.
+        # ``Session(profile, Runtime(...))`` was how a script started one before there was a registry,
+        # and it still works: the runtime's root is handed to the planner's factory as the one to use
+        # (``BackendContext.runtime_dir``), which is what that script meant by passing it.
+        if runtime is not None:
+            if not hasattr(runtime, "root"):
+                # `Session(profile, "put the toy in the box")` reads as a task and is not one: taken
+                # as the runtime, the string was quietly ignored (the warning is hidden by default
+                # outside __main__), and every episode was planned and labeled with the profile's
+                # default task instead.
+                raise TypeError(
+                    "Session's second positional argument is a planner runtime (deprecated), not the task; "
+                    f"got {runtime!r}. Pass the task as task=..."
+                )
+            warnings.warn(
+                "Session(profile, runtime) is deprecated: a session builds its planner's runtime through "
+                "the registry. Leave the runtime out, or set runtime_dir in the settings.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        self._runtime_dir: Path | None = getattr(runtime, "root", None)
         # Two different strings, deliberately. `task` steers PLANNING (the goal), `instruction` is
         # the language label stored with the episode and exported as the LeRobot task. A profile
         # that sets `task.goal` says they must differ -- and the planner used to be handed both,
@@ -215,6 +226,17 @@ class Session:
         self.current: RolloutRecord | None = None
         self.labeled_count = 0
         self.success_count = 0
+        # Trials the phase loop excluded (a human phase that never verified): filed under failure/
+        # with their legs, never labeled, and never counted towards `max_episodes`, since they are
+        # not part of the dataset the target counts.
+        self.excluded_count = 0
+        # Trials that ended part-way for a reason outside the method -- the operator gave the step up,
+        # preempted the attempt, or stopped the session. Filed under failure/ with their legs and no
+        # label, and not counted towards `max_episodes` either: no trial result is in them.
+        self.aborted_count = 0
+        # How the last trial ended, for the operator: set as soon as the attempt ends (so the label
+        # prompt can say why the loop stopped it) and settled by the label. None while one runs.
+        self.last_trial: dict | None = None
         # A hand-off is armed but not yet honoured; the driver takes it at its next plan-step
         # boundary, so the arm parks at a sane place rather than mid-motion.
         self.teleop_pending = False
@@ -234,25 +256,35 @@ class Session:
         self._files: dict = {}
         self._stopping = False
         self._park_on_exit = True
-        self._teleop: TeleopChild | None = None
+        # The trial algorithm, built at the first task and kept: it holds the human executors it has
+        # built, and building one may start a process. `force_stop` reaches a leg in flight through it.
+        self._loop: PhaseLoop | None = None
         self._legs_recorded = 0
-        self._task_done = False
-        self._replans_left = 0
+        # Every episode merge started, as (thread, trajectory id), so a session that is ending can wait
+        # for them rather than exit under one (`_finish_merges`).
+        self._merges: list[tuple[threading.Thread, str]] = []
 
         # The planner, and what it says it can be asked for.
         self._backend = None
         self._capabilities = None
         self._planning_cfg = None
+        # The machine's settings, and the planner runtime's tools the merges use: both read at start(),
+        # for the same reason the profile is pinned.
+        self._settings = None
+        self._tools_dir: Path | None = None
+        # This machine's rig (its robot, cameras and calibration): the one given, else read at start().
+        self.rig = rig
 
-        # The plan for the task in progress, and the lineage id its legs share. Both are tandem's
-        # now; they used to live inside the planner's process, where tandem could see neither.
-        self._plan = None
-        # Kept after the attempt drops `_plan`, so the audit record can still be written for a task
+        # The lineage id the legs of the task in progress share, and the plan they were walking.
+        # Both are tandem's now; they used to live inside the planner's process, where tandem could
+        # see neither. The plan itself is the phase loop's while the attempt runs; this is its last
+        # plan, kept after the attempt drops it, so the audit record can still be written for a task
         # that was abandoned part-way -- which is exactly the episode whose provenance you want.
         self._last_plan = None
+        # How the phase loop said the last attempt ended (`phase_loop.TrialOutcome`), read after it
+        # returns or raises. Its `outcome` decides whether the operator is asked for a label at all.
+        self._last_outcome: TrialOutcome | None = None
         self._trajectory_id: str = ""
-        self._detected_goal: tuple = ()
-        self._last_verdicts: list = []
         self._vlm_dir: Path | None = None
 
         # The session runs on its own thread and blocks on these. Each human action sets one; a
@@ -270,96 +302,185 @@ class Session:
     # ---- lifecycle ---------------------------------------------------------
 
     def start(self) -> Session:
-        """Preflight, build the planner backend, and hand the session to its own thread."""
-        self.runtime.require_ready()
-        if not secrets.gemini_api_key():
+        """Preflight, build the planner backend, and hand the session to its own thread.
+
+        The planner's own preflight -- whether its runtime is built, whether its assets and
+        calibration are in place, whether it has the credentials its perception calls -- is the
+        planner's, run by its factory and its ``require_ready``. The session checks only what it
+        needs itself whichever planner is named.
+        """
+        # Phase planning is tandem's own use of Gemini: a model splits every task and checks every
+        # human step. A planner that calls Gemini itself (TiPToP's perception does) asks for the key
+        # when its factory builds it; one that does not, never needs one.
+        if self.hitl_enabled and not secrets.gemini_api_key():
             raise TandemError(
-                "No Gemini API key is set, and perception needs one every rollout.",
-                hint="Run `tandem config set-gemini-key`.",
+                "No Gemini API key is set, and phase planning (hitl.enabled) asks Gemini to split every "
+                "task into steps and to check every human one.",
+                hint="Run `tandem config set-gemini-key`, or turn hitl.enabled off.",
             )
 
-        if not self.profile.cameras.configured():
+        # The cameras are this machine's rig, not the profile's. The teleop legs record from them whichever
+        # planner runs, so they are the session's to insist on.
+        if self.rig is None:
+            self.rig = rig_mod.load()
+        if not self.rig.cameras.configured():
             raise TandemError(
-                f"Profile {self.profile.name!r} has no cameras configured, so nothing can be "
+                f"This machine's rig has no cameras configured ({self.rig.file()}), so nothing can be "
                 "perceived or recorded.",
-                hint="Add them with `tandem profile edit`, or import a rig with "
-                "`tandem profile create <name> --import-from <checkout>`.",
+                hint="`tandem rig set cameras.external.serial SERIAL` (and cameras.hand.serial), or `tandem init`.",
             )
-
-        problems = render.check_assets(self.profile, runtime_dir=self.runtime.root)
-        fatal = [p for p in problems if p.startswith("no camera extrinsics")]
-        if fatal:
+        missing = self.rig.cameras.perception_missing()
+        if missing:
             raise TandemError(
-                "\n".join(fatal),
-                hint="Extrinsics are keyed by camera serial; add them before collecting.",
+                f"{missing}, so perception has no camera to read ({self.rig.file()}).",
+                hint=f"`tandem rig set cameras.{self.rig.cameras.perception}.serial SERIAL`, or `tandem rig set "
+                "cameras.perception ROLE` to read another camera.",
             )
-        for problem in problems:
-            self._log("tandem", f"warning: {problem}")
 
-        self._files = render.prepare_session_files(self.profile, self.id, runtime_dir=self.runtime.root)
+        if self.hitl_enabled:
+            # Resolved now, before anything is warmed: a plugin that will not import, or a name two
+            # installed packages claim, is otherwise found at the first human phase, with the robot
+            # already part-way through the task. Only described here, not built; the loop builds it.
+            executors.info(self.profile.hitl.human_executor)
+
+        # Everything a background thread would otherwise resolve later, resolved here: the settings, the
+        # ffmpeg the merges use, and the planning config, whose proposal cache path is relative to the
+        # profile or to `~`.
+        self._settings = settings_mod.load()
+        self._tools_dir = registry.tools_dir(self.profile.planner.backend, self._settings)
+        self._planning_config()
+        self._files = self._session_files()
         self._backend = self._build_backend()
-        self._backend.require_ready()
+        try:
+            self._backend.require_ready()
+        except BaseException:
+            # Nothing is warmed yet, but a backend is allowed to have taken something in create(),
+            # and a session that never starts will never reach _shutdown to give it back.
+            backend, self._backend = self._backend, None
+            try:
+                backend.close()
+            except Exception as exc:
+                self._log("tandem", f"could not close the planner cleanly: {exc}")
+            raise
 
         self._set_state(State.WARMING)
         self._worker = threading.Thread(target=self._run, name=f"session:{self.id}", daemon=True)
         self._worker.start()
         return self
 
-    def _build_backend(self):
-        """The planner this profile names, ready to be warmed."""
-        from tandem.planners import registry
+    def _session_files(self) -> dict:
+        """The session's scratch directory, and its events file, created before anything writes."""
+        session_dir = paths.session_scratch_dir() / self.profile.name / self.id
+        session_dir.mkdir(parents=True, exist_ok=True)
+        events_file = session_dir / "events.jsonl"
+        # Pre-created, so a tailer can attach before the first event is written.
+        events_file.touch()
+        return {"session_dir": session_dir, "events_file": events_file}
 
-        env = render.render_env(
-            self.profile,
-            events_file=self._files["events_file"],
-            task=self.task,
-            runtime_dir=self.runtime.root,
-        )
-        backend_class = registry.backend_class(self.profile.planner.backend)
-        return backend_class(
-            self.runtime,
-            env=env,
-            output_dir=self.profile.trajectories_dir(),
-            execute=self.execute,
-            record=self.record,
-            cost_overrides_file=self._files.get("overrides_file"),
-            on_log=self._log,
+    def _build_backend(self):
+        """The planner this profile names, built by its factory and ready to be warmed.
+
+        Every planner is built the same way, from the same context. What any one of them needs set
+        up first -- a runtime, rendered config, environment variables -- is its factory's business,
+        which is what lets a planner the session has never heard of be named in a profile.
+        """
+        from tandem.planners.base import BackendContext
+
+        spec = self.profile.planner
+        # The planner's machine settings (rig.yml's planners.<name>), checked by the planner now: a bad one
+        # is refused here, before anything is warmed.
+        rig_options = rig_mod.planner_options(self.rig, spec.backend)
+        return registry.create(
+            spec.backend,
+            BackendContext(
+                profile=self.profile,
+                session_dir=self._files["session_dir"],
+                output_dir=self.profile.trajectories_dir(),
+                execute=self.execute,
+                record=self.record,
+                on_log=self._log,
+                options=dict(spec.options),
+                settings=self._settings,
+                session_id=self.id,
+                task=self.task,
+                events_file=self._files["events_file"],
+                # Normally left to the factory: it resolves its own runtime from the settings, as
+                # every command that asks the registry for this planner's runtime does.
+                runtime_dir=self._runtime_dir,
+                rig=self.rig,
+                rig_options=rig_options,
+            ),
         )
 
     # ---- the session loop --------------------------------------------------
 
     def _run(self) -> None:
         """Warm the planner once, then walk one task after another until told to stop."""
+        failure: str | None = None
         try:
             self._event("session_start")
             self._backend.warm()
             self._capabilities = self._backend.capabilities()
+            # After warm, not in start(): a sidecar only says which verbs it answers once it runs.
+            self._require_frames()
             while not self._stopping:
                 if not self._await_task():
                     break
                 try:
                     self._run_task()
+                except _Stopped:
+                    self._log("tandem", "the session is stopping, so the task attempt ends here")
+                    self._event("rollout_aborted", reason=_Stopped.reason)
                 except _Preempted:
                     self._log("tandem", "the task attempt was preempted; the planner is still warm")
                     self._event("rollout_aborted")
-                    self._plan = None
-                except _CustodyLost:
+                except CustodyError:
+                    # The robot or the cameras could not be got back (the phase loop's hand-off).
+                    # Deliberately not caught as one bad attempt: a session that has lost custody is
+                    # not warm and cannot run the next task, so returning to the prompt would leave
+                    # an operator staring at a ready-looking session that fails at every rollout --
+                    # and an arm nothing will ever park.
                     raise
                 except Exception as exc:  # a bad task must not end a warm session
                     self._log("tandem", f"the task attempt failed: {type(exc).__name__}: {exc}")
                     self._event("rollout_aborted", error=str(exc))
-                    self._plan = None
+                self._rewarm_after_planner_failure()
                 if self.max_episodes and self.labeled_count >= self.max_episodes:
                     self._log("tandem", f"reached {self.max_episodes} episode(s); stopping")
                     break
         except Exception as exc:
-            self._fail(f"{type(exc).__name__}: {exc}")
-            return
+            # Said now, but the session reads as FAILED only once `_shutdown` has parked the arm,
+            # closed the planner and the executors, and waited for the merges: `tandem collect` exits
+            # as soon as the session has ended, and a failure marked here used to let it exit under
+            # all of that -- a merge killed half-done, an executor's process left running.
+            failure = f"{type(exc).__name__}: {exc}"
+            self._log("tandem", f"the session is failing: {failure}; releasing everything first")
         finally:
-            self._shutdown()
+            self._shutdown(failure)
 
-    def _shutdown(self) -> None:
-        """Park the arm and release everything. Runs on every exit path, including a failure."""
+    def _rewarm_after_planner_failure(self) -> None:
+        """Warm the planner again before the next task, when one of its verbs raised in this one.
+
+        The phase loop ends such a trial itself (``PhaseLoop._planner_raised``). What it cannot do is
+        bring the planner back: a sidecar that crashed, or was stopped for not answering, is not
+        running, and every later task would fail at its first perception pass -- "the planner backend
+        is not running" -- until the session was restarted. ``warm`` on a planner that is still warm
+        does nothing, and on a sidecar that is gone starts a fresh one. If even that fails, the session
+        fails with it rather than returning to a task prompt it could never serve.
+        """
+        outcome = self._last_outcome
+        if self._stopping or outcome is None or not outcome.planner_raised:
+            return
+        self._log("tandem", "the planner failed during that attempt; warming it again before the next task")
+        self._set_state(State.WARMING)
+        self._backend.warm()
+
+    def _shutdown(self, failure: str | None = None) -> None:
+        """Park the arm and release everything. Runs on every exit path, including a failure.
+
+        ``failure`` is why the session failed, if it did. The session is marked ended -- FAILED with
+        it, STOPPED without -- only at the very end, so nothing waiting on it moves on early.
+        """
         backend = self._backend
         self._backend = None
         if backend is not None:
@@ -378,23 +499,85 @@ class Session:
                 backend.close()
             except Exception as exc:
                 self._log("tandem", f"could not close the planner cleanly: {exc}")
+        # The human executors last, once the arm is parked and the planner has let go: whatever
+        # building one started (a policy server, a device) would otherwise outlive the session.
+        loop, self._loop = self._loop, None
+        if loop is not None:
+            loop.close()
+        self._finish_merges()
         self._event("session_end")
+        if failure is not None:
+            self._fail(failure)
+            return
         with self._lock:
             if self.state not in TERMINAL:
                 self._set_state(State.STOPPED, locked=True)
 
+    def _finish_merges(self) -> None:
+        """Wait, bounded, for the episode merges this session started. Before the session reads as ended.
+
+        A merge runs on a thread of its own so the next task need not wait for several GB of video,
+        and `tandem collect` exits as soon as the session has ended: an interpreter exiting under a
+        merge kills it half-done. The phase record is written before the merge starts
+        (``episodes.merge_trajectory``), so even a merge that outlives this still leaves it beside the
+        legs; what is lost is only the join, which `tandem traj merge` can redo.
+        """
+        pending = [(thread, tid) for thread, tid in self._merges if thread.is_alive()]
+        if not pending:
+            return
+        self._log("tandem", f"waiting for {len(pending)} episode merge(s) to finish")
+        deadline = time.monotonic() + MERGE_GRACE
+        for thread, _ in pending:
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        for thread, tid in pending:
+            if thread.is_alive():
+                self._log(
+                    "tandem",
+                    f"the merge of trajectory {tid} is still running after {MERGE_GRACE:.0f}s; if it does not "
+                    f"finish, the legs are intact and `tandem traj merge {tid}` joins them",
+                )
+
+    def _require_frames(self) -> None:
+        """Refuse, before any task, a planner that cannot capture the frame the checks need.
+
+        A human step is verified on a fresh frame from the verification camera. A planner with no
+        ``capture_frame`` (the SDK's default, and how the scaffold ships) used to have every person's
+        step accepted unchecked -- read as a camera that happened to be down -- so no trial could ever
+        fail verification, and the paper's exclusion rule never fired. That is a setting the operator
+        has to change, or a verb the planner has to implement; it is not something to find out from
+        a dataset.
+        """
+        if not self.hitl_enabled:
+            return
+        cfg = self._planning_config()
+        needs = [key for key in FRAME_CHECKS if getattr(cfg, key)]
+        if not needs or _can_capture_frame(self._backend):
+            return
+        name = self.profile.planner.backend
+        checks = " and ".join(f"hitl.{key}" for key in needs)
+        raise TandemError(
+            f"The {name} planner cannot capture a camera frame, and {checks} "
+            f"{'needs' if len(needs) == 1 else 'need'} one: every human step is verified on a fresh frame "
+            "from the verification camera.",
+            hint=f"Implement capture_frame(camera=...) in the planner, or set {checks} to false in the "
+            "profile's hitl block -- knowing that no human step will then be verified.",
+        )
+
     def _run_task(self) -> None:
-        """One attempt at the current task: plan it into phases, then walk them."""
+        """One attempt at the current task, and the label that closes it out.
+
+        The attempt itself (planning the task into phases and walking them) is the phase loop's.
+        What stays here is what a person sees around it: the lineage id the legs share, where the
+        models' audit trail goes, and the verdict at the end.
+        """
         self._set_state(State.ROLLING)
         # tandem mints the lineage id, because only tandem sees both the planner's legs and the
         # teleop ones. It is what joins them into a single episode.
         self._trajectory_id = uuid.uuid4().hex[:16]
         self._legs_recorded = 0
-        self._plan = None
         self._last_plan = None
-        self._detected_goal = ()
-        self._task_done = False
-        self._replans_left = MAX_REPLANS
+        self._last_outcome = None
+        self.last_trial = None
         # Every image sent to a model this attempt, and what it answered, gathered in one place and
         # filed with the finished episode. Per ATTEMPT rather than per leg: the proposal happens on
         # the first leg and the verifications on later ones, and split across leg directories --
@@ -403,505 +586,97 @@ class Session:
         self._vlm_dir = None
         if self.hitl_enabled and self._planning_config().save_vlm_io:
             self._vlm_dir = self._files["session_dir"] / "vlm" / self._trajectory_id
-        self.human_phase = None
-        self.phase_progress = None
-        self.unrepresented = []
-        leg = 0
 
+        if self._loop is None:
+            self._loop = self._phase_loop()
+        loop = self._loop
         try:
-            while not self._task_done:
-                self._check_preempt()
-                # One directory per leg, allocated ONCE and handed to every call that writes into
-                # it. Perception debug output, the plan and the recording all belong to one leg.
-                leg_dir = self._new_leg_dir()
-                try:
-                    scene = self._perceive(leg_dir, first_leg=leg == 0)
-                    if self._plan is None:
-                        # Also re-run with phase planning OFF, where it refreshes the planner's own
-                        # goal from THIS pass's object labels -- the previous pass's labels may not
-                        # even exist any more.
-                        if not self._prepare_plan(scene):
-                            break
-                    elif not self._rebind(scene):
-                        break
-
-                    if self._plan is not None and self._plan.finished:
-                        break
-                    phase = self._plan.current if self._plan is not None else None
-
-                    if self._teleop_requested.is_set():
-                        # An operator-asked hand-off, honoured at a phase boundary so the arm parks
-                        # somewhere sane rather than mid-motion. Nothing advances: the same phase
-                        # (or, with no plan, the same task) is re-perceived and planned afterwards.
-                        self._teleop_requested.clear()
-                        self._hand_off()
-                    elif phase is not None and phase.is_human:
-                        self._run_human_phase(phase)
-                    else:
-                        self._run_robot_phase(scene, leg_dir)
-                finally:
-                    self._retire_leg_dir(leg_dir)
-
-                leg += 1
-                if self._plan is not None and not self._plan.finished:
-                    self._event(
-                        "phase_complete",
-                        phase_index=self._plan.index,
-                        n_phases=len(self._plan.phases),
-                    )
-        finally:
-            # Every exit path lands here -- finished, abandoned, rebound onto a scene that no
-            # longer matches, or preempted. The rule is the same for all of them: frames on disk
-            # need a verdict, because the label is what ends a trajectory and merges its legs.
-            # Anything else leaves legs nothing will ever join, filing as episodes of their own.
-            if self._legs_recorded:
-                self._await_label()
-            else:
-                self._log("tandem", "nothing was recorded, so there is nothing to label")
-                self._event("rollout_discarded")
-
-    # ---- one leg -----------------------------------------------------------
-
-    def _new_leg_dir(self) -> Path:
-        """A fresh directory for one leg, where a trajectory actually lives.
-
-        Under ``<profile>/trajectories/eval/``, not the session's scratch directory: that is where
-        the teleop driver writes its legs, where ``merge.find_legs`` looks for them, and where
-        ``tandem traj list`` reads. A leg written anywhere else is invisible to all three — it
-        would never be merged, never be labeled, and never appear in the dataset.
-
-        Named with a wall-clock stamp like every other trajectory, with a suffix only if two legs
-        start inside the same second, which second-resolution names otherwise silently collide on.
-        """
-        import datetime
-
-        from tandem.core.profiles import STATUSES
-
-        root = self.profile.status_dir("eval")
-        root.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-
-        def taken(candidate: str) -> bool:
-            # Across EVERY status, not just eval: a labeled leg moves to success/ or failure/ and
-            # frees its name here, and a directory name IS a trajectory's id — two episodes sharing
-            # one is a collision that surfaces much later, in a listing or a merge that overwrites.
-            return any((self.profile.status_dir(status) / candidate).exists() for status in STATUSES)
-
-        name, suffix = stamp, 1
-        while taken(name):
-            suffix += 1
-            name = f"{stamp}-{suffix}"
-        directory = root / name
-        directory.mkdir(parents=True)
-        return directory
-
-    def _retire_leg_dir(self, leg_dir: Path) -> None:
-        """Take a leg directory back out of the dataset if nothing was recorded into it.
-
-        Every pass allocates one under ``eval/`` because perception writes into it before anyone
-        knows whether a recording will follow — and for a human phase, or a phase the planner could
-        not plan, none ever does. Left there, each is listed by ``tandem traj list`` and the web UI
-        as a zero-frame episode, so a session's worth of them buries the real ones.
-
-        Moved rather than deleted: the perception dump is the first thing worth looking at when a
-        phase went wrong, and the session directory is where post-mortem material lives.
-        """
-        import shutil
-
-        try:
-            if (leg_dir / "_meta.json").is_file():
-                return  # something was recorded here; it is a real leg
-            keep = self._files["session_dir"] / "perception" / leg_dir.name
-            keep.parent.mkdir(parents=True, exist_ok=True)
-            if keep.exists():
-                shutil.rmtree(keep, ignore_errors=True)
-            shutil.move(str(leg_dir), str(keep))
-        except OSError as exc:
-            self._log("tandem", f"could not tidy away the unused leg directory {leg_dir.name}: {exc}")
-
-    def _perceive(self, leg_dir: Path, *, first_leg: bool) -> object:
-        """Look at the workspace. The arm is only parked first when nothing is mid-task.
-
-        Resetting between phases would undo the step before it — and after a hand-off it could
-        drive an arm a person just handed us, holding something, back to home.
-        """
-        self._set_state(State.ROLLING)
-        scene = self._backend.perceive(
-            task_hint=self.task,
-            save_dir=leg_dir,
-            reset_arm=first_leg,
-        )
-        self._log("tandem", f"perceived: {', '.join(scene.object_labels) or 'nothing'}")
-        return scene
-
-    def _prepare_plan(self, scene) -> bool:
-        """Decompose the task into phases, or fall through to the planner's own goal.
-
-        With phase planning off there is nothing for a model to decompose, so the goal is the one
-        the planner's own translator produced from the instruction during perception — exactly the
-        behaviour a session had before any of this existed.
-        """
-        if not self.hitl_enabled:
-            self._detected_goal = scene.detected_goal
-            return True
-
-        from tandem.planning.grounding import to_pil
-        from tandem.planning.plan import build_plan
-        from tandem.planning.record import recording_to
-
-        if not scene.rgb_path or not Path(scene.rgb_path).is_file():
-            self._log("tandem", "perception saved no image, so the task cannot be decomposed")
-            return False
-
-        try:
-            from PIL import Image
-
-            image = to_pil(Image.open(scene.rgb_path).convert("RGB"))
-        except Exception as exc:
-            self._log("tandem", f"could not read the perception image: {exc}")
-            return False
-
-        import asyncio
-
-        self._set_state(State.ROLLING)
-        self._log("tandem", f"decomposing the task with {self._planning_config().proposal_model}")
-        try:
-            with recording_to(self._vlm_dir):
-                plan, failure = asyncio.run(
-                    build_plan(
-                        image,
-                        self.task,
-                        scene.object_labels,
-                        scene.table_label,
-                        self._planning_config(),
-                        self._capabilities,
-                        self._trajectory_id,
-                    )
-                )
-        except Exception as exc:
-            self._log("tandem", f"could not decompose the task: {type(exc).__name__}: {exc}")
-            return False
-        if plan is None:
-            self._log("tandem", failure or "the task could not be decomposed")
-            return False
-
-        self._plan = plan
-        self._last_plan = plan
-        self.phase_progress = (0, len(plan.phases))
-        self.unrepresented = [dict(u) for u in plan.spec.unrepresented]
-        if self.unrepresented:
-            # Loud, not merely logged: every later phase is planned against this, the dataset is
-            # labeled with the whole instruction regardless, and the remedy — put the missing object
-            # on the table and start again — is only available before the arm moves.
-            self._event("instruction_not_fully_represented", unrepresented=self.unrepresented)
-            for dropped in self.unrepresented:
-                self._log("tandem", f"NOT part of the plan — {dropped['clause']}: {dropped['reason']}")
-        for i, phase in enumerate(plan.phases):
-            self._log("tandem", f"phase {i} [{phase.executor}] {phase.description}")
-        return True
-
-    def _rebind(self, scene) -> bool:
-        """Point the plan at this pass's object labels, or give up on the attempt.
-
-        Perception names objects afresh every pass and the names drift. Mid-task that is fatal if
-        unhandled: the plan refers to objects this pass did not produce, so it would be thrown away
-        and the task re-planned from a scene already half rearranged — asking the person to redo the
-        step they just finished.
-        """
-        if self._plan is None:
-            return True
-        from tandem.planning.drift import match_drifted_names
-
-        detected = set(scene.object_labels) | {scene.table_label}
-        needed = self._plan.objects_needed_now()
-        missing = sorted(needed - detected)
-        if not missing:
-            return True
-
-        # Only a label the plan does not already own can be a drifted spelling of one it does;
-        # offering an object a completed phase named would point this leg at something already put
-        # away.
-        candidates = sorted(detected - self._plan.spec.scene_types.all_names)
-        mapping = match_drifted_names(missing, candidates)
-        if mapping is None:
-            self._log("tandem", f"perception no longer detects {', '.join(missing)}; abandoning the attempt")
-            self._plan = None
-            self._task_done = True
-            return False
-        self._plan.rebind(mapping)
-        return True
-
-    def _run_robot_phase(self, scene, save_dir: Path) -> None:
-        """Hand one sub-goal to the planner and record what it did."""
-        from tandem.planners.base import LegSpec
-
-        if self._plan is not None:
-            goal = self._plan.goal()
-            surfaces = self._plan.surfaces()
-            run = self._plan.robot_run()
-            description = "; ".join(p.description for p in run)
-            index, total = self._plan.index, len(self._plan.phases)
-        else:
-            goal, surfaces = list(self._detected_goal), frozenset()
-            description, index, total = self.task, None, None
-
-        if not goal:
-            self._log("tandem", "nothing to plan for: the goal is empty")
-            self._plan = None
-            return
-
-        self._event("rollout_start", dir=str(save_dir), phase_index=index, n_phases=total)
-        self.current = RolloutRecord(dir=str(save_dir), started_at=time.time())
-        self._log("tandem", f"planning: {[a.to_dict() for a in goal]}")
-        result = self._backend.plan(scene.scene_id, goal, surfaces=surfaces, save_dir=save_dir)
-
-        if not result.ok:
-            self._on_plan_failure(result.failure_reason or "no plan found")
-            return
-
-        self._check_preempt()
-        execution = self._backend.execute(
-            result.plan_handle,
-            LegSpec(
-                trajectory_id=self._trajectory_id,
+            loop.run(
+                task=self.task,
                 instruction=self.instruction,
-                phase_index=index,
-                n_phases=total,
-                phase_description=description,
-                record=self.record,
-            ),
-            save_dir=save_dir,
+                trajectory_id=self._trajectory_id,
+                vlm_dir=self._vlm_dir,
+            )
+        except _Preempted as exc:
+            # Raised from the operator's own boundary check, so the loop never got to say how the
+            # attempt ended. Said here, before anything is filed: an attempt a preempt or a stop cut
+            # off part-way is aborted, and must not reach a label prompt looking like one that ran.
+            loop.interrupted(exc.reason)
+            raise
+        except CustodyError as exc:
+            loop.interrupted(f"the arm could not be handed back: {exc.message}")
+            raise
+        except Exception as exc:
+            # Said now, not after the filing below: a trial the planner or an executor ended by
+            # raising used to reach the label prompt with the error still in flight, and the operator
+            # was asked "did that work?" before being told the attempt failed. The loop has already
+            # recorded the stage for anything it knows how to name; anything else is a failure too.
+            self._log("tandem", f"the task attempt failed: {type(exc).__name__}: {exc}")
+            self._event("rollout_aborted", error=str(exc))
+            loop.interrupted(f"the attempt failed: {type(exc).__name__}: {exc}", outcome="failure")
+        finally:
+            # Read off the loop's outcome, which it keeps current as it goes, so it is right on
+            # every exit path, including the ones that unwind out of the loop as an exception.
+            outcome = loop.outcome
+            self._legs_recorded = outcome.legs_recorded
+            self._last_plan = outcome.plan
+            self._last_outcome = outcome
+            self.last_trial = self._trial_summary(None)
+            # Every exit path lands here -- finished, abandoned, excluded, rebound onto a scene that
+            # no longer matches, or preempted. The rule is the same for all of them: frames on disk
+            # have to be filed, because filing is what ends a trajectory and merges its legs.
+            # Anything else leaves legs nothing will ever join, filing as episodes of their own.
+            # Filing waits for the operator's label only where the label can still decide the trial
+            # (`_settled_by_the_loop`): one the loop ended itself is filed at once, under failure/.
+            if not self._legs_recorded:
+                self._log("tandem", "nothing was recorded, so there is nothing to label")
+                self._event("rollout_discarded", **self.last_trial)
+            elif _settled_by_the_loop(outcome):
+                self._file_without_label(outcome)
+            else:
+                self._await_label()
+
+    def _phase_loop(self) -> PhaseLoop:
+        """The trial algorithm, wired to this session's planner, settings and operator."""
+        io = _SessionIO(self)
+        return PhaseLoop(
+            self._backend,
+            self._capabilities,
+            self._planning_config(),
+            events=io,
+            operator=io,
+            executor_context=self._executor_context(),
+            legs=episodes.LegDirs(self.profile, self._files["session_dir"], log=io.log),
+            record=self.record,
         )
-        if self.current is not None:
-            self.current.n_frames = execution.n_frames
-        if execution.n_frames:
-            self._legs_recorded += 1
-        self._event("rollout_saved", dir=str(save_dir), n_frames=execution.n_frames)
-        if not execution.ok:
-            self._log("tandem", f"execution failed: {execution.failure_reason}")
 
-        if self._plan is not None:
-            self._plan.record_plan(self._plan.index, result)
-            self._plan.advance()
-            self.phase_progress = (self._plan.index, len(self._plan.phases))
-        else:
-            # No phase plan: that was the whole task, in one leg.
-            self._detected_goal = ()
-            self._task_done = True
+    # ---- a leg for a person ------------------------------------------------
 
-    def _on_plan_failure(self, reason: str) -> None:
-        """What happens when the planner cannot plan a phase.
+    def _executor_context(self) -> ExecutorContext:
+        """What a human executor is built with: this session's profile, scratch space, log and UI.
 
-        `teleop` is the option the old design could not express at all: who does what was decided
-        at proposal time inside the planner's process, so a phase it turned out not to be able to
-        plan could only end the attempt. tandem owns the split, so the person can simply do it.
+        ``settings`` is left unset, so the machine's settings are read afresh at every leg: a
+        ``tandem config set teleop.*`` between two hand-offs takes effect at the next one, as it did
+        when the session launched the driver itself.
         """
-        policy = self._planning_config().on_robot_phase_failure
-        self._log("tandem", f"the planner could not plan this phase: {reason}")
-        self._event("phase_plan_failed", reason=reason, policy=policy)
+        return ExecutorContext(
+            profile=self.profile,
+            rig=self.rig,
+            session_dir=self._files["session_dir"],
+            on_log=self._log,
+            on_emit=self._emit,
+            on_problem=self._handoff_problem,
+        )
 
-        if self._plan is None or policy == "abort":
-            self._plan = None
-            self._task_done = True
-            return
-        if policy == "replan":
-            # Drop the plan and go round again: the next pass perceives afresh and decomposes the
-            # task against the scene as it now stands. Bounded, because a goal the planner cannot
-            # reach fails the same way every time -- and `_task_done` stays False, which is the
-            # whole difference from `abort`. Without that this policy was abort under another name.
-            if self._replans_left <= 0:
-                self._log("tandem", "out of re-planning attempts; giving up on this task")
-                self._plan = None
-                self._task_done = True
-                return
-            self._replans_left -= 1
-            self._log("tandem", "re-planning the task from the scene as it now stands")
-            self._plan = None
-            return
-        self._log("tandem", "offering this phase to you as teleop instead")
-        phase = self._plan.hand_current_to_human()
-        self._run_human_phase(phase)
+    def _handoff_problem(self, message: str) -> None:
+        """A problem with the leg in flight that the person holding the arm has to see now.
 
-    # ---- a phase for a person ----------------------------------------------
-
-    def _run_human_phase(self, phase) -> None:
-        """Hand the arm over, let a person do this step, and check they did.
-
-        A failed check is not a lost demonstration: the person is told what is still missing and
-        given another go, because one bad classifier call should not cost an episode.
+        Shown until the arm is taken back (`_SessionIO.arm_returned`): a driver that would not start
+        leaves the arm released and the session parked at the hand-off, which the operator recovers
+        from by driving the arm themselves -- rather than the planner grabbing an arm they may already
+        be holding.
         """
-        from tandem.planning.plan import phase_summary, retry_message
-
-        cfg = self._planning_config()
-        attempts_left = cfg.verify_retries
-        attempt = 1
-        while True:
-            summary = phase_summary(self._plan, phase) if self._plan is not None else {}
-            self.human_phase = HumanPhase(
-                description=summary.get("description", phase.description),
-                instructions=summary.get("instructions", phase.instructions),
-                expected=list(summary.get("expected", [])),
-                index=int(summary.get("phase_index", 0)),
-                total=int(summary.get("n_phases", 0)),
-                attempt=attempt,
-                missing=self.human_phase.missing if self.human_phase is not None and attempt > 1 else [],
-            )
-            self._event("awaiting_human_phase", **summary)
-            self._set_state(State.AWAITING_HUMAN_PHASE)
-
-            answer = self._await_human()
-            if answer == "abort":
-                self._log("tandem", "the phase was abandoned; ending this attempt")
-                self.human_phase = None
-                self._plan = None
-                self._task_done = True
-                return
-            if answer == "teleop":
-                self._hand_off()
-
-            ok, verdicts = self._verify(phase)
-            self.human_phase.verified = ok
-            self.human_phase.missing = _missing_from(verdicts)
-            self._event("human_phase_verified", ok=ok, verdicts=verdicts)
-
-            if ok or not cfg.verify_enforced:
-                if not ok:
-                    self._log("tandem", "the step did not verify, but verify_enforced is off; carrying on")
-                break
-            if attempts_left <= 0:
-                self._log("tandem", "the step could not be verified; ending this attempt")
-                self.human_phase = None
-                self._plan = None
-                self._task_done = True
-                return
-            attempts_left -= 1
-            attempt += 1
-            self._log("tandem", retry_message(self.human_phase.missing, attempts_left))
-
-        self.human_phase = None
-        if self._plan is not None:
-            self._plan.verdicts.extend(self._last_verdicts)
-            self._plan.advance()
-            self.phase_progress = (self._plan.index, len(self._plan.phases))
-
-    def _verify(self, phase) -> tuple[bool, list[dict]]:
-        """Ask a vision model whether the workspace now looks like that step was done.
-
-        A classifier that cannot be reached must never cost a demonstration, so an error here is
-        an accepted step with no verdicts rather than a failed one.
-        """
-        import asyncio
-
-        from tandem.planning.grounding import to_pil, verify_phase
-        from tandem.planning.record import recording_to
-
-        self._last_verdicts = []
-        cfg = self._planning_config()
-        try:
-            from PIL import Image
-
-            frame = self._backend.capture_frame(camera=cfg.verification_camera)
-            image = to_pil(Image.open(frame).convert("RGB"))
-            invented = self._plan.spec.invented if self._plan is not None else ()
-            with recording_to(self._vlm_dir):
-                ok, verdicts = asyncio.run(verify_phase(image, phase, invented, cfg, self._capabilities))
-        except Exception as exc:
-            self._log("tandem", f"could not check the step; accepting it unchecked ({exc})")
-            return True, []
-        self._last_verdicts = list(verdicts)
-        return ok, [v.summary() for v in verdicts]
-
-    def _hand_off(self) -> None:
-        """Give the arm to a person, wait for it back, and take it again.
-
-        The order is the whole of it: the planner holds the robot and every camera exclusively, so
-        nothing else can open them until the release has actually completed — and the teleop child
-        must be gone before the planner reaches for them again.
-        """
-        self._set_state(State.HANDING_OFF)
-        self.teleop_pending = False
-        self._event("teleop_handoff_start")
-        try:
-            self._backend.release_hardware()
-        except Exception as exc:
-            self.handoff_error = f"the planner could not release the robot: {exc}"
-            self._log("tandem", self.handoff_error)
-            self._event("teleop_handoff_warning", message=self.handoff_error)
-
-        self._event("awaiting_teleop_resume", trajectory_id=self._trajectory_id)
-        # Cleared before the wait, not after it. The state stays TELEOP_HANDOFF for the whole exit
-        # sequence, so a second "return control" -- which the UI keeps offering throughout -- used
-        # to leave this set with nobody waiting, and the NEXT hand-off then ended instantly while
-        # the person was still being told the arm was theirs.
-        self._resume_ready.clear()
-        self._set_state(State.TELEOP_HANDOFF)
-        self._start_teleop()
-
-        if not self._resume_ready.wait(timeout=HUMAN_PHASE_TIMEOUT) and not self._stopping:
-            # Nobody handed the arm back. Taking it anyway would drive a robot somebody may still
-            # have their hands on, so the attempt ends instead and says why.
-            self._log(
-                "tandem",
-                f"nobody returned control within {HUMAN_PHASE_TIMEOUT / 60:.0f} minutes; ending this "
-                "attempt rather than taking an arm someone may still be holding",
-            )
-            self.handoff_error = "The hand-off timed out. Return control to take the arm back."
-        self._resume_ready.clear()
-
-        teleop, self._teleop = self._teleop, None
-        if teleop is not None:
-            teleop.finish()
-            if not teleop.wait(timeout=TELEOP_EXIT_GRACE):
-                self._log("tandem", "the teleop driver has not exited; killing it so the arm can be taken back")
-                teleop.kill()
-                if not teleop.wait(timeout=10.0):
-                    # It still holds the cameras. Reaching for them now gets a serial-0 device and
-                    # a failure that looks like broken hardware rather than a process that will not
-                    # die, so say what is actually true and end the session.
-                    raise _CustodyLost(
-                        "the teleop driver will not exit, so it still holds the robot and cameras"
-                    )
-            # Counted AFTER the wait, not before it. `finish()` only writes a line to the child's
-            # stdin; the frame count arrives on the tailer thread when the driver emits
-            # `rollout_saved`, which it does only after muxing two or three videos — and `wait()`
-            # is what drains that event. Asking before it is asking too early every time, and the
-            # answer is "nothing was recorded", which strands the demonstration the person just
-            # gave and tells them it never happened.
-            if teleop.n_frames:
-                self._legs_recorded += 1
-                self._log("tandem", f"the teleop leg is part of this episode ({teleop.n_frames} frames)")
-
-        try:
-            self._backend.reacquire_hardware()
-        except Exception as exc:
-            # Unrecoverable within the session: every later task would fail on hardware the backend
-            # no longer owns, and the arm would never be parked. Ending here is the honest outcome.
-            raise _CustodyLost(f"the planner could not take the robot back: {exc}") from exc
-        self.handoff_error = None
-        self._event("teleop_handoff_done")
-        self._set_state(State.ROLLING)
-
-    def _start_teleop(self) -> None:
-        """Launch the teleop driver, now that the planner has actually let go.
-
-        Failure here is not fatal: the session stays parked at its hand-off wait with
-        `handoff_error` set, which the operator can recover from by driving the arm themselves,
-        rather than the planner grabbing an arm they may already be holding.
-        """
-        cfg = settings_mod.load()
-        if not cfg.teleop.enabled:
-            self.handoff_error = (
-                "Teleop is not configured, so nothing is driving the arm. Drive it by hand if you "
-                "like, then return control."
-            )
-            self._log("tandem", self.handoff_error)
-            return
-        try:
-            self._teleop = TeleopChild(self, cfg).start()
-            self._log("tandem", "teleop driver started; the arm is yours")
-        except Exception as exc:
-            self.handoff_error = f"Could not start the teleop driver: {exc}"
-            self._log("tandem", self.handoff_error)
+        self.handoff_error = message
 
     # ---- waiting for a person ----------------------------------------------
 
@@ -936,9 +711,11 @@ class Session:
             if self._label_ready.wait(timeout=0.2):
                 self._label_ready.clear()
                 break
-        else:
-            return
         if self._stopping:
+            # Stopped before anybody answered: `q` or Ctrl-C at "Did that work?", or a stop from the
+            # web page. Not a label, so nothing is filed as one -- but the phase record exists only
+            # in memory, and returning without it lost it for good.
+            self._leave_unlabeled()
             return
 
         success = bool(self._label_answer)
@@ -950,22 +727,161 @@ class Session:
         self.current = None
         self.labeled_count += 1
         self.success_count += int(success)
-        self._event("labeled", dir=record.dir, success=success, trajectory_id=self._trajectory_id)
+        # The label settles the trial's outcome; the stage the loop stopped at, if it stopped one (a
+        # check whose verdict was left to the label), goes with it.
+        self.last_trial = self._trial_summary(record.status, labeled=True)
+        self._event("labeled", dir=record.dir, success=success, **self.last_trial)
+        self._file_episode(record.status)
 
-        # Fire and forget: a merge of several GB of video must not hold up the next task.
+    def _file_without_label(self, outcome: TrialOutcome) -> None:
+        """File a trial the phase loop ended itself: under failure/, with no label prompt.
+
+        There is no question left for a label to answer, so asking one is a control that lies:
+
+        * ``excluded`` -- the paper's rule for a human phase that never verified
+          (``on_verification_failure: exclude``). Not part of the dataset, and a prompt the operator
+          could answer "success" would put it straight back in.
+        * ``failure`` at ``tamp_planning``, ``tamp_execution`` or ``human_policy`` (or on an error with
+          no stage). The plan did not finish, and the paper counts exactly these as trial failures
+          (Fig. 4): an unfinished plan is never a demonstration, whatever the video looks like.
+        * ``aborted`` -- the operator gave the step up, preempted the attempt, or stopped the session.
+          Nothing about the task was decided; the attempt simply did not finish.
+
+        The one loop-ended trial still labeled is a check left to the operator on purpose
+        (``on_verification_failure: label``, stage ``verification``): overruling the classifier is
+        what that setting is for.
+
+        None of them is thrown away. The legs are merged exactly as a labeled trial's are, and
+        ``hitl.json`` beside them says how it ended, at which stage, and why -- for an excluded trial,
+        with the failing verdicts that are the raw material for working out whether the person or
+        the classifier got it wrong. A failure counts towards `max_episodes` as a failure label did,
+        since it is a trial result; an excluded or aborted trial does not.
+        """
+        kind = outcome.outcome
+        directory = str(self.current.dir) if self.current else ""
+        record = self.current or RolloutRecord(dir=directory, started_at=time.time())
+        record.status = kind
+        record.success = False if kind == "failure" else None
+        self.rollouts.append(record)
+        self.current = None
+        if kind == "excluded":
+            self.excluded_count += 1
+        elif kind == "aborted":
+            self.aborted_count += 1
+        else:
+            self.labeled_count += 1
+        self.last_trial = self._trial_summary("failure")
+        if kind == "excluded":
+            self._log(
+                "tandem",
+                f"this trial is excluded from the dataset ({outcome.failure_stage}): {outcome.reason}. It "
+                "is not labeled; its legs are kept under failure/ with excluded: true",
+            )
+            self._event("trial_excluded", dir=record.dir, **self.last_trial)
+        else:
+            stage = f" at {outcome.failure_stage}" if outcome.failure_stage else ""
+            self._log(
+                "tandem",
+                f"this trial ended {kind}{stage}: {outcome.reason}. There is nothing for a label to decide, "
+                "so it is filed under failure/ without one",
+            )
+            self._event("trial_filed", dir=record.dir, **self.last_trial)
+        self._file_episode("failure")
+
+    def _leave_unlabeled(self) -> None:
+        """Keep the record of a trial the session stopped before anyone labeled it.
+
+        The legs stay where they are, in eval/, unmerged: there is no label to file them under, and a
+        guess would be one the dataset keeps. What is written now, synchronously -- a merge thread
+        would die with the process -- is the phase record, into the leg a later merge treats as the
+        primary. ``tandem traj merge <id> --status success|failure`` then files the trial, and the
+        merge carries the record up beside the joined episode.
+        """
+        directory = str(self.current.dir) if self.current else ""
+        record = self.current or RolloutRecord(dir=directory, started_at=time.time())
+        record.status = None
+        self.rollouts.append(record)
+        self.current = None
+        self.last_trial = self._trial_summary(None)
+        outcome = self._last_outcome
+        written = episodes.record_unfiled(
+            self.profile,
+            self._trajectory_id,
+            self._last_plan,
+            vlm_dir=self._vlm_dir,
+            log=functools.partial(self._log, "tandem"),
+            reason=outcome.reason if outcome is not None else None,
+            superseded=outcome.superseded_plans if outcome is not None else (),
+            leg_generations=outcome.leg_generations if outcome is not None else None,
+        )
+        where = f" with its phase record in {written.name}" if written is not None else ""
+        self._log(
+            "tandem",
+            f"the session stopped before this trial was labeled; its legs stay unmerged in eval/{where}. "
+            f"File it with `tandem traj merge {self._trajectory_id} --status success` (or failure), or "
+            "`tandem traj relabel` for a trial of one leg",
+        )
+        self._event("trial_unlabeled", dir=record.dir, **self.last_trial)
+
+    def _trial_summary(self, status: str | None, *, labeled: bool = False) -> dict:
+        """How the attempt just walked ended, as the events, the summary and ``hitl.json`` say it.
+
+        ``status`` is where the episode is filed (``success``/``failure``), or None before it is.
+        ``labeled`` is whether an operator's answer filed it, so a UI can say why a trial came back
+        to the task prompt without asking. The outcome is resolved the one way ``hitl.json``
+        resolves it (``episodes.trial_outcome``), so the events file and the record on disk can
+        never disagree about a trial.
+        """
+        outcome = self._last_outcome
+        loop_outcome = outcome.outcome if outcome is not None else None
+        stage = outcome.failure_stage if outcome is not None else None
+        return {
+            "trajectory_id": self._trajectory_id,
+            **episodes.trial_outcome(loop_outcome, status, failure_stage=stage),
+            "failure_stage": stage,
+            "reason": outcome.reason if outcome is not None else None,
+            "labeled": labeled,
+        }
+
+    def _file_episode(self, status: str) -> None:
+        """Move the attempt's legs under ``status``, merge them, and write the record beside them."""
+        # Off the session thread: a merge of several GB of video must not hold up the next task. Kept,
+        # though, so a session that is ending waits for it (`_finish_merges`).
         trajectory_id = self._trajectory_id
-        # `_last_plan`, not `_plan`: an attempt that was abandoned drops `_plan`, and those are
-        # precisely the episodes whose provenance -- which phases ran, what could not be verified,
-        # which clauses the run knowingly skipped -- is worth having.
+        # The LAST plan, not the one the loop was still walking: an attempt that was abandoned drops
+        # its plan, and those are precisely the episodes whose provenance -- which phases ran, what
+        # could not be verified, which clauses the run knowingly skipped -- is worth having.
         plan = self._last_plan
+        outcome = self._last_outcome
         if trajectory_id:
-            threading.Thread(
-                target=self._merge_trajectory,
-                args=(trajectory_id, record.status, plan),
-                name=f"merge:{self.id}",
+            thread = threading.Thread(
+                target=episodes.merge_trajectory,
+                args=(self.profile, trajectory_id, status, plan),
+                kwargs={
+                    # The planner runtime's own ffmpeg, which is the build that wrote the clips.
+                    "tools_dir": self._tools_dir,
+                    # This attempt's audit trail, taken now rather than when the merge finishes. A
+                    # merge of several GB of video can outlast the start of the next task, which
+                    # points `_vlm_dir` at that task's trail instead.
+                    "vlm_dir": self._vlm_dir,
+                    "log": functools.partial(self._log, "tandem"),
+                    "emit": self._emit,
+                    "reason": outcome.reason if outcome is not None else None,
+                    # The plans a replan replaced, and which plan each leg carried out a phase of.
+                    "superseded": list(outcome.superseded_plans) if outcome is not None else [],
+                    "leg_generations": dict(outcome.leg_generations) if outcome is not None else None,
+                    # Who recorded it and what it was asked, where the planner's leg does not say:
+                    # `tandem traj open` picks the viewer by the first, not by the profile's current
+                    # planner, which a `tandem planners use` may have switched since.
+                    "planner": self.profile.planner.backend,
+                    "instruction": self.instruction,
+                },
+                name=f"merge:{self.id}:{trajectory_id}",
                 daemon=True,
-            ).start()
-        self._plan = None
+            )
+            self._merges = [(t, tid) for t, tid in self._merges if t.is_alive()]
+            self._merges.append((thread, trajectory_id))
+            thread.start()
 
     def _await_human(self) -> str:
         """What the person answered at a human phase: `done`, `abort`, or `teleop`."""
@@ -986,6 +902,10 @@ class Session:
             if self._human_ready.wait(timeout=0.2):
                 self._human_ready.clear()
                 return self._human_answer or "done"
+        if self._stopping:
+            # Not an answer. Read as "abort" it filed the trial as a step the operator gave up on;
+            # the session is stopping, and the attempt ends as that.
+            raise _Stopped()
         return "abort"
 
     def _check_preempt(self) -> None:
@@ -996,7 +916,7 @@ class Session:
     def _planning_config(self):
         if self._planning_cfg is None:
             self._planning_cfg = self.profile.hitl.to_planning_config(
-                cache_path=render.resolve_cache_path(self.profile)
+                cache_path=profiles.resolve_cache_path(self.profile)
             )
         return self._planning_cfg
 
@@ -1042,10 +962,24 @@ class Session:
         This is the "I did it by hand" answer. Taking the arm through the teleop rig instead is
         `request_teleop()`, which is honoured immediately at this prompt rather than waiting for a
         plan-step boundary that will never come.
+
+        Refused while recording, unless ``hitl.allow_unrecorded_human_phase`` is set: a step done by
+        hand has no leg, and the episode would be missing exactly the demonstration the trial exists
+        to capture while looking complete. The phase loop refuses it too; refusing it here as well
+        tells the person why at the moment they ask, rather than as a prompt that silently comes back.
         """
-        self._require(State.AWAITING_HUMAN_PHASE, "complete a human phase")
-        self._human_answer = "done"
-        self._human_ready.set()
+        with self._lock:
+            self._require(State.AWAITING_HUMAN_PHASE, "complete a human phase")
+            phase = self.human_phase
+            if phase is not None and not phase.by_hand:
+                raise SessionConflict(
+                    "This step is being recorded, so it has to be done through "
+                    f"{_executor_title(phase.executor)} for the episode to have it.",
+                    hint="Take the arm and do it there, or give up on the task. To accept steps done by "
+                    "hand while recording, set hitl.allow_unrecorded_human_phase: true.",
+                )
+            self._human_answer = "done"
+            self._human_ready.set()
 
     def abort_human_phase(self) -> None:
         """Give up on this phase, abandoning the task attempt.
@@ -1060,9 +994,11 @@ class Session:
     def preempt(self) -> None:
         """Abandon the task attempt, keeping the session warm.
 
-        It cannot stop the arm: the planner is handed a whole trajectory segment in one request and
-        has no abort, so the motion runs to the end of that segment. The physical E-stop is the only
-        instant stop. What this does is stop asking it for the next one.
+        It cannot stop the arm mid-motion. A planner that declares cooperative stop
+        (``supports_cooperative_stop``) is asked to stop at its next step boundary; any other is
+        handed a whole trajectory segment in one request and has no abort, so the motion runs to the
+        end of that segment. The physical E-stop is the only instant stop. What this does is stop
+        asking the planner for the next one. The attempt is filed as aborted, under failure/.
         """
         with self._lock:
             if self.state in TERMINAL:
@@ -1118,6 +1054,14 @@ class Session:
 
     def force_stop(self) -> None:
         """Hard stop, for when the session is wedged. Not the same as preempt."""
+        # Whatever is driving the arm in a hand-off -- the teleop driver, or a policy -- is ended at
+        # once rather than asked to finish, and the leg comes back as aborted. Killed FIRST: every flag
+        # below also ends the leg, but as a graceful hand-back, and an executor that sees one of them
+        # before the kill may already have returned "done" -- a forced stop recorded as a step carried
+        # out, and checked as one.
+        loop = self._loop
+        if loop is not None:
+            loop.kill()
         with self._lock:
             self._stopping = True
             self.end_reason = "force-stop"
@@ -1126,9 +1070,6 @@ class Session:
         self._preempt.set()
         for flag in (self._task_ready, self._label_ready, self._human_ready, self._resume_ready):
             flag.set()
-        teleop = self._teleop
-        if teleop is not None:
-            teleop.kill()
         backend = self._backend
         if backend is not None:
             threading.Thread(target=backend.close, name=f"kill:{self.id}", daemon=True).start()
@@ -1146,115 +1087,11 @@ class Session:
                 hint=f"That is only possible at {expected.value}.",
             )
 
-    def _pump(self, stream, name: str) -> None:
-        def run() -> None:
-            try:
-                for raw in stream:
-                    self._log(name, raw.rstrip("\n"))
-            except (ValueError, OSError):
-                pass
-
-        threading.Thread(target=run, name=f"{name}:{self.id}", daemon=True).start()
-
     def _log(self, stream: str, text: str) -> None:
         line = LogLine(stream=stream, text=secrets.redact(text))
         with self._lock:
             self._logs.append(line)
         self._emit({"type": "log", **line.to_dict()})
-
-    def _merge_trajectory(self, trajectory_id: str, status: str | None, plan=None) -> None:
-        """Join a task's legs into one trajectory, in the background.
-
-        Failure here must never take down a session: the legs are untouched on disk (the merge
-        never partially writes) and `tandem traj merge` can retry once the cause is fixed.
-        """
-        from tandem.core import merge as merge_mod
-
-        episode_dir = self._promote_primary_leg(trajectory_id, status)
-        try:
-            result = merge_mod.merge(
-                self.profile, trajectory_id, status=status, runtime_dir=self.runtime.root
-            )
-        except Exception as exc:
-            self._log("tandem", f"could not merge trajectory {trajectory_id}: {exc}")
-            self._log("tandem", f"the legs are intact; retry with: tandem traj merge {trajectory_id}")
-            self._write_phase_record(plan, episode_dir)
-            return
-        # `dir` is absent when the merge declined for want of state data, so fall back to the leg
-        # the label was filed against — the record has to land somewhere a reader will open.
-        # Not `Path(...) or episode_dir`: Path("") is PosixPath("."), which is truthy, so an
-        # absent `dir` would file the record in the working directory.
-        merged_dir = Path(result["dir"]) if result.get("dir") else episode_dir
-        self._write_phase_record(plan, merged_dir)
-        if result.get("merged"):
-            self._log(
-                "tandem",
-                f"merged {result['n_legs']} legs into one trajectory "
-                f"({result['n_frames']} frames) at {result['dir']}",
-            )
-            self._emit({"type": "merged", **result})
-
-    def _promote_primary_leg(self, trajectory_id: str, status: str | None) -> Path | None:
-        """Move the leg the label refers to out of ``eval/`` and into ``success/`` or ``failure/``.
-
-        Every leg is recorded into ``eval/`` — it is a staging bucket, and a teleop leg stays there
-        unlabeled because the verdict belongs to the whole task and is given once. The label has to
-        land somewhere, though, and for a task that produced only ONE leg the merge will decline to
-        do anything ("single leg"), so nothing else would ever move it.
-
-        The leg chosen is the one ``merge`` will treat as primary, so a merge that follows relocates
-        the joined trajectory rather than leaving a labeled leg and an unlabeled merge behind.
-        """
-        import shutil
-
-        from tandem.core import merge as merge_mod
-
-        if not status:
-            return None
-        try:
-            legs = merge_mod.find_legs(self.profile, trajectory_id)
-        except Exception:
-            return None
-        if not legs:
-            return None
-        primary = next((leg for leg in legs if leg["source"] == "tamp"), legs[0])
-        if primary["status"] == status:
-            return primary["dir"]
-        destination = self.profile.status_dir(status) / primary["dir"].name
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            shutil.move(str(primary["dir"]), str(destination))
-        except OSError as exc:
-            self._log("tandem", f"could not file the episode under {status}: {exc}")
-            return primary["dir"]
-        return destination
-
-    def _write_phase_record(self, plan, directory: Path | None) -> None:
-        """Drop the plan, the invented predicates and every verdict beside the finished episode.
-
-        Written AFTER the merge and into the merged directory, not into a leg. The merge surfaces
-        only the first planner leg's extra files, and that copy is the earliest snapshot — a low
-        phase index and no verifications at all — so a record written per leg reads as though the
-        task barely started.
-        """
-        if plan is None or directory is None or not Path(directory).is_dir():
-            return
-        directory = Path(directory)
-        try:
-            (directory / "hitl.json").write_text(json.dumps(plan.to_json(), indent=2, default=str))
-        except OSError as exc:
-            self._log("tandem", f"could not write the phase record: {exc}")
-
-        # The images and replies belong with the record they explain. Copied rather than moved, so
-        # a failure here cannot destroy the only copy of the trail.
-        source = self._vlm_dir
-        if source is not None and Path(source).is_dir():
-            import shutil
-
-            try:
-                shutil.copytree(source, directory / "vlm", dirs_exist_ok=True)
-            except OSError as exc:
-                self._log("tandem", f"could not file the model audit trail: {exc}")
 
     def _set_state(self, state: State, *, locked: bool = False) -> None:
         if not locked:
@@ -1324,11 +1161,17 @@ class Session:
                 "end_reason": self.end_reason,
                 "labeled": self.labeled_count,
                 "success": self.success_count,
+                "excluded": self.excluded_count,
+                "aborted": self.aborted_count,
+                "last_trial": self.last_trial,
                 "target": self.max_episodes or self.profile.task.target_episodes,
                 "current": self.current.to_dict() if self.current else None,
                 "rollouts": [r.to_dict() for r in self.rollouts],
                 "teleop_pending": self.teleop_pending,
-                "teleop_available": settings_mod.load().teleop.enabled,
+                # Whether a person can take the arm between phases: the teleop executor is ready on
+                # this machine. `human_executor` is the same for whoever carries out a human phase.
+                "teleop_available": _executor_status(TELEOP)["ready"],
+                "human_executor": _executor_status(self.profile.hitl.human_executor),
                 "handoff_error": self.handoff_error,
                 "can_preempt": self.state not in TERMINAL and self.state not in NO_PREEMPT,
                 "events_file": str(self._files.get("events_file", "")),
@@ -1342,6 +1185,12 @@ class Session:
     def alive(self) -> bool:
         return self.state not in TERMINAL
 
+    @property
+    def running(self) -> bool:
+        """Whether the session's thread is still going: walking tasks, or releasing everything as it ends."""
+        worker = self._worker
+        return worker is not None and worker.is_alive()
+
     def wait(self, timeout: float | None = None) -> int | None:
         """Block until the session thread has finished. None means it is still running."""
         worker = self._worker
@@ -1351,230 +1200,176 @@ class Session:
         return None if worker.is_alive() else 0
 
 
-class TeleopChild:
-    """The teleop driver that holds the arm during a hand-off.
+class _SessionIO:
+    """The session as the phase loop sees it: an event sink, and the person at the prompts.
 
-    Runs under the DROID environment's interpreter (a separate install with the VR and camera
-    bindings), talks the same events-file + stdin protocol as the planner, and stamps every
-    leg it records with the trajectory's lineage id.
+    An adapter rather than more methods on Session, so the session's own API stays the set of
+    things a person can do (`label`, `next_task`, `complete_human_phase`, ...), and nothing a route
+    or the CLI can reach blocks on a prompt meant for the session thread.
     """
 
-    # How many times to answer the driver's task prompt before giving up. It re-prompts after a
-    # controller that never came up ("put the headset on and press Start again"), which is a real
-    # recoverable state and worth retrying -- but not forever, or a headset left in a drawer spins
-    # the arm's owner in a loop with no way out.
-    MAX_START_ATTEMPTS = 3
+    def __init__(self, session: Session) -> None:
+        self._session = session
 
-    def __init__(self, session: Session, cfg) -> None:
-        self.session = session
-        self.cfg = cfg
-        self.proc: subprocess.Popen | None = None
-        self.events_file: Path | None = None
-        self._tailer: events_mod.EventTailer | None = None
-        self._start_attempts = 0
-        self._recording = False
-        self.n_frames: int | None = None
-        self.leg_dir: str | None = None
+    # ---- EventSink ---------------------------------------------------------
 
-    def start(self) -> TeleopChild:
-        from tandem import teleop as teleop_pkg
+    def event(self, name: str, **payload) -> None:
+        self._session._event(name, **payload)
 
-        python = Path(self.cfg.teleop.python).expanduser()
-        if not python.is_file():
-            raise TandemError(
-                f"The configured teleop interpreter does not exist: {python}",
-                hint="Set it with `tandem config set teleop.python /path/to/droid/env/bin/python`.",
-            )
-        droid_dir = Path(self.cfg.teleop.droid_dir).expanduser()
-        if not droid_dir.is_dir():
-            raise TandemError(
-                f"The configured DROID checkout does not exist: {droid_dir}",
-                hint="Set it with `tandem config set teleop.droid_dir /path/to/droid`.",
-            )
+    def log(self, text: str) -> None:
+        self._session._log("tandem", text)
 
-        session_dir = self.session._files["session_dir"]
-        self.events_file = session_dir / "teleop-events.jsonl"
-        self.events_file.touch()
+    # ---- OperatorIO --------------------------------------------------------
 
-        # tandem mints this, so take it from the session rather than reading it back out of a leg's
-        # _meta.json. The disk round-trip was correct only while the PLANNER minted the id; now it
-        # is stale in every case where no planner leg has been written yet — a plan whose first
-        # phase is the person's, an operator-requested hand-off on the first leg, and (the default
-        # policy) a phase the planner could not plan, where `current` is set but nothing was ever
-        # recorded into it. An unstamped leg is never merged, so the demonstration is orphaned; and
-        # the driver, seeing no trajectory id, prompts for a success/failure label nobody answers
-        # and holds the robot and cameras until it is killed.
-        trajectory_id = self.session._trajectory_id or (
-            _trajectory_id_of(Path(self.session.current.dir)) if self.session.current else None
-        )
+    def check_preempt(self) -> None:
+        # A stop is a boundary too. Only the preempt flag was read here, so a session told to stop
+        # went on perceiving, planning and executing every robot leg left, and then filed none of
+        # them: the stop was noticed only at a human phase's prompt.
+        if self._session._stopping:
+            raise _Stopped()
+        self._session._check_preempt()
 
-        args = [
-            str(python), str(teleop_pkg.driver_path()),
-            "--events-file", str(self.events_file),
-            "--output-root", str(self.session.profile.trajectories_dir()),
-            "--instruction", self.session.instruction,
-            "--device", self.cfg.teleop.device,
-            "--controller", self.cfg.teleop.controller,
-            # The planner parked the arm mid-task on purpose; homing here would undo the whole
-            # point of the hand-off and could drop whatever it is holding.
-            "--keep-pose",
-        ]
-        if trajectory_id:
-            # These episodes are LEGS of the planner's trajectory, not episodes in their own
-            # right: stamped with its id, left unlabeled, and never prompting for a verdict —
-            # the verdict belongs to the whole trajectory and is given once, at the end.
-            args += ["--trajectory-id", str(trajectory_id)]
+    def leg_should_stop(self) -> Callable[[], bool]:
+        session = self._session
+        # Read, never cleared: the check_preempt after the leg is what unwinds the attempt.
+        return lambda: session._stopping or session._preempt.is_set()
 
-        cameras = self.session.profile.cameras.configured()
-        for key, flag in (
-            ("hand", "--hand-camera-id"),
-            ("external", "--external-camera-id"),
-            ("external_2", "--external-2-camera-id"),
-        ):
-            if key in cameras:
-                args += [flag, cameras[key].serial]
-
-        env = dict(os.environ)
-        env["PYTHONPATH"] = os.pathsep.join(
-            filter(None, [str(droid_dir), env.get("PYTHONPATH", "")])
-        )
-        env["TELEOP_EVENTS_FILE"] = str(self.events_file)
-
-        self.session._log("tandem", "$ " + " ".join(args))
-        self.proc = subprocess.Popen(
-            args,
-            cwd=str(droid_dir),
-            env=env,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            start_new_session=True,
-        )
-        self.session._pump(self.proc.stdout, "teleop")
-
-        self._tailer = events_mod.EventTailer(self.events_file, self._on_event)
-        self._tailer.start()
-        return self
-
-    def _on_event(self, event: events_mod.Event) -> None:
-        """Answer the driver's prompts, and keep the session's view of the leg up to date.
-
-        The driver records NOTHING until it is told to. It parks at its task prompt and drops every
-        stdin line that is not ``{"cmd":"start"}``, so a hand-off that never sends one produces an
-        episode with no frames in it -- and, because the same prompt swallows ``end_and_quit`` too,
-        a driver that never exits and a "return control" that times out waiting for it.
-        """
-        self.session._emit({"type": "teleop_event", **event.to_dict()})
-
-        if event.name == "awaiting_task":
-            self._begin()
-        elif event.name == "rollout_start":
-            self._recording = True
-            self.leg_dir = event.dir
-        elif event.name == "rollout_saved":
-            self._recording = False
-            self.n_frames = int(event.payload.get("n_frames") or 0)
-            self.leg_dir = event.dir or self.leg_dir
-            self.session._log("tandem", f"teleop leg recorded: {self.n_frames} frames")
-        elif event.name == "rollout_aborted":
-            self._recording = False
-        elif event.name == "awaiting_label":
-            # A leg of a task is not a standalone episode, so the driver only prompts for a verdict
-            # when it was launched WITHOUT a trajectory id — which now means something went wrong
-            # upstream. Answer it anyway: unanswered, the driver blocks there holding the robot and
-            # both cameras until it is killed, and a stalled hand-off is a far worse way to find
-            # out than a line in the log.
-            self.session._log(
-                "tandem",
-                "the teleop driver asked for a success/failure label, which means this leg was not "
-                "stamped as part of the task — answering it so the arm comes back",
-            )
-            self._write_raw("n")
-        elif event.name == "error":
-            # The driver is back at its prompt and will accept another `start`; _begin's attempt
-            # budget is what stops that becoming a loop.
-            self._recording = False
-            message = str(event.payload.get("message") or "the teleop driver reported an error")
-            self.session.handoff_error = message
-            self.session._log("tandem", f"teleop: {message}")
-
-    def _begin(self) -> None:
-        """Tell the driver to start recording, if it has not been told already."""
-        if self._recording or self.proc is None or self.proc.poll() is not None:
-            return
-        if self._start_attempts >= self.MAX_START_ATTEMPTS:
-            if self._start_attempts == self.MAX_START_ATTEMPTS:
-                self._start_attempts += 1  # log the giving-up once, not on every re-prompt
-                self.session.handoff_error = (
-                    "The teleop driver would not start recording. Drive the arm by hand if you like, "
-                    "then return control — but this leg will not be part of the episode."
-                )
-                self.session._log("tandem", self.session.handoff_error)
-            return
-        self._start_attempts += 1
-        self._write({"cmd": "start"})
-
-    def _write(self, payload: dict) -> None:
-        proc = self.proc
-        if proc is None or proc.stdin is None or proc.poll() is not None:
-            return
-        try:
-            proc.stdin.write(json.dumps(payload) + "\n")
-            proc.stdin.flush()
-        except (BrokenPipeError, ValueError):
-            pass
-
-    def finish(self) -> None:
-        """Ask the driver to save what it has and quit.
-
-        `end_and_quit` rather than a bare `q`: mid-recording a bare `q` DISCARDS the episode the
-        human just demonstrated. Note it is only honoured MID-RECORDING -- at the task prompt the
-        driver drops it and goes on waiting -- so a leg that never started has to be ended with `q`
-        instead, or the process never exits and `resume_from_teleop` times out on it.
-        """
-        if self.proc is None or self.proc.poll() is not None:
-            return
-        if self._recording:
-            self._write({"cmd": "end_and_quit"})
-        else:
-            self._write_raw("q")
-
-    def _write_raw(self, line: str) -> None:
-        proc = self.proc
-        if proc is None or proc.stdin is None or proc.poll() is not None:
-            return
-        try:
-            proc.stdin.write(line + "\n")
-            proc.stdin.flush()
-        except (BrokenPipeError, ValueError):
-            pass
-
-    def discard(self) -> None:
-        """Throw away the leg in flight, leaving the driver ready for another."""
-        if self._recording:
-            self._write({"cmd": "discard"})
-
-    def wait(self, timeout: float) -> bool:
-        if self.proc is None:
-            return True
-        try:
-            self.proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
+    def take_handoff_request(self) -> bool:
+        requested = self._session._teleop_requested
+        if not requested.is_set():
             return False
-        finally:
-            if self._tailer is not None:
-                self._tailer.stop()
+        requested.clear()
         return True
 
-    def kill(self) -> None:
-        if self.proc is None or self.proc.poll() is not None:
-            return
-        try:
-            os.killpg(os.getpgid(self.proc.pid), signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            pass
+    def rolling(self) -> None:
+        self._session._set_state(State.ROLLING)
+
+    def show_progress(self, progress: tuple[int, int] | None) -> None:
+        self._session.phase_progress = progress
+
+    def show_unrepresented(self, clauses: list[dict]) -> None:
+        self._session.unrepresented = clauses
+
+    def show_human_phase(self, phase: HumanPhase | None) -> None:
+        self._session.human_phase = phase
+
+    def await_human_phase(self) -> str:
+        self._session._set_state(State.AWAITING_HUMAN_PHASE)
+        return self._session._await_human()
+
+    def rollout_started(self, save_dir: Path) -> None:
+        self._session.current = RolloutRecord(dir=str(save_dir), started_at=time.time())
+
+    def rollout_saved(self, n_frames: int) -> None:
+        if self._session.current is not None:
+            self._session.current.n_frames = n_frames
+
+    def handing_off(self) -> None:
+        session = self._session
+        session._set_state(State.HANDING_OFF)
+        # Honoured now, whichever way it was asked for: the switch between phases, or the answer at
+        # a human phase's prompt.
+        session.teleop_pending = False
+        session._event("teleop_handoff_start")
+
+    def arm_lent(self) -> Callable[[], bool]:
+        session = self._session
+        session._event("awaiting_teleop_resume", trajectory_id=session._trajectory_id)
+        # Cleared before the leg, not after it. The state stays TELEOP_HANDOFF for the whole exit
+        # sequence, so a second "return control" -- which the UI keeps offering throughout -- used
+        # to leave this set with nobody waiting, and the NEXT hand-off then ended instantly while
+        # the person was still being told the arm was theirs.
+        session._resume_ready.clear()
+        session._set_state(State.TELEOP_HANDOFF)
+        deadline = time.monotonic() + HUMAN_PHASE_TIMEOUT
+        timed_out: list[bool] = []
+
+        def should_stop() -> bool:
+            if session._resume_ready.is_set() or session._stopping:
+                return True
+            if time.monotonic() < deadline:
+                return False
+            if not timed_out:
+                timed_out.append(True)
+                session._log(
+                    "tandem",
+                    f"nobody returned control within {HUMAN_PHASE_TIMEOUT / 60:.0f} minutes; ending the "
+                    "leg and taking the arm back",
+                )
+            return True
+
+        return should_stop
+
+    def arm_returned(self) -> None:
+        session = self._session
+        # A "return control" that arrived after the leg had already ended must not end the next one.
+        session._resume_ready.clear()
+        session.handoff_error = None
+        session._event("teleop_handoff_done")
+        session._set_state(State.ROLLING)
+
+
+def _settled_by_the_loop(outcome: TrialOutcome) -> bool:
+    """Whether the loop's own outcome is the trial's verdict, so no label is asked for.
+
+    Everything the loop ended itself, except a check it left to the operator on purpose
+    (``on_verification_failure: label`` ends at ``verification`` as a ``failure`` the label decides).
+    A trial that ran to the end has no outcome of the loop's, and is labeled as it always was.
+    """
+    if outcome.outcome in ("excluded", "aborted"):
+        return True
+    return outcome.outcome == "failure" and outcome.failure_stage != "verification"
+
+
+# The checks that put a fresh frame from the verification camera to the classifier. The robot leg's
+# precondition check reads the perception pass's own image, so it needs none.
+FRAME_CHECKS = ("check_human_effects", "check_human_preconditions", "check_tamp_effects")
+
+
+def _can_capture_frame(backend: Any) -> bool:
+    """Whether ``backend`` answers ``capture_frame`` at all, as far as can be told without calling it.
+
+    A ``Planner`` that did not override it has the SDK's default, which raises ``UnsupportedVerb``. A
+    ``SidecarPlanner`` answers it when its running sidecar lists the verb (one that lists nothing is
+    taken to answer the whole protocol, as the planner itself takes it), unless the class answers it
+    in-process instead. A backend written against the protocol by hand implements every verb.
+    """
+    from tandem.planners.sdk import Planner
+    from tandem.planners.sidecar import SidecarPlanner
+
+    own = getattr(type(backend), "capture_frame", None)
+    if isinstance(backend, SidecarPlanner) and own is SidecarPlanner.capture_frame:
+        verbs = backend.sidecar_verbs
+        return verbs is None or "capture_frame" in verbs
+    if isinstance(backend, Planner):
+        return own is not Planner.capture_frame
+    return True
+
+
+def _executor_status(name: str) -> dict:
+    """Whether the human executor ``name`` can run on this machine, for the prompts that offer it.
+
+    Never raises. The summary is read on every change of state, and an executor that cannot even be
+    described -- a plugin that will not import -- is simply one the operator cannot be offered, which
+    is what ``ready: False`` with the ``error`` says.
+    """
+    try:
+        info = executors.info(name)
+    except Exception as exc:
+        message = exc.message if isinstance(exc, TandemError) else f"{type(exc).__name__}: {exc}"
+        return {"name": name, "display_name": name, "ready": False, "unmet": [], "error": message}
+    return {
+        "name": name,
+        "display_name": info.display_name,
+        "ready": info.ready,
+        "unmet": list(info.unmet),
+        "error": None,
+    }
+
+
+def _executor_title(name: str) -> str:
+    """How a sentence addressed to the operator names the executor that does a human step."""
+    return "the teleop rig" if name == TELEOP else f"the {name!r} executor"
 
 
 class SessionManager:
@@ -1583,8 +1378,14 @@ class SessionManager:
     def __init__(self) -> None:
         self._sessions: dict[str, Session] = {}
         self._lock = threading.RLock()
+        # Set by `abandon`: the person at the terminal would rather quit now than wait for `shutdown`.
+        # Never cleared: the process is on its way out, and a Ctrl-C that came before the wait began is
+        # as much an answer as one that comes during it.
+        self._abandoned = threading.Event()
+        # Set by `shutdown` as it starts: whoever called it has taken on ending the sessions.
+        self._shutting_down = threading.Event()
 
-    def create(self, profile: Profile, runtime: Runtime, **kwargs) -> Session:
+    def create(self, profile: Profile, **kwargs) -> Session:
         with self._lock:
             live = self.live_for(profile.name)
             if live is not None:
@@ -1592,9 +1393,17 @@ class SessionManager:
                     f"A session is already running for profile {profile.name!r} (state: {live.state.value}).",
                     hint="Stop it before starting another; two drivers cannot share the robot.",
                 )
-            session = Session(profile, runtime, **kwargs)
+            session = Session(profile, **kwargs)
             self._sessions[session.id] = session
-        session.start()
+        try:
+            session.start()
+        except BaseException:
+            # A session that never started never ends either: kept, it read as live for its profile
+            # forever, and every later start was refused as "already running (state: spawning)" until
+            # the server was restarted.
+            with self._lock:
+                self._sessions.pop(session.id, None)
+            raise
         return session
 
     def get(self, session_id: str) -> Session:
@@ -1615,10 +1424,50 @@ class SessionManager:
         with self._lock:
             return list(self._sessions.values())
 
-    def shutdown(self) -> None:
-        for session in self.all():
-            if session.alive:
-                session.stop()
+    def stop_all(self) -> list[Session]:
+        """Ask every live session to stop, parking its arm on the way out, and return them. Does not wait."""
+        stopping = [session for session in self.all() if session.alive]
+        for session in stopping:
+            session.stop()
+        return stopping
+
+    def shutdown(self, *, timeout: float = STOP_GRACE) -> list[Session]:
+        """Stop every session and wait, bounded, for each to finish ending. Returns those still ending.
+
+        Ending is everything `_shutdown` does: the arm parked, the planner and the human executors
+        closed, the episode merges waited for. The threads doing it are daemons, so a process that
+        exits without this -- `tandem ui` on Ctrl-C did -- kills them where they stand: the arm left
+        wherever the last plan put it, the hardware never released, a merge cut off half-way.
+
+        `abandon` cuts the wait short, whether it comes during the wait or before it began; a session
+        still ending then is force-stopped, which at least ends a leg in flight rather than leaving its
+        process behind. The flag used to be cleared here, so a Ctrl-C that landed before the wait
+        started was lost, and the wait ran its whole length.
+        """
+        self._shutting_down.set()
+        self.stop_all()
+        ending = [session for session in self.all() if session.running]
+        deadline = time.monotonic() + timeout
+        for session in ending:
+            while session.running and not self._abandoned.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                session.wait(timeout=min(remaining, 0.2))
+        still = [session for session in ending if session.running]
+        if self._abandoned.is_set():
+            for session in still:
+                session.force_stop()
+        return still
+
+    def abandon(self) -> None:
+        """Stop waiting in `shutdown`: somebody asked twice to quit. Safe from a signal handler."""
+        self._abandoned.set()
+
+    @property
+    def shutting_down(self) -> bool:
+        """Whether `shutdown` has been called: the sessions are being ended, by whoever called it."""
+        return self._shutting_down.is_set()
 
 
 _manager: SessionManager | None = None
@@ -1629,36 +1478,6 @@ def manager() -> SessionManager:
     if _manager is None:
         _manager = SessionManager()
     return _manager
-
-
-def _missing_from(verdicts: Iterable[dict]) -> list[str]:
-    """What a failed verification says is still expected.
-
-    Mirrors the driver's own `missing_statements`: the statements that should hold and do not,
-    already phrased for a person. The `reason` is appended when the model gave one, because
-    "the cloth is not folded" is much less useful than knowing it saw a corner sticking out.
-    """
-    missing = []
-    for verdict in verdicts:
-        if not isinstance(verdict, dict) or verdict.get("holds", True):
-            continue
-        statement = str(verdict.get("statement") or verdict.get("atom") or "").strip()
-        if not statement:
-            continue
-        reason = str(verdict.get("reason") or "").strip()
-        missing.append(f"{statement} — {reason}" if reason else statement)
-    return missing
-
-
-def _trajectory_id_of(directory: Path) -> str | None:
-    """The lineage id stamped into a rollout's metadata, if it has one."""
-    meta = directory / "_meta.json"
-    if not meta.is_file():
-        return None
-    try:
-        return json.loads(meta.read_text()).get("trajectory_id")
-    except (ValueError, OSError):
-        return None
 
 
 def write_session_log(session: Session) -> Path:

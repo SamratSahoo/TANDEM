@@ -21,8 +21,35 @@ class ProfileError(TandemError):
     """A profile is missing, malformed, or fails validation."""
 
 
+class ProfileInvalid(ProfileError):
+    """A profile that exists but does not validate.
+
+    Its own type so the web API can answer 422 for it and keep 404 for a profile that is not there:
+    an editor told "not found" about a file it can see has no reason to offer to fix it.
+    """
+
+
+def one_line(message: str) -> str:
+    """``message`` as one line, for a listing, a table cell or a JSON field -- without losing the reason.
+
+    Many errors put a header on the first line and the reasons on the next ones ("<path> is not a valid
+    profile:" and then "  planner.backend: ..."). The first line alone is then a sentence that ends in a
+    colon and says nothing; the header and the reasons joined with "; " are what a one-line slot can say.
+    """
+    lines = [line.strip() for line in str(message or "").splitlines() if line.strip()]
+    if not lines:
+        return ""
+    if len(lines) > 1 and lines[0].endswith(":"):
+        return f"{lines[0]} {'; '.join(lines[1:])}"
+    return lines[0]
+
+
+class RigInvalid(TandemError):
+    """This machine's rig.yml (its robot, cameras and calibration) does not validate."""
+
+
 class RuntimeNotReady(TandemError):
-    """The GPU runtime `tandem init` builds is absent or incomplete."""
+    """A planner's runtime (`tandem planners install`, which `tandem init` runs) is absent or incomplete."""
 
 
 class SessionConflict(TandemError):

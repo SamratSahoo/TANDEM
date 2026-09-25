@@ -154,6 +154,7 @@ label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px
 .chip.eval { background: var(--amber-soft); color: var(--amber); }
 .chip.accent { background: var(--accent-soft); color: var(--accent); }
 .chip.violet { background: var(--violet-soft); color: var(--violet); }
+.chip.amber { background: var(--amber-soft); color: var(--amber); }
 
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--gray); flex-shrink: 0; }
 .dot.live { background: var(--green); box-shadow: 0 0 0 0 var(--green-soft); animation: pulse 1.8s infinite; }

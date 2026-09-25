@@ -14,52 +14,69 @@ another's fixtures and module-level state as a side effect.
 from __future__ import annotations
 
 import time
-from pathlib import Path
 
 
-class FakeRuntime:
-    """A runtime that is ready and refuses to launch anything.
+class FakeFactory:
+    """A planner factory that builds stand-in backends, and keeps the context each was built from.
 
-    The session drives a planner BACKEND now, not a subprocess, so a runtime in a test exists only
-    to satisfy the readiness preflight. `command` raises rather than returning something plausible:
-    reaching it means something is still trying to spawn a planner, which is exactly the thing this
-    design removed.
+    It implements ``tandem.planners.base.BackendFactory`` in full, so registering it exercises the
+    same checks a real plugin goes through.
     """
 
-    def __init__(self, root: Path) -> None:
-        self.root = root
-        self.tiptop_dir = root
-        root.mkdir(parents=True, exist_ok=True)
+    def __init__(self, name: str = "tiptop", *, backend_type=None, **backend_kwargs) -> None:
+        from fake_backend import FakeBackend
 
-    def require_ready(self) -> None:
+        from tandem.planners.base import PlannerInfo
+
+        self.info = PlannerInfo(name=name, display_name=f"fake {name}", summary="A planner with no planner behind it.")
+        self.backend_type = backend_type or FakeBackend
+        self.backend_kwargs = backend_kwargs
+        self.contexts: list = []
+        self.built: list = []
+
+    def capabilities(self):
+        from tandem.planners.tiptop.capabilities import CAPABILITIES
+
+        return CAPABILITIES
+
+    def create(self, ctx):
+        self.contexts.append(ctx)
+        backend = self.backend_type(
+            None,
+            output_dir=ctx.output_dir,
+            execute=ctx.execute,
+            record=ctx.record,
+            on_log=ctx.on_log,
+            **self.backend_kwargs,
+        )
+        self.built.append(backend)
+        return backend
+
+    def runtime(self, settings=None):
         return None
 
-    def command(self, args: list[str]) -> list[str]:
-        raise AssertionError(f"nothing should be spawning a planner in a test: {args}")
 
-
-def use_fake_backend(monkeypatch, **kwargs):
-    """Make every session in this test build a FakeBackend, and return the one it builds.
-
-    Patched at the registry rather than on the profile, so `planner.backend` stays a real name and
-    the session takes exactly the path it takes in production.
-    """
-    from fake_backend import FakeBackend
-
+def isolate_registry(monkeypatch) -> None:
+    """Undo, at teardown, everything a test registers with the planner registry."""
     from tandem.planners import registry
 
-    built: list = []
+    monkeypatch.setattr(registry, "_registered", dict(registry._registered))
+    monkeypatch.setattr(registry, "_loaded", dict(registry._loaded))
 
-    def backend_class(_name: str):
-        def build(runtime, **session_kwargs):
-            backend = FakeBackend(runtime, **{**session_kwargs, **kwargs})
-            built.append(backend)
-            return backend
 
-        return build
+def use_fake_backend(monkeypatch, *, backend_type=None, **kwargs):
+    """Make every session in this test build a FakeBackend, and return the list of those it builds.
 
-    monkeypatch.setattr(registry, "backend_class", backend_class)
-    return built
+    Registered in the planner registry under the name the profile already uses, so `planner.backend`
+    stays a real name and the session takes exactly the path it takes in production: the registry,
+    a factory, a BackendContext.
+    """
+    from tandem.planners import registry
+
+    isolate_registry(monkeypatch)
+    factory = FakeFactory("tiptop", backend_type=backend_type, **kwargs)
+    registry.register_backend("tiptop", factory, replace=True)
+    return factory.built
 
 
 class FakeGemini:
@@ -118,3 +135,10 @@ def wait_for(predicate, timeout: float = 8.0, interval: float = 0.02) -> bool:
             return True
         time.sleep(interval)
     return False
+
+
+def builtin_path(name: str):
+    """The packaged copy of one of the paper's five (``profiles.BUILTIN``), as a file to read in a test."""
+    from tandem import resources
+
+    return resources.path(f"profiles/{name}.yml")

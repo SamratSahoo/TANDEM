@@ -1,0 +1,109 @@
+# ─────────────────────────────────────────────────────────────────────────────────────────
+#  Store Bread in Closed Box  —  task 5 of the TANDEM paper (Fig. 3)
+#
+#  The settings the paper collected it with: the prompt, the hitl block and the
+#  tamp_overrides of hitl-tamp-vla's data-collection/cfg/tamp/4_bread_box_v3.yml
+#  (41cf4ac), plus the three switches every v3 run had on. The hitl keys that config does not
+#  state are tandem's defaults, which are hitl-tamp-vla's but for two that follow the paper:
+#  on_verification_failure: exclude (its code asked for a label instead) and
+#  verify_final_phase: true (its code left the last step to that label). The robot, cameras
+#  and calibration are this machine's rig (`tandem rig show`).
+#
+#  Its placement settings were tuned with the hand camera looking across the box, as the
+#  config's notes say; which camera perception reads is this machine's (rig.yml
+#  cameras.perception).
+# ─────────────────────────────────────────────────────────────────────────────────────────
+version: 3
+description: 'Store Bread in Closed Box: task 5 of the TANDEM paper'
+
+task:
+  # What to do: the label stored with every episode, and what phase planning splits into steps.
+  prompt: place the bread on the plate, and then open the box and place the bread in the box
+  # The goal handed to the planner, only when it has to differ from the prompt.
+  goal: null
+  target_episodes: 20
+
+# Phase planning: a model splits the prompt into robot steps and human steps, and checks each
+# human step from a photo. These are the paper's settings.
+hitl:
+  enabled: true
+  proposal_model: gemini-2.5-pro      # splits the task, and invents the human steps' predicates
+  vlm_model: gemini-2.5-flash         # answers each check
+  max_attempts: 3                     # proposals tried, each rejection fed back to the next
+  classify_initial: false
+  verify_retries: 1                   # one more try at a human step whose check failed
+  verify_enforced: true
+  on_verification_failure: exclude    # a step still failing: kept out of the dataset (or: label)
+  verify_final_phase: true
+  verification_camera: external
+  check_plan_effects: true            # the steps checked against each other before the arm moves
+  check_human_effects: true           # a human step's effects checked from a photo after it
+  check_human_preconditions: false
+  check_tamp_preconditions: false
+  check_tamp_effects: false
+  precondition_enforced: false
+  on_robot_phase_failure: abort       # no plan for a robot step: the trial fails (or: replan, teleop)
+  conjoin_robot_phases: true
+  human_executor: teleop
+  human_executor_options: {}
+  allow_unrecorded_human_phase: false
+  save_vlm_io: true                   # every image sent to the model, and its answer, kept in vlm/
+  cache_path: null
+
+# Which planner plans and runs the robot's steps, and its settings for this task.
+planner:
+  backend: tiptop
+  options:
+    tamp:   # TiPToP's cuTAMP and cuRobo overrides, by tiptop's own key names
+      # DATAFARM: plan motions that look like the DROID teleoperation data
+      vae_manifold_weight: 25000.0
+      vae_path: vae/checkpoints/vae_full_v2.pt
+      vae_retiming: false
+      joint_density_weight: 0.0
+      uniform_velocity_weight: 0.0
+      posture_selection_seeds: 12
+      posture_grasp_roll: true
+      transit_apex_height: 0.075
+      transit_apex_min_dist: 0.1
+      # trajectory blending, timed by the VAE
+      blend_trajectory: true
+      blend_mode: vae
+      blend_ops: [Pick, MoveFree, MoveHolding, Place, GoToInitial]
+      blend_smoothing: 0.0003
+      blend_boundary_speed: 0.07
+      blend_vae_sample_target: false
+      blend_max_duration_mult: 2.0
+      blend_vel_slack: 1.0
+      blend_acc_slack: 1.0
+      # Planned motions run at blending's pace, not slowed by the rig's robot speed, as in the
+      # paper's runs: keep a hand on the E-stop.
+      time_dilation_factor_literal: 1.0
+      # cuTAMP search and grasps
+      num_particles: 512
+      opt_steps_per_skeleton: 600
+      traj_length_norm: inf
+      grasp_pose_change_weight: 0.0
+      m2t2_num_runs: 60
+      require_m2t2_grasps: false
+      # What LJ1356's tiptop always did, so every v3 run had them
+      table_plane_support_vote: true
+      disjoint_object_masks: true
+      blend_stretch_to_caps: true
+      # this task's own: place into the box's tray, fitted to its observed floor, and a finer
+      # voxel size
+      placement_support: true
+      placement_support_margin: 0.005
+      placement_support_required: true
+      placement_into_surface: true
+      placement_fill_occluded: true
+      placement_min_seen_frac: 0.25
+      placement_flatness_tol: 0.012
+      voxel_downsample_size: 0.005
+
+recording:
+  enabled: true
+
+# Where `tandem export lerobot` pushes. Leave hf_repo blank until you need it.
+export:
+  hf_repo: ''
+  private: false

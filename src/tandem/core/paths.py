@@ -3,13 +3,20 @@
 Three roots, each overridable by an environment variable so a whole install can be
 relocated (CI, a shared workstation account, a scratch disk):
 
-    config   ~/.config/tandem              $TANDEM_CONFIG_DIR    config.toml, credentials.toml
-    state    ~/.local/state/tandem         $TANDEM_STATE_DIR     logs, session scratch
-    data     ~/tandem-data                 $TANDEM_DATA_ROOT     profiles/ and their trajectories
-    runtime  ~/.local/share/tandem/runtime $TANDEM_RUNTIME_DIR   the pixi env + vendored sources
+    config    ~/.config/tandem                $TANDEM_CONFIG_DIR    config.toml, credentials.toml, and the
+                                                                    rig: rig.yml, calibration.json
+    state     ~/.local/state/tandem           $TANDEM_STATE_DIR     logs, session scratch
+    data      ~/tandem-data                   $TANDEM_DATA_ROOT     profiles/<name>.yml, trajectories/<name>/
+    runtime   ~/.local/share/tandem/runtime   $TANDEM_RUNTIME_DIR   TiPToP's runtime: its sources + pixi env
+    runtimes  ~/.local/share/tandem/runtimes  $TANDEM_RUNTIMES_DIR  every other planner's, one directory each
 
 The data root is also settable in config.toml (the env var wins) because it is the one a
-user actually wants somewhere else -- trajectories are large.
+user actually wants somewhere else -- trajectories are large. So is the runtime, for the same
+reason: it is ~25 GB.
+
+TiPToP's runtime keeps the name and the setting it had before tandem drove more than one planner.
+A built pixi environment has its own absolute path baked into it, so moving an existing one would
+break it; every workstation that has built one keeps it where it is.
 """
 
 from __future__ import annotations
@@ -47,6 +54,11 @@ def credentials_file() -> Path:
     return config_dir() / "credentials.toml"
 
 
+def rig_file() -> Path:
+    """This machine's rig: its robot, its cameras and their calibration, shared by every profile."""
+    return config_dir() / "rig.yml"
+
+
 def log_dir() -> Path:
     return state_dir() / "logs"
 
@@ -65,15 +77,21 @@ def default_runtime_dir() -> Path:
     return share_dir() / "runtime"
 
 
-def vendor_dir() -> Path:
-    """The vendored tiptop / cuTAMP / cuRobo sources shipped inside the wheel.
+def runtimes_dir() -> Path:
+    """Where a planner's runtime lives by default: one directory per planner, named for it."""
+    return _env_path("TANDEM_RUNTIMES_DIR") or share_dir() / "runtimes"
 
-    $TANDEM_VENDOR_DIR points this at a live checkout during development.
+
+def planner_sources_override() -> Path | None:
+    """A directory of planner sources to install from instead of fetching them, or None.
+
+    $TANDEM_PLANNER_SOURCES holds one checkout or export per source, named as the planner's recipe
+    names them (``tiptop/``, ``cuTAMP/``, ``curobo/``). It is how a workstation that cannot reach GitHub
+    gets a planner's sources, from a bundle ``tandem planners bundle`` made elsewhere (the environment is
+    still downloaded from conda-forge and PyPI). $TANDEM_VENDOR_DIR is its old name,
+    from when the sources shipped inside the wheel; a directory set up for that has the same shape.
     """
-    override = _env_path("TANDEM_VENDOR_DIR")
-    if override:
-        return override
-    return Path(__file__).resolve().parent.parent / "_vendor"
+    return _env_path("TANDEM_PLANNER_SOURCES") or _env_path("TANDEM_VENDOR_DIR")
 
 
 def ensure_dir(path: Path, *, mode: int | None = None) -> Path:
@@ -81,3 +99,40 @@ def ensure_dir(path: Path, *, mode: int | None = None) -> Path:
     if mode is not None:
         os.chmod(path, mode)
     return path
+
+
+def write_atomic(path: Path, text: str) -> None:
+    """Replace ``path`` with ``text`` whole or not at all: written beside it, then renamed over it.
+
+    Truncating a settings file before a write that could fail -- a value that cannot be serialised, a
+    Ctrl-C, a full disk -- once left an empty profile that then loaded, silently, as one of defaults.
+
+    Each writer has a partial file of its own. With one shared name, two writers at once -- the web's rig
+    card and `tandem rig set`, two `tandem profile migrate` runs -- truncated and interleaved into the same
+    file, one of them renamed the mix into place, and the other's rename found nothing and raised. Now the
+    last rename wins, with one writer's text whole. The file keeps its permissions (a new one gets the
+    umask's), since ``mkstemp`` makes its file readable by its owner alone.
+    """
+    import tempfile
+
+    fd, partial = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".partial")
+    try:
+        try:
+            mode = path.stat().st_mode & 0o7777
+        except OSError:
+            mode = 0o666 & ~_umask()
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(partial, path)
+    finally:
+        Path(partial).unlink(missing_ok=True)
+
+
+def _umask() -> int:
+    """The process's umask. Reading it means setting it, so it is set straight back."""
+    mask = os.umask(0o022)
+    os.umask(mask)
+    return mask

@@ -17,6 +17,10 @@ const ROUTES = [
 export const state = {
   profile: null,
   profiles: [],
+  // The paper's five tasks by name, which a new profile can copy whether or not this machine has them.
+  builtin: [],
+  // Profiles in the layout before version 3, which `tandem init` moves: not listed until it has.
+  oldLayout: [],
   version: "",
   runtimeReady: false,
 };
@@ -120,6 +124,8 @@ async function refreshShell() {
     const payload = await api.profiles();
     state.profiles = payload.profiles || [];
     state.profile = payload.active;
+    state.builtin = payload.builtin || [];
+    state.oldLayout = payload.old_layout || [];
     clear(profileSelect);
     for (const profile of state.profiles) {
       profileSelect.appendChild(
@@ -140,7 +146,7 @@ async function refreshShell() {
     runtimeChip.className = `chip ${runtime.ready ? "success" : ""}`;
     runtimeChip.title = runtime.ready
       ? `Runtime ready at ${runtime.root}`
-      : (runtime.problems || []).join("; ") || "The GPU runtime is not built";
+      : (runtime.problems || []).join("; ") || "The planner's runtime is not built";
     runtimeChip.appendChild(h("span.dot" + (runtime.ready ? ".live" : ".warn")));
     runtimeChip.appendChild(document.createTextNode(runtime.ready ? "runtime ready" : "visualize only"));
   } catch {

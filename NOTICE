@@ -1,39 +1,61 @@
 tandem — third-party notices
 ============================
 
-tandem's own code is MIT licensed (see LICENSE). It ships three third-party planner
-components under `src/tandem/_vendor/`, each with its original LICENSE file intact.
+tandem is the code for "TANDEM: Task and Motion Planning with As-Needed Demonstrations for
+Efficient Vision-Language-Action Model Fine-tuning" (https://prpl-group.com/tandem/). Its own
+code is MIT licensed (see LICENSE).
 
-Read this before redistributing tandem or using it commercially.
+tandem does NOT ship the planners it drives. A planner's runtime is built on your machine from
+a recipe that pins each source tree to an exact commit, and `tandem planners install NAME` (which
+`tandem init` runs) fetches those trees from their upstream repositories at install time, or reads
+them from a directory you provide, for a machine that cannot fetch them. The sources are then under their own
+licences, on your machine, exactly as if you had cloned them yourself.
+
+Read this before redistributing tandem, or before using it with the TiPToP planner commercially.
 
 
-cuRobo  —  src/tandem/_vendor/curobo
-------------------------------------
-Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-Licensed under the **NVIDIA License** (see src/tandem/_vendor/curobo/LICENSE).
-Upstream: https://github.com/SamratSahoo/curobo (a fork of https://github.com/NVlabs/curobo)
+Planners tandem fetches, but does not redistribute
+--------------------------------------------------
+The TiPToP planner's recipe (src/tandem/planners/tiptop/recipe.py) fetches three trees. The
+exact commits, and the paths trimmed from each, are recorded there; an installed runtime records
+what it actually installed in <runtime>/.tandem-runtime.json.
 
-cuTAMP  —  src/tandem/_vendor/cuTAMP
-------------------------------------
-Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-Licensed under the **NVIDIA License** (see src/tandem/_vendor/cuTAMP/LICENSE).
-Upstream: https://github.com/SamratSahoo/cuTAMP
+cuRobo
+  Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  Licensed under the NVIDIA License (see LICENSE in the fetched tree).
+  Upstream: https://github.com/SamratSahoo/curobo (a fork of https://github.com/NVlabs/curobo)
 
-TiPToP  —  src/tandem/_vendor/tiptop
-------------------------------------
-Copyright (c) 2025 TiPToP Contributors.
-Licensed under the **MIT License** (see src/tandem/_vendor/tiptop/LICENSE).
-Upstream: https://github.com/SamratSahoo/tiptop
+cuTAMP
+  Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  Licensed under the NVIDIA License (see LICENSE in the fetched tree).
+  Upstream: https://github.com/SamratSahoo/cuTAMP
+
+TiPToP
+  Copyright (c) 2025 TiPToP Contributors.
+  Licensed under the MIT License (see LICENSE in the fetched tree).
+  Upstream: https://github.com/SamratSahoo/tiptop
+
+tandem applies one small patch of its own to the fetched TiPToP tree
+(src/tandem/planners/tiptop/patches/): it lets a profile own its camera calibration file. The
+patch file says what it changes and why.
+
+
+What ships inside tandem
+------------------------
+DATAFARM checkpoints  —  src/tandem/planners/tiptop/assets/
+  vae_full_v2.pt and rnd_droid.pt, the small checkpoints the cuRobo fork's VAE-manifold and
+  RND-novelty costs load. They come from the hitl-tamp-vla project, whose repository is not
+  public, so tandem carries them; the install copies them into the runtime where those costs
+  look for them.
 
 lerobot_v3.py  —  src/tandem/export/lerobot_v3.py
--------------------------------------------------
-Adapted from the tamp-vla project's LeRobot v3.0 dataset writer.
+  Adapted from the tamp-vla project's LeRobot v3.0 dataset writer.
 
 
 What the NVIDIA License means for you
 -------------------------------------
-Both cuRobo and cuTAMP are under NVIDIA's source-available license, not an open-source
-license. Two clauses matter here:
+cuRobo and cuTAMP are under NVIDIA's source-available license, not an open-source license. Two
+clauses matter here:
 
   §3.1 Redistribution — you may redistribute the Work only under this same license, with
        a complete copy of it included and all copyright/attribution notices retained.
@@ -42,23 +64,21 @@ license. Two clauses matter here:
        intended for use non-commercially", where non-commercial means research or
        evaluation purposes only.
 
-So: **tandem as distributed is for research and evaluation use only**, because the planner
-it vendors is. Installing it, running it, and publishing results from it are all fine. Using
-it in a commercial product is not, without a separate license from NVIDIA.
+tandem no longer redistributes either, so §3.1 does not bind tandem's own distribution: the
+wheel carries no NVIDIA code. §3.3 still binds how you USE them. **Running tandem with the TiPToP
+planner is for research and evaluation use only**, because that planner runs on cuRobo and
+cuTAMP. Installing it, running it, and publishing results from it are all fine. Using it in a
+commercial product is not, without a separate license from NVIDIA. A planner that does not
+depend on them is not affected.
 
-If you need a distribution that is not subject to those terms, build tandem with the
-vendored planner excluded and fetch it at install time instead:
-
-    python tools/vendor.py --source <checkout>      # for local development only
-    # then exclude src/tandem/_vendor/{curobo,cuTAMP} from the wheel
-
-The exact pinned commits tandem vendors are recorded in
-`src/tandem/_vendor/VENDOR.toml`, along with the paths trimmed from each tree and the
-patches applied to it (`tools/patches/`).
+If you make an offline bundle of the sources (`tandem planners bundle`) and pass it
+on, that bundle IS a redistribution of cuRobo and cuTAMP: keep each tree's LICENSE with it, as
+§3.1 requires. The bundle tool exports whole trees, so it does.
 
 
 Python dependencies
 -------------------
 tandem's runtime dependencies (typer, rich, pydantic, ruamel.yaml, numpy, platformdirs,
-tomlkit, fastapi, uvicorn) and its optional extras (av, pyarrow, huggingface_hub,
-rerun-sdk) are installed from PyPI under their own licenses and are not redistributed here.
+tomlkit, fastapi, uvicorn, google-genai, pillow) and its optional extras (av, pyarrow,
+huggingface_hub, rerun-sdk) are installed from PyPI under their own licenses and are not
+redistributed here.

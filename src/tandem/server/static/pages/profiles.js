@@ -1,14 +1,28 @@
-// Profiles — the cards, and an editor that shows exactly what the planner will receive.
+// Profiles — one YAML file each, the paper's five tasks among them: the cards, a new one from a task or a
+// copy, and an editor that shows exactly what the planner will receive.
+//
+// The planner's own settings (planner.options) are edited as one JSON block and described by the
+// planner itself (planner_view: a summary, what it receives, what is wrong), so this page knows no
+// planner's schema and shows a planner registered tomorrow the same way it shows TiPToP. The robot and
+// cameras are no profile's: they are this machine's rig (Settings).
 
 import { api } from "../api.js";
-import { clear, h, mount } from "../dom.js";
+import { clear, h, mount, prettyJson } from "../dom.js";
 import { reloadShell, reportError, toast } from "../app.js";
 
 export function renderProfiles(host, state) {
   const listHost = h("div.grid");
   const editorHost = h("div");
 
+  // Old-layout profiles are not listed until they are moved; say so rather than show fewer than there are.
+  const oldLayout = state.oldLayout || [];
   mount(host,
+    oldLayout.length
+      ? h("div.alert", { style: { marginBottom: "14px" } },
+          `${oldLayout.length} profile(s) in the old layout (${oldLayout.join(", ")}) are not shown: run `,
+          h("span.mono", "tandem init"), " (or ", h("span.mono", "tandem profile migrate"),
+          ") to move them, their robot and cameras going to this machine's rig.")
+      : null,
     h("div.row", { style: { marginBottom: "14px" } },
       h("div.spacer"),
       h("button.primary", { onclick: () => createDialog(state, refresh) }, "+ New profile")),
@@ -26,7 +40,25 @@ export function renderProfiles(host, state) {
       listHost.appendChild(card(profile, state, refresh, editorHost));
     }
     if (!state.profiles.length) {
-      mount(listHost, h("div.empty", h("div.big", "◈"), h("div", "No profiles yet.")));
+      mount(listHost, h("div.empty",
+        h("div.big", "◈"),
+        h("div", "No profiles yet. ", h("span.mono", "tandem init"), " adds the paper's five tasks; ",
+          "+ New profile makes your own."),
+        h("button", { style: { marginTop: "12px" }, onclick: addPaperTasks }, "Add the paper's five tasks")));
+    }
+  }
+
+  async function addPaperTasks() {
+    try {
+      const result = await api.addPaperProfiles();
+      toast.ok(`Added ${result.added.length} of the paper's tasks`, `Active profile: ${result.active}`);
+      if ((result.held_back || []).length) {
+        toast.info(`Not added: ${result.held_back.join(", ")}`,
+          "A profile of that name is still in the old layout: tandem profile migrate moves it.");
+      }
+      refresh();
+    } catch (error) {
+      reportError(error, "Could not add the paper's tasks");
     }
   }
 
@@ -53,9 +85,12 @@ function card(profile, state, refresh, editorHost) {
       h("div.bar" + (pct >= 100 ? ".done" : ""), h("span", { style: { width: `${pct}%` } })),
       h("span.faint.small", `${done}/${profile.target}`)),
     h("div.row", { style: { marginTop: "10px" } },
-      h("span.chip", profile.robot),
-      h("span.chip", `${(profile.cameras || []).length} cams`),
-      profile.tamp_count ? h("span.chip.accent", `${profile.tamp_count} tamp`) : null,
+      h("span.chip", { title: profile.planner_summary || "" }, profile.planner),
+      // One of the paper's five tasks, as the paper collected it unless it has been edited since.
+      profile.builtin ? h("span.chip.violet", { title: profile.description || "" }, "paper") : null,
+      // A profile collected with a plugin this machine lacks: browsable here, collects where it is installed.
+      ...(profile.missing || []).map((what) =>
+        h("span.chip.eval", { title: "not installed on this machine" }, `${what} missing`)),
       h("div.spacer"),
       !profile.active
         ? h("button.small.ghost", {
@@ -89,20 +124,20 @@ async function openEditor(host, name, refresh) {
   }
 
   const profile = payload.profile;
-  const yamlHost = h("textarea", {
-    value: JSON.stringify(profile.tamp || {}, null, 2),
-    style: { minHeight: "220px" },
+  const view = payload.planner_view || {};
+  const optionsHost = h("textarea", {
+    value: prettyJson((profile.planner || {}).options || {}),
+    style: { minHeight: "260px" },
   });
-  const overridesHost = h("pre.mono", {
+  const receivesHost = h("pre.mono", {
     style: { background: "var(--bg-alt)", padding: "12px", borderRadius: "7px", overflow: "auto", maxHeight: "260px" },
-  }, JSON.stringify(payload.tamp_overrides || {}, null, 2));
+  }, JSON.stringify(view.receives || {}, null, 2));
+  const receivesNote = h("div.desc", view.receives_note || "");
 
   const promptInput = h("input", { value: profile.task.prompt || "" });
   const goalInput = h("input", { value: profile.task.goal || "", placeholder: "same as the task above" });
   const targetInput = h("input", { type: "number", min: "1", value: String(profile.task.target_episodes) });
   const descInput = h("input", { value: profile.description || "" });
-  const hostInput = h("input", { value: profile.robot.host });
-  const tdfInput = h("input", { type: "number", step: "0.05", min: "0.05", max: "1", value: String(profile.robot.time_dilation_factor) });
 
   const warningsHost = h("div");
   function drawWarnings(list) {
@@ -112,11 +147,11 @@ async function openEditor(host, name, refresh) {
   drawWarnings(payload.warnings);
 
   async function save() {
-    let tamp;
+    let options;
     try {
-      tamp = JSON.parse(yamlHost.value || "{}");
+      options = JSON.parse(optionsHost.value || "{}");
     } catch (error) {
-      toast.err("TAMP settings are not valid JSON", error.message);
+      toast.err("The planner's settings are not valid JSON", error.message);
       return;
     }
     const body = {
@@ -128,19 +163,16 @@ async function openEditor(host, name, refresh) {
         goal: goalInput.value.trim() || null,
         target_episodes: Number(targetInput.value) || profile.task.target_episodes,
       },
-      robot: {
-        ...profile.robot,
-        host: hostInput.value,
-        time_dilation_factor: Number(tdfInput.value) || profile.robot.time_dilation_factor,
-      },
-      tamp,
+      planner: { ...profile.planner, options },
     };
     try {
       const updated = await api.saveProfile(name, body);
       toast.ok(`Saved ${name}`);
       drawWarnings(updated.warnings);
-      overridesHost.textContent = JSON.stringify(
-        (await api.profile(name)).tamp_overrides || {}, null, 2);
+      const saved = updated.planner_view || {};
+      receivesHost.textContent = JSON.stringify(saved.receives || {}, null, 2);
+      receivesNote.textContent = saved.receives_note || "";
+      optionsHost.value = prettyJson((updated.profile.planner || {}).options || {});
       refresh();
     } catch (error) {
       reportError(error, "Could not save the profile");
@@ -158,35 +190,49 @@ async function openEditor(host, name, refresh) {
     h("div.field-row",
       h("div.field", h("label", "Planner goal"), goalInput,
         h("div.desc", "Only when the goal must differ from the label.")),
-      h("div.field", h("label", "Target episodes"), targetInput),
-      h("div.field", h("label", "Robot host"), hostInput),
-      h("div.field", h("label", "Speed"), tdfInput,
-        h("div.desc", "time_dilation_factor. 0.2 is 20% — raise it only once you trust the setup."))),
+      h("div.field", h("label", "Target episodes"), targetInput)),
     h("div.field",
-      h("label", "TAMP settings"),
-      yamlHost,
+      h("label", `Planner settings — ${(profile.planner || {}).backend || "?"}`),
+      view.summary ? h("div.faint.small", { style: { marginBottom: "6px" } }, view.summary) : null,
+      optionsHost,
       h("div.desc",
-        "tiptop's own key names, so anything documented upstream works verbatim. " +
-        "Unknown keys are rejected on save — a silently ignored override is the failure mode that looks like success.")),
+        "planner.options, checked by the planner itself when you save. A key it does not read is " +
+        "rejected — a silently ignored setting is the failure mode that looks like success. " +
+        "`tandem planners info <name>` lists what a planner reads.")),
     h("div.field",
       h("label", "What the planner receives"),
-      overridesHost,
-      h("div.desc", "Passed as --curobo-overrides. Paths are resolved to absolute here.")),
+      receivesHost,
+      receivesNote),
     h("div.row",
       h("button.primary", { onclick: save }, "Save"),
       h("div.spacer"),
-      h("span.faint.small.mono", payload.dir))
+      h("span.faint.small.mono", payload.file)),
+    h("div.desc", { style: { marginTop: "8px" } },
+      "The file holds every setting, phase planning (hitl) included: ",
+      h("span.mono", `tandem profile edit ${name}`), " opens it. The robot and cameras are the rig's (Settings).")
   ));
 }
 
 // ---- create ----------------------------------------------------------------
 
 function createDialog(state, refresh) {
-  const nameInput = h("input", { placeholder: "fold-cloth" });
-  const promptInput = h("input", { placeholder: "place the toy on the cloth and fold it" });
+  const nameInput = h("input", { placeholder: "my-task" });
+  const promptInput = h("input", { placeholder: "put the cup on the plate" });
+  // A new task on the paper's settings, or a copy of a profile: any here, and the paper's five whether or
+  // not this machine has them yet (the server copies the packaged one).
+  const here = state.profiles.filter((p) => p.valid).map((p) => p.name);
+  const sources = [...here, ...(state.builtin || []).filter((name) => !here.includes(name))];
   const fromSelect = h("select",
-    h("option", { value: "" }, "built-in template"),
-    ...state.profiles.filter((p) => p.valid).map((p) => h("option", { value: p.name }, `copy of ${p.name}`)));
+    h("option", { value: "" }, "the paper's settings (a new task)"),
+    ...sources.map((name) => h("option", { value: name }, `copy of ${name}`)));
+  const promptDesc = h("div.desc");
+  function describeTask() {
+    promptDesc.textContent = fromSelect.value
+      ? `Optional: the copy keeps ${fromSelect.value}'s task unless you give one.`
+      : "What the robot and you are to do: the label stored with every episode, which phase planning splits into steps.";
+  }
+  fromSelect.addEventListener("change", describeTask);
+  describeTask();
 
   const scrim = h("div.drawer-scrim", { onclick: close });
   const panel = h("div.card", {
@@ -196,11 +242,11 @@ function createDialog(state, refresh) {
     },
   },
     h("div.card-title", "New profile"),
-    h("div.card-hint", "A profile is one collection setup and the trajectories it produces."),
+    h("div.card-hint", "A profile is one task: its settings, in one YAML file, and the trajectories collected with it."),
     h("div.field", h("label", "Name"), nameInput,
-      h("div.desc", "Lowercase letters, digits, - and _. This is also the directory name.")),
+      h("div.desc", "Lowercase letters, digits, - and _. It is also the file's name.")),
     h("div.field", h("label", "Start from"), fromSelect),
-    h("div.field", h("label", "Task"), promptInput),
+    h("div.field", h("label", "Task"), promptInput, promptDesc),
     h("div.row",
       h("button.primary", { onclick: create }, "Create"),
       h("button.ghost", { onclick: close }, "Cancel")));
@@ -211,13 +257,17 @@ function createDialog(state, refresh) {
   }
 
   async function create() {
+    const name = nameInput.value.trim();
+    const prompt = promptInput.value.trim();
+    // Said here as the server would say it, before a round trip: a new task needs its task.
+    if (!fromSelect.value && !prompt) {
+      toast.err("A new profile needs its task", "Say what the robot and you are to do, or start from a copy.");
+      promptInput.focus();
+      return;
+    }
     try {
-      await api.createProfile({
-        name: nameInput.value.trim(),
-        from: fromSelect.value || null,
-        prompt: promptInput.value.trim() || null,
-      });
-      toast.ok(`Created ${nameInput.value.trim()}`);
+      const created = await api.createProfile({ name, from: fromSelect.value || null, prompt: prompt || null });
+      toast.ok(`Created ${created.name}`, created.file);
       close();
       refresh();
     } catch (error) {

@@ -1,0 +1,52 @@
+# The profile the suite's `profile` fixture saves as `test`: what the shipped template held before
+# version 3 -- its task, phase planning off, and its four TAMP overrides -- in the version-3 layout.
+# A fixture of its own, so that what a test assumes about "a profile" does not change whenever the
+# template does. Its robot and cameras are the `machine_rig` fixture's rig.
+version: 3
+description: Franka FR3 + Robotiq 2F-85
+
+task:
+  prompt: Place the toys on the plate with no collisions
+  goal: null
+  target_episodes: 20
+
+planner:
+  backend: tiptop
+  options:
+    tamp:
+      num_particles: 256
+      opt_steps_per_skeleton: 250
+      traj_length_norm: inf
+      grasp_pose_change_weight: 0.1
+
+hitl:
+  enabled: false
+  proposal_model: gemini-2.5-pro
+  vlm_model: gemini-2.5-flash
+  max_attempts: 3
+  classify_initial: false
+  verify_retries: 1
+  verify_enforced: true
+  on_verification_failure: exclude
+  verify_final_phase: true
+  verification_camera: external
+  check_human_effects: true
+  check_human_preconditions: false
+  check_tamp_preconditions: false
+  check_tamp_effects: false
+  precondition_enforced: false
+  check_plan_effects: true
+  on_robot_phase_failure: abort
+  conjoin_robot_phases: true
+  human_executor: teleop
+  human_executor_options: {}
+  allow_unrecorded_human_phase: false
+  save_vlm_io: true
+  cache_path: null
+
+recording:
+  enabled: true
+
+export:
+  hf_repo: ''
+  private: false

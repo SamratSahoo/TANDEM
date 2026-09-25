@@ -1,0 +1,84 @@
+{
+  "env": {
+    "TIPTOP_EXTERNAL_2_CAMERA_ID": "31425515",
+    "TIPTOP_EXTERNAL_CAMERA_ID": "32439448",
+    "TIPTOP_HAND_CAMERA_ID": "14846828",
+    "TIPTOP_STATE_PORT": "5557",
+    "TIPTOP_TASK": "place the bread on the plate, and then open the box and place the bread in the box"
+  },
+  "overrides": {
+    "grasp_pose_change_weight": 0.1,
+    "num_particles": 512,
+    "opt_steps_per_skeleton": 250,
+    "traj_length_norm": "inf"
+  },
+  "tiptop_yml": {
+    "cameras": {
+      "external": {
+        "fps": 15,
+        "resolution": "HD720",
+        "serial": "32439448",
+        "type": "zed"
+      },
+      "external_2": {
+        "fps": 15,
+        "resolution": "HD720",
+        "serial": "31425515",
+        "type": "zed"
+      },
+      "hand": {
+        "fps": 15,
+        "resolution": "HD720",
+        "serial": "14846828",
+        "type": "zed"
+      },
+      "perception": "external"
+    },
+    "perception": {
+      "contact_threshold_m": 0.01,
+      "depth_smoothing": {
+        "num_frames": 5
+      },
+      "depth_trunc_m": 5.0,
+      "foundation_stereo": {
+        "url": "http://localhost:1234"
+      },
+      "m2t2": {
+        "apply_bounds": true,
+        "url": "http://gpu:8123"
+      },
+      "mask_erosion_pixels": 3,
+      "robot_mask_margin_m": 0.02,
+      "sam": {
+        "mode": "local"
+      },
+      "voxel_downsample_size": 0.0075
+    },
+    "robot": {
+      "dof": 7,
+      "gripper_port": 5559,
+      "host": "10.0.0.5",
+      "port": 5555,
+      "q_capture": [
+        -0.034,
+        0.09,
+        0.08,
+        -1.319,
+        -0.003,
+        1.253,
+        0.03
+      ],
+      "q_home": [
+        0.0,
+        -0.628,
+        0.0,
+        -2.513,
+        0.0,
+        1.885,
+        0.0
+      ],
+      "time_dilation_factor": 0.3,
+      "type": "fr3_robotiq"
+    }
+  }
+}

@@ -11,16 +11,25 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from tandem.core import profiles as profiles_mod
-from tandem.core import runtime as runtime_mod
 from tandem.core import session as session_mod
-from tandem.core import settings as settings_mod
 
 router = APIRouter(tags=["sessions"])
+
+# How often an open event stream looks up from its queue to see whether the server is shutting down,
+# and how long it may sit with nothing to send before it sends a keepalive.
+STREAM_POLL = 0.25
+KEEPALIVE = 15.0
+# The last thing a stream says when the server closes it (`app.close_streams`) with its session still on.
+SHUTDOWN_NOTICE = (
+    "tandem ui is shutting down, so this page stops updating here. The session is being stopped: the arm "
+    "parked, the planner closed, the episode merges finished. The terminal running tandem ui says when it "
+    "is done."
+)
 
 
 class CreateBody(BaseModel):
@@ -43,11 +52,9 @@ class ContinueBody(BaseModel):
 @router.post("/sessions")
 async def create_session(body: CreateBody) -> dict:
     profile = profiles_mod.load(body.profile)
-    cfg = settings_mod.load()
-    runtime = runtime_mod.Runtime(cfg.resolved_runtime_dir())
+    # The session builds whichever planner the profile names, runtime and all, through the registry.
     session = session_mod.manager().create(
         profile,
-        runtime,
         task=body.task,
         execute=body.execute,
         record=body.record,
@@ -68,8 +75,9 @@ async def get_session(session_id: str) -> dict:
 
 
 @router.get("/sessions/{session_id}/stream")
-async def stream_session(session_id: str) -> StreamingResponse:
+async def stream_session(session_id: str, request: Request) -> StreamingResponse:
     session = session_mod.manager().get(session_id)
+    closing = request.app.state.closing
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=2000)
 
@@ -89,15 +97,28 @@ async def stream_session(session_id: str) -> StreamingResponse:
             yield _sse({"type": "state", "state": session.state.value, **session.summary()})
             for line in session.logs(limit=300):
                 yield _sse({"type": "log", **line})
+            idle = 0.0
             while True:
+                if closing.is_set():
+                    # The server is shutting down, and gives open connections a few seconds: closed
+                    # here, rather than held open until the session has ended and cancelled first.
+                    while not queue.empty():
+                        yield _sse(queue.get_nowait())
+                    yield _sse({"type": "log", **session_mod.LogLine("tandem", SHUTDOWN_NOTICE).to_dict()})
+                    break
                 try:
-                    message = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    message = await asyncio.wait_for(queue.get(), timeout=STREAM_POLL)
                 except asyncio.TimeoutError:
+                    idle += STREAM_POLL
+                    if idle < KEEPALIVE:
+                        continue
+                    idle = 0.0
                     # Keep proxies and browsers from dropping an idle stream.
                     yield b": keepalive\n\n"
                     if not session.alive and queue.empty():
                         break
                     continue
+                idle = 0.0
                 yield _sse(message)
                 if message.get("type") == "state" and message.get("state") in {"stopped", "failed"}:
                     # Let any trailing log lines drain before closing.
@@ -159,6 +180,12 @@ async def force_stop(session_id: str) -> dict:
 
 @router.post("/sessions/{session_id}/teleop-switch")
 async def teleop_switch(session_id: str) -> dict:
+    """Ask for the arm: at the next plan-step boundary, or at once at a human phase's prompt.
+
+    Between phases it lends the arm to a person through teleop. At a human phase's prompt it hands
+    the step to the profile's human executor (``hitl.human_executor``), teleop unless it says
+    otherwise; ``human_executor`` in the session summary says which, and whether it is ready.
+    """
     session = session_mod.manager().get(session_id)
     session.request_teleop()
     return session.summary()
@@ -173,7 +200,13 @@ async def teleop_resume(session_id: str) -> dict:
 
 @router.post("/sessions/{session_id}/human-phase/done")
 async def human_phase_done(session_id: str) -> dict:
-    """The person did the step by hand. The driver checks it from a photo before carrying on."""
+    """The person did the step by hand. The driver checks it from a photo before carrying on.
+
+    A 409 while recording, unless the profile sets ``hitl.allow_unrecorded_human_phase``: a step
+    done by hand has no leg, and the episode would lack its demonstration while looking complete.
+    The step is then handed over with ``teleop-switch``, which at a human phase's prompt runs the
+    profile's human executor (``hitl.human_executor``) rather than waiting for a plan-step boundary.
+    """
     session = session_mod.manager().get(session_id)
     session.complete_human_phase()
     return session.summary()

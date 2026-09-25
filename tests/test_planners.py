@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from planner_sources import importable_from, planner_sources, skip_or_fail
 
 from tandem.core.errors import TandemError
 from tandem.planners import registry
@@ -75,29 +76,19 @@ def test_the_declaration_matches_the_real_cutamp_domain():
     rather than computed, and a stale declaration would be silent: an atom the domain can no longer
     achieve would sail past the feasibility check and into a search with no bound.
     """
-    vendored = Path(__file__).resolve().parents[1] / "src" / "tandem" / "_vendor" / "cuTAMP"
-    if not (vendored / "cutamp" / "tamp_domain.py").is_file():
-        pytest.skip("no vendored cuTAMP to check the declaration against")
-    sys.path.insert(0, str(vendored))
-    already = set(sys.modules)
-    try:
-        from cutamp.tamp_domain import (
-            Movable,
-            Surface,
-            all_tamp_fluents,
-            all_tamp_operators,
-            get_initial_state,
-        )
-    except Exception as exc:  # pragma: no cover - the vendored tree needs no deps, but be kind
-        pytest.skip(f"cuTAMP's symbolic layer is not importable here: {exc}")
-    finally:
-        sys.path.remove(str(vendored))
-        # Leave sys.modules as it was found. This is the one test that imports a planner on purpose,
-        # and a `cutamp` left behind makes any later "did that import a planner?" assertion depend
-        # on test order.
-        for name in set(sys.modules) - already:
-            if name.split(".")[0] == "cutamp":
-                del sys.modules[name]
+    cutamp_tree = planner_sources("cuTAMP/cutamp/tamp_domain.py") / "cuTAMP"
+    # The one test that imports a planner on purpose, from what may be the developer's own runtime.
+    with importable_from(cutamp_tree, "cutamp"):
+        try:
+            from cutamp.tamp_domain import (
+                Movable,
+                Surface,
+                all_tamp_fluents,
+                all_tamp_operators,
+                get_initial_state,
+            )
+        except Exception as exc:  # pragma: no cover - the symbolic layer needs no deps, but be kind
+            skip_or_fail(f"cuTAMP's symbolic layer is not importable here: {exc}")
 
     from tandem.planners.tiptop.capabilities import ACHIEVABLE, ALL_FLUENTS, CAPABILITIES
 
@@ -200,14 +191,23 @@ def test_the_sidecar_takes_stdout_away_from_the_libraries_it_imports():
     """The single thing that must be right or nothing works.
 
     A real planner's process prints on import -- CUDA banners, warp's version line, a stray print in
-    a vendored tree. Any one of those on fd 1 lands in the middle of a JSON reply. The sidecar dups
-    the real stdout for itself and points fd 1 at stderr before importing anything.
+    a vendored tree. Any one of those on fd 1 lands in the middle of a JSON reply. The sidecar kit
+    dups the real stdout for itself and points fd 1 at stderr as it is imported, and the sidecar
+    imports the kit before anything else. (Both halves used to be in the sidecar itself; the kit is
+    where every planner's sidecar gets them now.)
     """
+    from tandem.planners import sidecar_kit
+
+    kit = sidecar_kit.path().read_text()
+    protocol_line = kit.index("_PROTOCOL_OUT = os.fdopen(os.dup(1)")
+    assert "os.dup2(2, 1)" in kit
+    # At import, not inside a function someone has to remember to call.
+    assert protocol_line < kit.index("\ndef "), "the kit must take stdout when it is imported"
     source = _sidecar_source()
-    protocol_line = source.index("_PROTOCOL_OUT = os.fdopen(os.dup(1)")
-    assert "os.dup2(2, 1)" in source
     # Before any planner import, not merely somewhere in the file.
-    assert protocol_line < source.index("from tiptop"), "stdout must be secured before tiptop is imported"
+    assert source.index("from tandem_sidecar import") < source.index("from tiptop"), (
+        "stdout must be secured before tiptop is imported"
+    )
 
 
 # --- the channel ----------------------------------------------------------------------------------
@@ -308,26 +308,23 @@ def test_the_backend_refuses_to_work_before_it_is_warm():
         backend.perceive(task_hint="x", save_dir=Path("/tmp"))
 
 
-def test_every_symbol_the_sidecar_imports_exists_in_the_vendored_planner():
+def test_every_symbol_the_sidecar_imports_exists_in_the_pinned_planner():
     """The sidecar cannot be exercised without a GPU, a robot and two cameras, so this is the check.
 
-    It calls public functions of a planner tandem does not control. A re-vendor that moves or renames
-    one of them would otherwise surface as an ImportError forty seconds into a warm-up, with an
-    operator standing next to an arm — and only for whoever happened to run a session next.
+    It calls public functions of a planner tandem does not control. A bump of the pins that moves or
+    renames one of them would otherwise surface as an ImportError forty seconds into a warm-up, with
+    an operator standing next to an arm — and only for whoever happened to run a session next.
     """
-    vendor = Path(__file__).resolve().parents[1] / "src" / "tandem" / "_vendor"
-    if not (vendor / "tiptop" / "tiptop" / "tiptop_run.py").is_file():
-        pytest.skip("no vendored planner to check the sidecar against")
-    if (vendor / "tiptop" / "tiptop" / "hitl").is_dir():
-        # The vendored tree is still the fork this refactor exists to stop depending on, and the
-        # sidecar is written against the clean upstream. Four of the functions it calls
-        # (_planning_robot_types, home_all_arms, _execute_plan_recorded,
-        # resolve_max_motion_refine_attempts) are upstream-only, so this check is meaningless until
-        # the vendor swap. It starts enforcing itself the moment `tiptop/hitl/` stops being vendored.
-        pytest.skip("the vendored planner is still the fork; the sidecar targets the clean upstream")
+    sources = planner_sources("tiptop/tiptop/tiptop_run.py", "cuTAMP/cutamp")
+    if (sources / "tiptop" / "tiptop" / "hitl").is_dir():
+        # These sources are the fork this refactor exists to stop depending on, and the sidecar is
+        # written against the clean upstream. Four of the functions it calls (_planning_robot_types,
+        # home_all_arms, _execute_plan_recorded, resolve_max_motion_refine_attempts) are
+        # upstream-only, so the check is meaningless against the fork.
+        skip_or_fail("these planner sources are the fork; the sidecar targets the clean upstream")
 
     def module_path(dotted: str) -> Path | None:
-        root = vendor / ("tiptop" if dotted.startswith("tiptop") else "cuTAMP")
+        root = sources / ("tiptop" if dotted.startswith("tiptop") else "cuTAMP")
         rel = Path(*dotted.split("."))
         for candidate in (root / rel.with_suffix(".py"), root / rel / "__init__.py"):
             if candidate.is_file():
@@ -371,25 +368,25 @@ def test_every_symbol_the_sidecar_imports_exists_in_the_vendored_planner():
 
     # Module attributes reached directly, which is how the save pool is shared with the planner's own
     # rollout loop. Private, and therefore exactly the kind of thing that moves without warning.
-    run_names = top_level_names(vendor / "tiptop" / "tiptop" / "tiptop_run.py")
+    run_names = top_level_names(sources / "tiptop" / "tiptop" / "tiptop_run.py")
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "tiptop_run":
             if node.attr not in run_names:
                 missing.append(f"tiptop_run.{node.attr}")
 
-    assert not missing, "the sidecar names symbols the vendored planner does not have: " + ", ".join(
+    assert not missing, "the sidecar names symbols the pinned planner does not have: " + ", ".join(
         sorted(set(missing))
     )
 
 
-def _upstream_signatures(vendor: Path) -> dict[str, ast.arguments]:
+def _upstream_signatures(sources: Path) -> dict[str, ast.arguments]:
     """Every function the sidecar could call, by the name it imports it under."""
     signatures: dict[str, ast.arguments] = {}
-    for root in (vendor / "tiptop", vendor / "cuTAMP"):
+    for root in (sources / "tiptop", sources / "cuTAMP"):
         for path in root.rglob("*.py"):
             try:
                 tree = ast.parse(path.read_text())
-            except SyntaxError:  # pragma: no cover - a vendored tree we do not control
+            except SyntaxError:  # pragma: no cover - a tree we do not control
                 continue
             for node in tree.body:
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -405,11 +402,9 @@ def test_the_sidecar_calls_the_planner_with_the_right_arguments():
     with one argument here, which would have failed EVERY warm — and passing the wrong default would
     have been worse than the crash, since the planner ships 0.2 and 1.0 means five times the speed.
     """
-    vendor = Path(__file__).resolve().parents[1] / "src" / "tandem" / "_vendor"
-    if not (vendor / "tiptop" / "tiptop" / "tiptop_run.py").is_file():
-        pytest.skip("no vendored planner to check the sidecar against")
-    if (vendor / "tiptop" / "tiptop" / "hitl").is_dir():
-        pytest.skip("the vendored planner is still the fork; the sidecar targets the clean upstream")
+    sources = planner_sources("tiptop/tiptop/tiptop_run.py", "cuTAMP/cutamp")
+    if (sources / "tiptop" / "tiptop" / "hitl").is_dir():
+        skip_or_fail("these planner sources are the fork; the sidecar targets the clean upstream")
 
     tree = ast.parse(sidecar_path().read_text())
 
@@ -419,7 +414,7 @@ def test_the_sidecar_calls_the_planner_with_the_right_arguments():
         if isinstance(node, ast.ImportFrom) and node.module and node.module.split(".")[0] in ("tiptop", "cutamp"):
             from_planner.update(a.asname or a.name for a in node.names)
 
-    signatures = _upstream_signatures(vendor)
+    signatures = _upstream_signatures(sources)
     problems: list[str] = []
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
@@ -452,4 +447,4 @@ def test_the_sidecar_calls_the_planner_with_the_right_arguments():
             if unknown:
                 problems.append(f"{name}() got unexpected keyword argument(s): {', '.join(unknown)}")
 
-    assert not problems, "the sidecar calls the vendored planner wrongly:\n  " + "\n  ".join(problems)
+    assert not problems, "the sidecar calls the pinned planner wrongly:\n  " + "\n  ".join(problems)

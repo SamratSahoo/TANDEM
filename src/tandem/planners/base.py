@@ -21,6 +21,7 @@ tandem-tamp`` on a laptop. A backend that needs torch imports it behind its own 
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -54,7 +55,11 @@ class Capabilities:
     # object up and place it on a surface", not the planner's real operator signatures. Those carry
     # motion-level parameters (conf, traj, grasp) and bookkeeping predicates that a proposer has no
     # business reasoning about, and shown them it writes goals over the alternation lock.
-    robot_description: str = "pick an object up and place it on a surface"
+    #
+    # No default. It used to default to TiPToP's sentence, so a planner that left it out had the
+    # proposer told its robot picks and places whatever it really does. Empty is refused when a
+    # Planner class is defined (``sdk.capability_problems``) and by the conformance kit.
+    robot_description: str = ""
 
     # How each goal predicate is spelled on the wire. tiptop's create_tamp_environment reads
     # lowercase {"predicate": "on", "args": [...]}, so this is {"On": "on", "Holding": "holding"}.
@@ -74,7 +79,10 @@ class Capabilities:
     reserved_predicate_names: frozenset[str] = frozenset()
 
     # Object types, and which is which. A `surface` is something other things are put ON; a
-    # `movable` is something the robot can pick up.
+    # `movable` is something the robot can pick up. They are the ONLY two: tandem types every
+    # perceived object as one or the other for a whole task (``planning.structs.SceneTypes``), so every
+    # parameter of a goal predicate, and of a robot operator, must be typed with one of them. A third
+    # type would name no object in any scene, and no atom over it could ever be grounded.
     movable_type: str = "movable"
     surface_type: str = "surface"
 
@@ -90,19 +98,72 @@ class Capabilities:
 
     # True when one plan may pick each object at most once (cuTAMP's Pick requires and DELETES
     # HasNotPickedUp). It makes `On(toy, table) and On(toy, shelf)` unsatisfiable rather than merely
-    # slow, so two phases that move the same object must stay separate legs.
+    # slow, so two phases that move the same object must stay separate legs. True is the safe
+    # default: it only ever splits a run of robot phases further (``feasibility.conjoinable_run``).
     one_pick_per_object: bool = True
 
     # True when every goal is planned from the same clean state — no `On` atom in the initial state,
     # so nothing symbolic enforces an ordering BETWEEN two robot phases and consecutive ones may be
-    # conjoined into a single goal.
-    initial_state_is_clean: bool = True
+    # conjoined into a single goal (one perception pass, the atoms sorted, the proposer's order
+    # between them gone). A PROMISE a planner makes about its solver, as cuTAMP does through TiPToP's
+    # declaration -- not a default. It used to default to True, which silently conjoined the robot
+    # phases of every planner that left it out, a planner that executes goal atoms in order or keeps
+    # state between legs included. False is the safe reading: every robot phase is its own leg.
+    initial_state_is_clean: bool = False
 
     # Whether execute() honours should_stop at step boundaries. False means preempt is abort.
     supports_cooperative_stop: bool = False
 
     # Whether plan() can be handed a previous PlanResult.skeleton to skip the symbolic search.
     supports_skeleton_reuse: bool = False
+
+    # Paragraphs of the phase-segmentation prompt that only make sense for THIS planner, keyed by the
+    # slot ``tandem.planning.prompts`` renders them into. The prompt the method was evaluated with
+    # explains what On means, which predicates a precondition may be written in, and what a robot
+    # phase may ask for -- every one of them a statement about cuTAMP's goal language, not about
+    # phase planning. Held here so the prompt template itself names no predicate; a slot a backend
+    # leaves out gets a generic paragraph rendered from goal_predicates, so an empty map is a
+    # complete declaration, just a less specific prompt.
+    prompt_fragments: Mapping[str, str] = field(default_factory=dict)
+
+    # Predicates that can hold of an object in only ONE atom at a time, by predicate name -> the
+    # position of that object's argument. {"On": 0} says a thing rests on one surface: asserting
+    # On(toy, shelf) retracts On(toy, table) outright. The symbolic contract check
+    # (``tandem.planning.contracts``) reads it as the one delete effect a phase gets for free -- a
+    # robot phase has no operator and declares no delete effects, yet its placements unmistakably end
+    # the old ones -- and without it a plan that moves the toy away and then needs it where it was
+    # passes as consistent. A predicate absent here displaces nothing, which is right for a goal
+    # language with no such exclusivity.
+    exclusive_arguments: Mapping[str, int] = field(default_factory=dict)
+
+    # Which argument of a goal atom names the object a robot phase physically MOVES, by predicate
+    # name -> position. {"On": 0, "Holding": 0}: the toy in On(toy, box) moves, the box does not.
+    # The distinction is the whole point -- "put toy_a on the table" and "put toy_b on the table"
+    # share the table and move nothing in common. Read to tell the planner which objects the plan
+    # actually asks the robot to pick (see supports_movable_restriction), and to flag two
+    # consecutive robot phases that move the same object, the shape of a plan that wrote a step the
+    # robot cannot do as a pick-and-place anyway. A predicate absent here moves nothing.
+    moved_arguments: Mapping[str, int] = field(default_factory=dict)
+
+    # The planner's own operators, as one signature each: Omega_0 in the paper's terms. Never shown
+    # to the proposer (robot_description is what it reasons over, for the reason given there) and
+    # never searched over. It is written into each rollout's provenance so the record says what the
+    # robot side could do alongside the human operators the model invented -- a record that
+    # hard-coded cuTAMP's would be a false statement the moment another planner ran the phases.
+    robot_operators: tuple[str, ...] = ()
+
+    # Whether plan() honours `movables=`: only the named objects may be picked, every other one is
+    # an obstacle. A scene shared with a person contains the person's things -- "pull the block out
+    # USING THE SCREWDRIVER" is what makes the screwdriver a detected object at all -- and a planner
+    # told nothing treats the human's tool as one more thing to pick up. False means the phase
+    # planner does not pass it, and the planner may move anything it detected.
+    supports_movable_restriction: bool = False
+
+    # Whether plan() honours `return_home=False`: end the recorded leg where the last operation left
+    # the arm, instead of driving it home. Only the task's last leg should go home. One in the middle
+    # is motion nobody asked for, recorded into the middle of the demonstration, and the next leg
+    # then plans from home rather than from where this one stopped. False means every leg goes home.
+    supports_return_home: bool = False
 
     def goal_predicate_names(self) -> frozenset[str]:
         return frozenset(self.goal_predicates)
@@ -207,6 +268,13 @@ class PlanResult:
     skeleton_reused: bool = False
     # What the planner wrote for this sub-goal, by role ("plan", "scene", ...).
     artifacts: dict[str, str] = field(default_factory=dict)
+    # The operator sequence the plan runs, one label per operator in execution order, with its
+    # motion-level arguments dropped: ("Pick(bread)", "Place(bread, plate)"), which is the task plan
+    # the paper's figures show for a robot phase. Plain strings, so it is JSON-safe as it stands and
+    # goes into a rollout's record next to the human operators the proposer invented. Provenance
+    # only: nothing in tandem parses it or decides anything by it. Empty when the planner does not
+    # say, which is not the same as a plan with nothing in it.
+    task_plan: tuple[str, ...] = ()
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> PlanResult:
@@ -218,6 +286,7 @@ class PlanResult:
             skeleton=data.get("skeleton"),
             skeleton_reused=bool(data.get("skeleton_reused")),
             artifacts=dict(data.get("artifacts") or {}),
+            task_plan=tuple(str(label) for label in (data.get("task_plan") or ())),
         )
 
 
@@ -288,6 +357,11 @@ class TampBackend(Protocol):
     The lifecycle is: ``require_ready`` → ``warm`` → (``perceive`` → ``plan`` → ``execute``)* →
     ``close``, with ``release_hardware``/``reacquire_hardware`` bracketing every teleop leg because
     the robot and the cameras admit exactly one owner.
+
+    A new planner does not implement this by hand: it subclasses ``tandem.planners.Planner`` (or
+    ``SidecarPlanner``, for one that runs in an environment of its own), which supplies every verb
+    but ``perceive``, ``plan`` and ``execute`` and is its own factory. ``tandem.planners.testing``
+    checks an implementation of this protocol, however it was written.
     """
 
     name: str
@@ -329,7 +403,14 @@ class TampBackend(Protocol):
         """Park the arm. Deliberately does not open the gripper — it may be holding something."""
 
     # -- the sub-goal cycle --------------------------------------------------
-    def perceive(self, *, task_hint: str, save_dir: Path, reset_arm: bool = True) -> SceneView:
+    def perceive(
+        self,
+        *,
+        task_hint: str,
+        save_dir: Path,
+        reset_arm: bool = True,
+        open_gripper: bool = False,
+    ) -> SceneView:
         """Look at the workspace and report what is in it.
 
         ``task_hint`` steers DETECTION only, never the goal: the full instruction is what makes a
@@ -338,6 +419,13 @@ class TampBackend(Protocol):
         ``reset_arm`` parks the arm first, which is what an ordinary planner rollout does. Turn it
         OFF for a phase resumed after a hand-off: the arm is where a person left it, quite possibly
         holding something, and driving it home would undo the step they just did.
+
+        ``open_gripper`` opens the gripper before looking, and moves nothing else. It is for the first
+        robot leg after a human phase: nothing about a person driving the arm guarantees the fingers
+        were left open, and a planner that starts every goal from an empty hand (cuTAMP's HandEmpty)
+        would plan its first grasp as though they were. Off by default, and never implied by
+        ``reset_arm``, because opening the hand of an arm that is holding something drops it -- the
+        caller, which knows what the phase before was for, is the one to decide.
         """
 
     def plan(
@@ -346,6 +434,8 @@ class TampBackend(Protocol):
         goal: Sequence[GoalAtom],
         *,
         surfaces: frozenset[str] = frozenset(),
+        movables: frozenset[str] | None = None,
+        return_home: bool = True,
         save_dir: Path,
         reuse_skeleton: Any = None,
     ) -> PlanResult:
@@ -355,6 +445,20 @@ class TampBackend(Protocol):
         object's type decides its geometry: a box that is a surface in the phase that puts a toy
         into it and a movable in the phase that does not would change the world between two phases
         of one task.
+
+        ``movables``, when given, are the only objects the plan may pick up. Every other detected
+        object stays in the world as an obstacle: perceived, avoided, never grasped. None means no
+        restriction, which is an ordinary rollout. A goal that itself moves an object outside the set
+        is not planned with the restriction quietly widened -- the result is ``ok=False``, with the
+        object named, because the phase planner and the backend disagree about what this leg is for.
+
+        ``return_home=False`` ends the plan where its last operation leaves the arm instead of
+        driving it home. Only the leg that ends the task should go home; any other is continued from
+        where it stops, by a person or by the next leg.
+
+        tandem passes ``movables`` only when ``capabilities().supports_movable_restriction`` and
+        ``return_home`` only when ``capabilities().supports_return_home``. A backend declaring
+        neither is never handed either, and may leave both out of its signature.
         """
 
     def execute(
@@ -373,9 +477,335 @@ class TampBackend(Protocol):
         """
 
 
+# --------------------------------------------------------------------------- building one, and the catalog
+#
+# A backend is never constructed by name-specific code in tandem. The registry maps a planner's name
+# to a FACTORY, and the factory is the only thing that knows how its backend is put together -- which
+# runtime it runs in, which environment variables it reads, which files it wants written first. The
+# session hands every factory the same BackendContext and gets a TampBackend back. That one seam is
+# what lets a planner tandem has never heard of be installed as a package and named in a profile.
+#
+# The same factory is also what a catalog of planners reads: what each one is (PlannerInfo), what it
+# can be asked for (Capabilities), and what it needs installed before it can run (BackendRuntime).
+# All three are answerable without building the backend, and without the heavy environment.
+
+
+@dataclass(frozen=True)
+class SourcePin:
+    """One source tree a planner's runtime is built from, pinned to an exact commit.
+
+    A commit rather than a branch or a tag: a dataset has to be traceable to the planner that
+    produced it, and "main" names a different planner every week.
+    """
+
+    name: str
+    url: str
+    commit: str
+    # The branch the commit was taken from ("main", "TANDEM"), when it has one worth naming. Never
+    # what is installed -- the commit is -- so it takes no part in comparing two pins: a runtime whose
+    # record predates it is at the same pin as ever. It is what a person moving the pin moves it along,
+    # what a listing shows beside the commit so nobody has to guess which of a fork's branches it came
+    # from, and where a fetch that cannot ask for a bare commit looks for it.
+    ref: str = field(default="", compare=False)
+
+    def short(self) -> str:
+        return self.commit[:7]
+
+    def label(self) -> str:
+        """The commit as a person reads it: ``6820474 (TANDEM)``, or just ``3a90ff4``."""
+        return f"{self.short()} ({self.ref})" if self.ref else self.short()
+
+    def to_dict(self) -> dict:
+        return {"name": self.name, "url": self.url, "commit": self.commit, "ref": self.ref or None}
+
+
+@dataclass(frozen=True)
+class PlannerInfo:
+    """What a catalog says about a planner before any of it is installed.
+
+    Static and cheap by contract: a listing of every planner reads this for each of them, on a
+    laptop, and must not import a solver or touch the network to do it.
+    """
+
+    # The name a profile's ``planner.backend`` uses. The registry refuses a factory whose info names
+    # a different planner from the one it was registered as, so the two can never disagree.
+    name: str
+    display_name: str = ""
+    # One sentence: what this planner does and what it drives.
+    summary: str = ""
+    homepage: str = ""
+    # What the machine needs before this planner can run, one human-readable line each ("an NVIDIA
+    # GPU with CUDA 12 or newer", "a Franka FR3"). Shown, never checked -- checking is the runtime's
+    # status() and ``tandem doctor``.
+    requires: tuple[str, ...] = ()
+    # The sources an install builds the runtime from. Empty for a planner that is pure Python and
+    # installs with pip like any other package.
+    sources: tuple[SourcePin, ...] = ()
+
+    @property
+    def title(self) -> str:
+        return self.display_name or self.name
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "display_name": self.title,
+            "summary": self.summary,
+            "homepage": self.homepage,
+            "requires": list(self.requires),
+            "sources": [pin.to_dict() for pin in self.sources],
+        }
+
+
+@dataclass(frozen=True)
+class BackendContext:
+    """Everything a session hands a factory to build its backend.
+
+    Deliberately planner-neutral. Nothing here is TipTop's, and a field a backend has no use for is
+    simply ignored by it; what one backend needs that no other does belongs in ``options``, the
+    profile's ``planner.options`` block (the task's), or ``rig_options``, rig.yml's ``planners.<name>``
+    block (this machine's) -- each the backend's own to define and validate.
+    """
+
+    # The profile the session runs under (``tandem.core.profiles.Profile``; typed loosely so this
+    # module keeps importing nothing but the standard library).
+    profile: Any
+    # This session's scratch directory. The backend may write whatever it needs to start here.
+    session_dir: Path
+    # Where finished legs are filed: the profile's trajectories directory.
+    output_dir: Path
+    execute: bool = True
+    record: bool = True
+    # (stream, text) -> None. The session's log, which is what an operator sees.
+    on_log: Callable[[str, str], None] | None = None
+    # The profile's ``planner.options``: per-backend settings, verbatim. A backend must refuse a key
+    # it does not read rather than ignore it -- an option that silently does nothing is a setting
+    # the operator believes is in force and is not.
+    options: Mapping[str, Any] = field(default_factory=dict)
+    # tandem's machine settings (``tandem.core.settings.Settings``), or None for the saved ones.
+    settings: Any = None
+    session_id: str = ""
+    # The task the session starts on. Later tasks reach the backend through ``perceive(task_hint=)``.
+    task: str = ""
+    # The session's append-only events file, for a backend that writes its own events there too.
+    events_file: Path | None = None
+    # Where the caller has already located this planner's runtime, if it has. None means the factory
+    # resolves its own from ``settings``. A backend with no runtime ignores it.
+    runtime_dir: Path | None = None
+    # This machine's rig (``tandem.core.rig.Rig``): the robot's host and type, the cameras, the
+    # calibration file. None only for a context built by hand; a planner that needs it then reads
+    # ``tandem.core.rig.load()``.
+    rig: Any = None
+    # rig.yml's ``planners.<name>`` block: this planner's machine settings, as its
+    # ``validate_rig_options`` left them.
+    rig_options: Mapping[str, Any] = field(default_factory=dict)
+
+    def log(self, text: str, *, stream: str = "tandem") -> None:
+        if self.on_log is not None:
+            self.on_log(stream, text)
+
+
+@dataclass(frozen=True)
+class RuntimeStatus:
+    """Whether a planner's runtime is installed, and what it was built from.
+
+    ``installed`` means ready to run, not merely present: a runtime whose sources are on disk but
+    whose kernels never compiled is not installed, and ``problems`` says why.
+    """
+
+    installed: bool = False
+    # Where the runtime lives, as a string so the status is JSON-safe as it stands.
+    path: str | None = None
+    # The sources the INSTALLED runtime was built from, which is not necessarily what the planner
+    # currently pins (see ``mismatched``). Empty when it does not say.
+    pins: tuple[SourcePin, ...] = ()
+    # For a runtime identified by a version rather than by commits.
+    version: str | None = None
+    # One line of what is and is not there, for a listing.
+    detail: str = ""
+    problems: tuple[str, ...] = ()
+    # Worth knowing and no reason to refuse a session: an optional part this machine cannot have yet (the
+    # ZED Python API without the ZED SDK), a source taken on trust. Each says what to do about it.
+    notes: tuple[str, ...] = ()
+
+    def mismatched(self, wanted: Sequence[SourcePin]) -> tuple[str, ...]:
+        """Names of the pinned sources this runtime was NOT built at.
+
+        A source the installed runtime does not record at all counts as mismatched: a runtime that
+        cannot say what it was built from cannot be said to match anything.
+        """
+        have = {pin.name: pin.commit for pin in self.pins}
+        return tuple(pin.name for pin in wanted if have.get(pin.name) != pin.commit)
+
+    def outdated(self, wanted: Sequence[SourcePin]) -> tuple[str, ...]:
+        """Names of the pinned sources a runtime that was built, whole or in part, has at other commits.
+
+        What a listing reports as ``mismatched``. Empty for a runtime that records no commit at all -- one
+        never built: it is not installed rather than outdated, and listing every source it would be
+        built from as "mismatched" said it had been built from the wrong ones. ``mismatched`` is still
+        what decides whether a runtime is current, and a runtime that cannot say is not.
+        """
+        return self.mismatched(wanted) if self.pins else ()
+
+    def to_dict(self) -> dict:
+        return {
+            "installed": self.installed,
+            "path": self.path,
+            "pins": [pin.to_dict() for pin in self.pins],
+            "version": self.version,
+            "detail": self.detail,
+            "problems": list(self.problems),
+            "notes": list(self.notes),
+        }
+
+
+@runtime_checkable
+class BackendRuntime(Protocol):
+    """The heavy environment a planner runs in, as something that can be inspected and installed.
+
+    A planner that is pure Python has none: its factory's ``runtime()`` returns None, and installing
+    it is ``pip install``.
+    """
+
+    def status(self) -> RuntimeStatus:
+        """What is installed. Cheap -- a few stat calls, never a build, never the network."""
+
+    def install(
+        self,
+        *,
+        on_progress: Callable[[str], None] | None = None,
+        sources_dir: Path | None = None,
+        force: bool = False,
+    ) -> None:
+        """Build the runtime, or repair it. Idempotent: a step already done is skipped.
+
+        ``on_progress`` receives one line at a time, as the build prints them. ``sources_dir``
+        overrides where the sources come from -- a directory of checkouts, for a machine with no
+        network or for a planner under development. ``force`` redoes every step.
+        """
+
+    def uninstall(self) -> None:
+        """Delete the runtime. Refuses, loudly, anything that does not look like one."""
+
+
+@dataclass(frozen=True)
+class OptionsSection:
+    """One titled group of a planner's settings, as `tandem profile show` and the web editor list them."""
+
+    title: str
+    rows: tuple[tuple[str, str], ...] = ()
+    subtitle: str = ""
+
+    def to_dict(self) -> dict:
+        return {"title": self.title, "subtitle": self.subtitle, "rows": [list(row) for row in self.rows]}
+
+
+@dataclass(frozen=True)
+class OptionsView:
+    """How a planner describes a profile's ``planner.options`` to a person. JSON-safe by construction.
+
+    A profile page, `tandem profile show` and a session header show every planner's settings through
+    this, so none of them knows any planner's schema -- a robot's address, a TAMP override -- and a
+    planner written tomorrow is shown the day it is registered.
+    """
+
+    # One line: the setup at a glance, for a profile card or a session header.
+    summary: str = ""
+    sections: tuple[OptionsSection, ...] = ()
+    # What the planner will actually be handed from these options, resolved (a relative path made
+    # absolute): the answer to "did my setting apply?". JSON-safe.
+    receives: Mapping[str, Any] = field(default_factory=dict)
+    # How it is handed over, for the heading above ``receives``.
+    receives_note: str = ""
+    # Problems these settings have that would otherwise surface minutes into a session.
+    warnings: tuple[str, ...] = ()
+
+    @classmethod
+    def generic(cls, options: Mapping[str, Any], descriptions: Mapping[str, str] | None = None) -> OptionsView:
+        """The view of a planner that does not describe its own: its options, one row each, as they are."""
+        rows = tuple((str(key), _shown(value)) for key, value in options.items())
+        unset = [key for key in (descriptions or {}) if key not in options]
+        subtitle = "none set" if not rows else ""
+        if unset:
+            subtitle = (subtitle + "; " if subtitle else "") + "also reads " + ", ".join(unset)
+        return cls(
+            summary=", ".join(f"{key}={_shown(value)}" for key, value in options.items())[:120],
+            sections=(OptionsSection("options", rows, subtitle),),
+            receives=dict(options),
+            receives_note="planner.options, as the profile sets them",
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "summary": self.summary,
+            "sections": [section.to_dict() for section in self.sections],
+            "receives": dict(self.receives),
+            "receives_note": self.receives_note,
+            "warnings": list(self.warnings),
+        }
+
+
+def _shown(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(v) for v in value)
+    if isinstance(value, Mapping):
+        return json.dumps(value, default=str)
+    return str(value)
+
+
+@runtime_checkable
+class BackendFactory(Protocol):
+    """How the registry builds a planner, and what a catalog of planners reads about it.
+
+    Register one under a name with ``tandem.planners.registry.register_backend``, or from a package
+    through the ``tandem.planners`` entry-point group, and a profile can name it.
+
+    Beyond the four members below, a factory MAY offer any of these. Each has a default in
+    ``tandem.planners.registry`` for a factory that does not, and ``tandem.planners.Planner`` supplies
+    every one, so a planner written with the SDK overrides only what it has something to say about:
+
+    - ``validate_options(options) -> dict``: ``planner.options`` checked and normalised, called when
+      a profile naming the planner loads. Default: taken as written.
+    - ``validate_rig_options(options) -> dict``: rig.yml's ``planners.<name>`` checked and normalised,
+      called when the rig is read. Default: taken as written. Its keys are declared in ``RIG_OPTIONS``
+      as the task's are in ``OPTIONS``; a key in the wrong one is refused with where it belongs.
+    - ``describe_options(profile, *, settings=None) -> OptionsView``: those options for a person.
+      Default: ``OptionsView.generic``.
+    - ``doctor_checks(profile, *, settings=None, probe_hardware=True) -> list[tandem.core.probe.Check]``:
+      what `tandem doctor` (and, with ``profile=None``, `tandem init`'s preflight) should check for this
+      planner -- a GPU, a server it calls, its hardware. Default: nothing beyond its runtime, which
+      doctor checks for every planner.
+    - ``runtime_env(*, rig, settings=None) -> Mapping[str, str]``: what a command run in the planner's
+      runtime (`tandem runtime run`, `runtime shell`) needs in its environment to find this machine --
+      a config written from the rig that its own scripts read the robot's address and cameras from.
+      Default: nothing.
+    - ``replay(rollout_dir, *, settings=None) -> None``: open a recorded leg in the planner's own
+      viewer (`tandem traj open`). Default: refused, saying the planner has none.
+    """
+
+    info: PlannerInfo
+
+    def capabilities(self) -> Capabilities:
+        """The declaration, with nothing built and nothing heavy imported."""
+
+    def create(self, ctx: BackendContext) -> TampBackend:
+        """Build the backend a session will drive. Not warmed: the session calls ``warm()`` itself.
+
+        Everything this planner needs set up before it can be warmed happens here -- its runtime
+        located, its config rendered, its own preflight checks run. A problem it can already see is
+        raised here, loudly, before the session owns anything.
+        """
+
+    def runtime(self, settings: Any = None) -> BackendRuntime | None:
+        """This planner's runtime on this machine, or None when it is pure Python and has none."""
+
+
 # Verbs a hosted backend answers, and the only strings that cross the wire. Kept here so the one
-# canonical list lives beside the protocol it mirrors; `tandem/planners/tiptop/sidecar.py` repeats
-# them because it must not import tandem, and a test pins the two together.
+# canonical list lives beside the protocol it mirrors; `tandem/planners/sidecar_kit/tandem_sidecar.py`
+# and `tandem/planners/tiptop/sidecar.py` repeat them because neither may import tandem, and tests pin
+# every copy to this one.
 VERBS: tuple[str, ...] = (
     "capabilities",
     "warm",

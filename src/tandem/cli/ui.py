@@ -10,9 +10,8 @@ import typer
 
 from tandem.cli import theme
 from tandem.core import profiles
-from tandem.core import runtime as runtime_mod
 from tandem.core import settings as settings_mod
-from tandem.core.errors import TandemError
+from tandem.core.errors import TandemError, one_line
 
 
 def ui(
@@ -49,6 +48,15 @@ def serve(
             "There are no profiles yet, so there is nothing to show.",
             hint="Run `tandem init` (or `tandem init --viz-only` on a laptop).",
         )
+    if profile_name and profile_name != cfg.active_profile:
+        # The page works on the active profile -- its switcher, the runtime chip, the collect page's
+        # sessions all read it -- so the profile asked for is made the active one, and said to be. Only
+        # passing it to the page left `tandem collect bread --web` collecting under whichever profile was
+        # active, while saying it was collecting under bread.
+        profiles.load(profile_name, require_installed=False)  # an unknown name: the not-found error, with the known ones
+        cfg.active_profile = profile_name
+        settings_mod.save(cfg)
+        theme.info(f"Active profile is now {profile_name!r}")
 
     port = _free_port(host, port)
     url = f"http://{host if host != '0.0.0.0' else 'localhost'}:{port}"
@@ -57,9 +65,9 @@ def serve(
     active = profile_name or cfg.active_profile
     theme.kv(
         [
-            ("profile", active),
+            ("profile", active or "none active"),
             ("data root", cfg.resolved_data_root()),
-            ("runtime", _runtime_note(cfg)),
+            ("runtime", _runtime_note(cfg, active)),
         ]
     )
     theme.blank()
@@ -72,15 +80,94 @@ def serve(
 
     from tandem.server.app import create_app
 
-    app = create_app(initial_profile=active)
-    uvicorn.run(app, host=host, port=port, log_level="warning", access_log=False)
+    config = uvicorn.Config(
+        create_app(),
+        host=host,
+        port=port,
+        log_level="warning",
+        access_log=False,
+        # An open collect page holds an event stream until its session has ended, and uvicorn waits for
+        # every connection before it lets the app shut down. Without a bound, Ctrl-C sat there saying
+        # nothing -- and the second Ctrl-C people then pressed skipped the app's shutdown altogether.
+        timeout_graceful_shutdown=CONNECTION_GRACE,
+    )
+    server = _server(config)
+    try:
+        server.run()
+    except KeyboardInterrupt:
+        # uvicorn re-raises the Ctrl-C it caught once it has shut down; it has done its job by then.
+        pass
+    if not server.started:
+        raise typer.Exit(code=3)
 
 
-def _runtime_note(cfg) -> str:
-    status = runtime_mod.Runtime(cfg.resolved_runtime_dir()).status()
-    if status.ready:
-        return "ready — collection available"
-    return "not built — visualization only"
+# How long, after Ctrl-C, open connections get to finish before they are cut. The wait that matters
+# comes after it: the app's own shutdown, which ends every session and waits for it (server/app.py).
+CONNECTION_GRACE = 5
+
+
+def _server(config):
+    """uvicorn's server, with the sessions told to stop as soon as it starts to shut down.
+
+    Not only at the app's shutdown, which comes after every connection has closed: a collect page's
+    event stream stays open while its session is on, so the sessions are told to stop, and the streams
+    to close, first. A second Ctrl-C while they park and merge gives up the wait, as it does in
+    `tandem collect`: whatever is still ending is force-stopped.
+    """
+    import asyncio
+    import signal
+
+    import uvicorn
+
+    from tandem.core import session as session_mod
+    from tandem.server import app as app_mod
+
+    class Server(uvicorn.Server):
+        async def shutdown(self, sockets=None) -> None:
+            manager = session_mod.manager()
+            stopping = manager.stop_all()
+            if stopping:
+                theme.busy(
+                    f"Stopping {len(stopping)} session(s): parking the arm, finishing the episode merges",
+                    "Ctrl-C again to quit now, leaving the arm where it is",
+                )
+            app_mod.close_streams(self.config.app)
+            await super().shutdown(sockets)
+            if not manager.shutting_down:
+                # uvicorn skips the app's shutdown -- which ends the sessions -- when a second Ctrl-C
+                # came in while it was still closing connections. Nothing then force-stopped what was
+                # ending: the teleop driver, in a process group of its own, kept the arm and the
+                # cameras, and nothing said a merge was cut off. So it is run here. After that Ctrl-C
+                # (`abandon`, which holds) it does not wait: it force-stops what is still ending, and
+                # says so. Run as the app's own shutdown rather than beside it, which also lets the
+                # app finish instead of being cancelled at exit with a traceback.
+                await self.lifespan.shutdown()
+            if not manager.shutting_down:
+                # An app whose shutdown did not get that far (a lifespan that is off, or failed).
+                app_mod.report_still_ending(await asyncio.to_thread(manager.shutdown))
+
+        def handle_exit(self, sig, frame) -> None:
+            if self.should_exit and sig == signal.SIGINT:
+                session_mod.manager().abandon()
+            super().handle_exit(sig, frame)
+
+    return Server(config)
+
+
+def _runtime_note(cfg, profile_name: str) -> str:
+    """Whether the runtime of the planner this profile uses is there: the difference between a
+    workstation that can collect and a laptop that can only look."""
+    from tandem.cli.runtime import planner_runtime
+
+    try:
+        planner, runtime = planner_runtime(profile_name=profile_name, settings=cfg)
+    except TandemError as exc:
+        return f"unknown — {one_line(exc.message)}"
+    if runtime is None:
+        return f"{planner} is pure Python — collection available"
+    if runtime.status().installed:
+        return f"{planner} ready — collection available"
+    return f"{planner} not built — visualization only"
 
 
 def _free_port(host: str, port: int, tries: int = 20) -> int:
