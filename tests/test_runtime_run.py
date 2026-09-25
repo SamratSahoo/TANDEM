@@ -172,3 +172,17 @@ def test_a_planner_that_returns_what_exec_cannot_take_is_refused(monkeypatch, ma
     with pytest.raises(TandemError, match="not a mapping of strings to strings") as info:
         registry.runtime_env("toy", rig=machine_rig)
     assert "--raw" in info.value.hint
+
+
+def test_with_no_rig_yet_a_command_runs_with_the_planners_own_config_and_says_so(calls, machine_rig):
+    """A config rendered from the rig's defaults names a robot nobody set up and no cameras."""
+    rig_mod.paths.rig_file().unlink()
+    machine_rig.calibration_file().unlink()
+    result = _run("run", "cutamp-demo", "--motion_plan")
+    assert result.exit_code == 0, result.output
+    assert calls[0][0] == ["pixi", "run", "cutamp-demo", "--motion_plan"]
+    assert not set(TIPTOP_VARS) & set(calls[0][1]), "as --raw"
+    said = " ".join(result.output.split())
+    assert "no rig on this machine yet" in said and "`tandem init`" in said
+    assert "172.16.0.2" not in said, "no robot is named that nobody set up"
+    assert not machine_rig.calibration_file().exists(), "nothing is created on the way"

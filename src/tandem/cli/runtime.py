@@ -423,6 +423,11 @@ def command_env(planner: str, *, raw: bool) -> dict[str, str]:
 
     Said on stderr, in one line, so a person knows which robot the command will reach, and the command's
     own output stays clean for a pipe.
+
+    A machine with no rig.yml yet runs it as ``raw`` does, and says so: a config rendered from the rig's
+    defaults names a robot nobody set up and no cameras, so a calibration script would fail on a missing
+    camera, having created an empty calibration file on the way. A command that needs no robot (a demo)
+    runs as it would have.
     """
     env = dict(os.environ)
     if raw:
@@ -430,6 +435,14 @@ def command_env(planner: str, *, raw: bool) -> dict[str, str]:
     from tandem.core import rig as rig_mod
     from tandem.planners import registry
 
+    if not rig_mod.exists():
+        theme.err_console().print(
+            "[faint]· no rig on this machine yet, so this runs with the planner's own config (as --raw); "
+            "`tandem init` sets the rig up, or `tandem rig set robot.host HOST` and `tandem rig set "
+            "cameras.hand.serial SERIAL`[/faint]",
+            highlight=False,
+        )
+        return env
     rig = rig_mod.load()
     added = registry.runtime_env(planner, rig=rig, settings=settings_mod.load())
     if added:

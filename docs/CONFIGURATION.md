@@ -168,7 +168,7 @@ A configured serial with no entry stops the session before warm-up; `tandem doct
   and `tandem runtime shell` give them a `tiptop.yml` written from the rig (`$TIPTOP_CONFIG`: the robot's
   address and type, the cameras, TiPToP's machine settings) and the rig's calibration file
   (`$TIPTOP_CALIBRATION`), so they reach your NUC and write your extrinsics. `--raw` runs them on tiptop's stock
-  config instead.
+  config instead, as they run on a machine with no rig.yml yet (and say so).
 - **Teleop** reaches the NUC through DROID's own `droid/misc/parameters.py` (`nuc_ip`): keep it the same as
   `robot.host`.
 - **Gripper mask** (`perception: hand` only). The runtime's `tiptop/tiptop/config/assets/gripper_mask.png`
