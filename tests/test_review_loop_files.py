@@ -431,5 +431,4 @@ def test_the_teleop_driver_points_at_tandems_own_pieces():
     package = Path(tandem.__file__).parent
     for named in ("teleop/child.py", "executors/teleop.py", "export/build.py", "teleop/raw_episode.py"):
         assert named in source and (package / named).is_file(), named
-    assert "docs/ADDING_A_HUMAN_EXECUTOR.md" in source
-    assert (package.parent.parent / "docs" / "ADDING_A_HUMAN_EXECUTOR.md").is_file()
+    assert "https://prpl-group.com/tandem/docs/adding-a-human-executor/#the-teleop-executor" in source

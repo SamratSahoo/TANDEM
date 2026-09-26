@@ -22,7 +22,7 @@ Decompose a task from a photo (``tandem.api``; what `tandem plan` runs)::
 - ``PlanningConfig``: the phase-planning settings, a profile's ``hitl:`` block as a plain dataclass.
 
 Add a planner or a human executor. The full kits are ``tandem.planners`` and ``tandem.executors``;
-``docs/ADDING_A_PLANNER.md`` and ``docs/ADDING_A_HUMAN_EXECUTOR.md`` walk through each::
+https://prpl-group.com/tandem/docs/adding-a-planner/ and https://prpl-group.com/tandem/docs/adding-a-human-executor/ walk through each::
 
     class MyPlanner(tandem.Planner):
         info = tandem.PlannerInfo(name="mine", display_name="Mine")

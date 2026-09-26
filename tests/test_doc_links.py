@@ -1,8 +1,8 @@
-"""Every link between the docs lands somewhere: the file exists, and so does the heading it names.
+"""Every relative link in the README lands somewhere: the file exists, and so does the heading it names.
 
-The docs link each other by heading (``CONFIGURATION.md#the-rig``), and a heading renamed or removed -- as
-profiles, presets and the rig were rewritten -- leaves links that open the right page at the top, which
-nobody notices. Anchors are GitHub's: the heading lowercased, punctuation dropped, spaces as hyphens.
+The documentation itself lives on the project site (https://prpl-group.com/tandem/docs/), built from its
+own sources; the README only links to it. Anchors are GitHub's: the heading lowercased, punctuation
+dropped, spaces as hyphens.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
-DOCS = [REPO / "README.md", *sorted((REPO / "docs").glob("*.md"))]
+DOCS = [REPO / "README.md"]
 LINK = re.compile(r"\]\(([^)\s]*)\)")
 FENCE = re.compile(r"^```.*?^```", re.M | re.S)
 
@@ -47,6 +47,6 @@ def test_every_link_lands_on_a_file_and_a_heading_that_exist(doc):
 
 
 def test_the_check_knows_a_heading_from_a_missing_one():
-    anchors = _anchors(REPO / "docs" / "CONFIGURATION.md")
-    assert {"the-rig", "the-papers-five", "phase-planning-hitl", "tandem-settings-and-credentials"} <= anchors
-    assert "presets" not in anchors and "cameras-and-calibration" not in anchors
+    anchors = _anchors(REPO / "README.md")
+    assert {"tandem", "citation", "license-and-acknowledgements"} <= anchors
+    assert "setup" not in anchors and "cameras-and-calibration" not in anchors

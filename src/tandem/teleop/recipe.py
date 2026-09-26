@@ -54,7 +54,7 @@ DROID = Source(
 # DROID vendors oculus_reader as a git submodule, which an exported tree does not carry, so it is a source
 # of its own, at the commit that submodule names. Its APK is a Git LFS file and arrives as a pointer: a
 # headset that already has the teleop app (any headset DROID's VR teleop has run on) never needs it, and
-# a new one gets the app once from a checkout with git-lfs (docs/ADDING_A_HUMAN_EXECUTOR.md).
+# a new one gets the app once (https://prpl-group.com/tandem/docs/teleop/).
 OCULUS_READER = Source(
     SourcePin(
         "oculus_reader",

@@ -832,7 +832,7 @@ class Planner(abc.ABC):
           by them), ``fps``, and ``cameras``: a dataset key -> clip file name map;
         - ``robot_state.npz`` with every array in ``tandem.core.merge.STATE_KEYS``, one row per frame,
           plus optionally ``OPTIONAL_STATE_KEYS``, and nothing else: joint arrays ``[F,7]``, gripper
-          arrays ``[F]``, ``frame_time`` float64 (docs/ADDING_A_PLANNER.md has the table);
+          arrays ``[F]``, ``frame_time`` float64 (the table: https://prpl-group.com/tandem/docs/adding-a-planner/#the-recording-contract);
         - the camera clips ``cameras`` names (or at least one of ``trajectories.CAMERA_FILES``). Every
           clip is named from ``trajectories.CAMERA_FILES``: those are the names the merge joins (with
           a person's legs, which always use them), the viewer lists and the export decodes.

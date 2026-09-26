@@ -27,7 +27,7 @@ Protocol (stdin lines written by ``tandem/teleop/child.py``, launched once per l
 
 With --trajectory-id (a tamp->teleop hand-off), episodes are legs of that tamp trajectory: they are
 stamped with the id, left unlabeled in eval/, and never prompt for y/n. See
-docs/ADDING_A_HUMAN_EXECUTOR.md (the TeleopExecutor) and ``teleop/child.py`` for the hand-off.
+https://prpl-group.com/tandem/docs/adding-a-human-executor/#the-teleop-executor and ``teleop/child.py`` for the hand-off.
 With --phase-index / --n-phases / --phase-description (a human phase of a phase-planned task), each
 leg's _meta.json also says which phase it records, under the keys the TAMP legs use.
 

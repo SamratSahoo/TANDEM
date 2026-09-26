@@ -45,7 +45,7 @@ def recipe_of(planner: str):
     if not isinstance(runtime, RecipeRuntime):
         raise TandemError(
             f"The {planner} planner's runtime is not built from a recipe, so tandem cannot say what to bundle.",
-            hint="A planner declares its sources with a RuntimeRecipe (docs/ADDING_A_PLANNER.md).",
+            hint="A planner declares its sources with a RuntimeRecipe (https://prpl-group.com/tandem/docs/adding-a-planner/#a-runtime-recipe).",
         )
     return runtime.recipe
 
