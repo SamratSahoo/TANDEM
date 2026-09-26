@@ -101,7 +101,7 @@ While recording, a human phase must run through its executor. Do one of these:
 tandem executors install teleop
 ```
 
-Teleop's driver runs in an environment tandem builds. This builds it (a few minutes) and turns teleop on. If it
+Teleop's driver runs in an environment TANDEM builds. This builds it (a few minutes) and turns teleop on. If it
 says ZED cameras won't open, install the [ZED SDK](https://www.stereolabs.com/developers/release) and run it
 again. It adds only what is missing.
 
@@ -155,7 +155,7 @@ tandem planners install tiptop
 ```
 
 The paper's profiles name the DATAFARM checkpoint `vae/checkpoints/vae_full_v2.pt`, which the runtime install
-places. tandem looks for it beside the profile's file, then in the runtime. `tandem doctor` warns until the
+places. TANDEM looks for it beside the profile's file, then in the runtime. `tandem doctor` warns until the
 install has run.
 
 ## A TAMP setting seems to do nothing
@@ -165,7 +165,7 @@ tandem profile show <name> --planner   # exactly what the planner receives
 ```
 
 A key missing from that output never applied. `tandem doctor`'s `tamp settings` row flags a key that needs
-another, such as a `placement_*` key without `placement_support: true`. It isn't a typo; tandem refuses to load a
+another, such as a `placement_*` key without `placement_support: true`. It isn't a typo; TANDEM refuses to load a
 profile with a misspelled key and suggests the closest one ([details](CONFIGURATION.md#planner-settings)).
 
 ## The videos won't scrub in the browser
@@ -173,7 +173,7 @@ profile with a misspelled key and suggests the closest one ([details](CONFIGURAT
 A proxy in front of `tandem ui` is probably dropping the `Range` header that `/api/media/` needs. Configure it
 to pass `Range` through ([details](USAGE.md#http-api)).
 
-## My profiles are gone after updating tandem
+## My profiles are gone after updating TANDEM
 
 ```bash
 tandem profile migrate   # or tandem init
@@ -195,5 +195,5 @@ still browse, export and edit it.
 
 ## A sidecar dies with "No module named 'tandem_sidecar'"
 
-Your environment's activation (for example [pixi](https://pixi.sh)'s `[activation.env]`) overwrote `PYTHONPATH`, dropping tandem's
+Your environment's activation (for example [pixi](https://pixi.sh)'s `[activation.env]`) overwrote `PYTHONPATH`, dropping TANDEM's
 `tandem_sidecar` kit. Make it append to `PYTHONPATH` instead ([details](ADDING_A_PLANNER.md#sidecars)).

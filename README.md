@@ -16,7 +16,7 @@ You need:
 - a [Franka FR3](https://franka.de/products/franka-research-3) or Panda with a [Robotiq 2F-85](https://robotiq.com/products/adaptive-grippers) gripper, and its [polymetis](https://facebookresearch.github.io/fairo/polymetis/) NUC;
 - a wrist ZED camera, 1 third-person ZED camera and the [ZED SDK](https://www.stereolabs.com/developers/release);
 - [pipx](https://pipx.pypa.io) or [uv](https://docs.astral.sh/uv/), and a [Gemini API key](https://aistudio.google.com/apikey);
-- for human phases, a VR headset ([Meta Quest](https://www.meta.com/quest/)). tandem builds the teleop driver's environment itself (step 6);
+- for human phases, a VR headset ([Meta Quest](https://www.meta.com/quest/)). TANDEM builds the teleop driver's environment itself (step 6);
   the NUC runs [DROID's server](https://github.com/SamratSahoo/droid) (step 3).
 
 Every command below runs on the workstation unless it says otherwise.
@@ -118,7 +118,7 @@ tandem servers status   # installed? answering?
 tandem servers start    # start them ahead of time; they keep running until `tandem servers stop`
 ```
 
-If the perception servers are on another machine, point tandem at it:
+If the perception servers are on another machine, point TANDEM at it:
 
 ```bash
 tandem rig set planners.tiptop.perception.m2t2.url http://HOST:8123
@@ -176,7 +176,7 @@ tandem executors list             # teleop should say `ready`
 `tandem init` offers to do this for you. The install fetches the workstation side of
 [DROID](https://github.com/SamratSahoo/droid/tree/TANDEM) and builds a small environment for it, with the ZED
 Python API when the ZED SDK is installed. Human phases then drive the arm through the DROID server from step 3.
-tandem passes the driver your NUC address and camera serials, so you don't need to edit anything in DROID.
+TANDEM passes the driver your NUC address and camera serials, so you don't need to edit anything in DROID.
 
 Teleop uses a Meta Quest headset, driven with the right controller by default
 (`tandem config set teleop.controller left` switches). The workstation also needs [`adb`](https://developer.android.com/tools/adb)
@@ -254,7 +254,7 @@ session warms the planner once, then waits for you. The footer shows the keys ea
 > **`p` does not stop the arm.** The current motion segment still finishes. Only the E-stop stops it at once.
 
 When you give the arm back after a `t` hand-off, the planner replans from where you left it. At a human phase,
-the screen tells you what to do. When you give the arm back, tandem takes a new camera image to check the step
+the screen tells you what to do. When you give the arm back, TANDEM takes a new camera image to check the step
 is done. If it isn't, you get one more try; a trial that still fails is saved as excluded and never exported.
 
 A robot phase the planner can't plan ends the trial. More in [USAGE.md](docs/USAGE.md#collecting).

@@ -1,14 +1,14 @@
 # Adding a planner
 
-A planner is a Python package that tells tandem three things: what is in the scene (`perceive`), how to
-reach one goal (`plan`), and how to run that plan on the robot while recording it (`execute`). tandem does
+A planner is a Python package that tells TANDEM three things: what is in the scene (`perceive`), how to
+reach one goal (`plan`), and how to run that plan on the robot while recording it (`execute`). TANDEM does
 everything else: splitting the task into phases, teleop, checking a person's work and merging the legs.
 
 Working examples: `src/tandem/planners/tiptop/` (the built-in planner) and `tests/toy_planner.py`.
 
 ## Quick start
 
-Generate a package, install it where tandem runs, and run its tests:
+Generate a package, install it where TANDEM runs, and run its tests:
 
 ```bash
 tandem planners new shelfbot          # creates ./tandem-shelfbot (--dir to change)
@@ -35,7 +35,7 @@ Use `tandem planners new NAME --sidecar` if the planner needs its own environmen
 SDK). See [Sidecars](#sidecars).
 
 `tandem planners list` should now show `shelfbot` as `no runtime needed`. `tandem planners info shelfbot`
-shows what tandem knows about it. What `planners use` changes in a profile is in
+shows what TANDEM knows about it. What `planners use` changes in a profile is in
 [Planner settings](CONFIGURATION.md#planner-settings).
 
 ### Names
@@ -151,11 +151,11 @@ Notes on the arguments:
 | `object_labels` | Every object seen, except the table. |
 | `table_label` | The support surface. Defaults to `table`. |
 | `surface_labels` | The objects that are surfaces. |
-| `scene_id` | An opaque id that tandem passes back to `plan`. |
-| `rgb_path` | An image of the scene. tandem splits the task and checks robot-leg preconditions from it. Without it, proposing a plan fails and the trial ends at `invention`. |
+| `scene_id` | An opaque id that TANDEM passes back to `plan`. |
+| `rgb_path` | An image of the scene. TANDEM splits the task and checks robot-leg preconditions from it. Without it, proposing a plan fails and the trial ends at `invention`. |
 | `detected_goal` | The planner's own reading of the instruction as `GoalAtom`s. It is the leg's goal when phase planning is off. |
 
-Labels may change between perception passes. tandem rebinds its plan to the new labels.
+Labels may change between perception passes. TANDEM rebinds its plan to the new labels.
 
 ### `PlanResult`
 
@@ -165,7 +165,7 @@ Every field must be JSON-safe.
 |---|---|
 | `ok`, `failure_reason` | Whether it planned, and why not. |
 | `planning_seconds` | How long planning took. |
-| `plan_handle` | An opaque id that tandem passes back to `execute`. |
+| `plan_handle` | An opaque id that TANDEM passes back to `execute`. |
 | `task_plan` | The operators with object arguments, e.g. `("Pick(bread)", "Place(bread, plate)")`. It goes into `hitl.json` and is never parsed. |
 | `artifacts` | Role → path of each file written. |
 | `skeleton`, `skeleton_reused` | Used only with `supports_skeleton_reuse`. |
@@ -187,7 +187,7 @@ CAPABILITIES = Capabilities(
 )
 ```
 
-When a proposed phase breaks one of these rules, tandem sends it back to the model to repair ("repaired"
+When a proposed phase breaks one of these rules, TANDEM sends it back to the model to repair ("repaired"
 below).
 
 | field | meaning |
@@ -208,11 +208,11 @@ below).
 | `one_pick_per_object` | A plan picks each object at most once. Defaults to `True`, the safe choice. |
 | `initial_state_is_clean` | Every goal starts from the same clean state, which allows conjoining. Defaults to `False`. Set it only if the solver guarantees it. |
 | `supports_movable_restriction` | `plan(movables=)` is honoured: only those objects are picked and the rest are obstacles. A goal that moves another object returns `ok=False`. Needs `moved_arguments`. |
-| `supports_return_home` | `plan(return_home=False)` is honoured: the arm ends where the last operation leaves it. tandem uses this on every leg but the task's last. |
+| `supports_return_home` | `plan(return_home=False)` is honoured: the arm ends where the last operation leaves it. TANDEM uses this on every leg but the task's last. |
 | `supports_cooperative_stop` | `execute` polls `should_stop` between steps. Without it, a preempt aborts the trial once the leg ends. |
 | `supports_skeleton_reuse` | `plan` can reuse a previous `PlanResult.skeleton`. |
 
-tandem passes `movables`, `return_home` and `should_stop` only when the matching capability is declared.
+TANDEM passes `movables`, `return_home` and `should_stop` only when the matching capability is declared.
 So `plan` may leave `movables` or `return_home` out of its signature if it doesn't declare them.
 
 **Conjoining** (`hitl.conjoin_robot_phases`) plans consecutive robot phases as one goal from one
@@ -265,10 +265,10 @@ Any `tandem.planners.base.BackendFactory` also works in place of a `Planner` sub
 ## Sidecars
 
 Use a sidecar when the planner needs torch, CUDA kernels, a camera SDK or a robot client. The planner then
-runs as a script in its own interpreter, and tandem talks to it over JSON lines. `tandem planners new NAME
+runs as a script in its own interpreter, and TANDEM talks to it over JSON lines. `tandem planners new NAME
 --sidecar` generates both halves.
 
-The tandem half declares the planner and says which script to launch:
+The TANDEM half declares the planner and says which script to launch:
 
 ```python
 # tandem_armsim/planner.py -- runs in tandem's process; keep it light
@@ -325,31 +325,31 @@ if __name__ == "__main__":
 
 Rules for the script:
 
-- **Don't print to stdout.** tandem uses stdout to talk to the sidecar. Importing `tandem_sidecar` redirects
+- **Don't print to stdout.** TANDEM uses stdout to talk to the sidecar. Importing `tandem_sidecar` redirects
   stdout to stderr, which goes to the session log, so import it first and put `# isort: split` after it.
 - **Import heavy libraries inside `warm()`.** Then a library that fails to import shows up as a failed
   warm-up with its error, instead of a sidecar that never starts. The conformance kit checks the import order.
-- **Import only `tandem_sidecar` from tandem.** It is one standard-library file (Python 3.8+), and tandem puts
+- **Import only `tandem_sidecar` from TANDEM.** It is one standard-library file (Python 3.8+), and TANDEM puts
   it on the script's `PYTHONPATH`.
 - **Append to `PYTHONPATH`; don't replace it.** If your [pixi](https://pixi.sh) environment sets `PYTHONPATH` (for example in
   `[activation.env]`), the sidecar dies with `No module named 'tandem_sidecar'`. To run a sidecar by hand,
-  put tandem's `planners/sidecar_kit` directory on `PYTHONPATH` yourself.
+  put TANDEM's `planners/sidecar_kit` directory on `PYTHONPATH` yourself.
 
 Each method takes keyword arguments and returns a JSON-safe dict. `capture_frame` returns `{"path": ...}`.
 A verb with no method gets `Planner`'s default. A sidecar missing `perceive`, `plan` or `execute` is refused
-at `warm`. If a method raises, tandem reports `"<verb> failed -- <Type>: <message>"` and puts the traceback
+at `warm`. If a method raises, TANDEM reports `"<verb> failed -- <Type>: <message>"` and puts the traceback
 in the session log. The wire protocol is documented in the docstring of
 `src/tandem/planners/sidecar_kit/tandem_sidecar.py`.
 
-### What tandem does with a sidecar
+### What TANDEM does with a sidecar
 
 | behaviour | detail |
 |---|---|
-| Launch | Runs the runtime's `python` with `pixi run` (or tandem's interpreter without a runtime), from the runtime's working directory, in its own process group. |
+| Launch | Runs the runtime's `python` with `pixi run` (or TANDEM's interpreter without a runtime), from the runtime's working directory, in its own process group. |
 | Optional arguments | `movables`, `return_home` and `reuse_skeleton` are sent only when declared. Passing an undeclared one is an error. |
 | Output | Logs and stderr go to the session log. Events go to the events file (through `on_event`). |
-| Crash or timeout | tandem sends SIGTERM, then SIGKILL, to the process group. The trial ends at that verb's stage, and the next `warm()` restarts the sidecar. |
-| Cooperative stop | If declared, tandem polls `should_stop` and signals the sidecar through the file named in `TANDEM_SIDECAR_STOP_FILE`. |
+| Crash or timeout | TANDEM sends SIGTERM, then SIGKILL, to the process group. The trial ends at that verb's stage, and the next `warm()` restarts the sidecar. |
+| Cooperative stop | If declared, TANDEM polls `should_stop` and signals the sidecar through the file named in `TANDEM_SIDECAR_STOP_FILE`. |
 | `close` | Asks the sidecar to quit, then ends its process group, helpers included. |
 
 ### Default timeouts
@@ -377,10 +377,10 @@ in the session log. The wire protocol is documented in the docstring of
 
 | function | what it does |
 |---|---|
-| `serve(handlers, verbs=None, on_exit=None)` | Answers requests until tandem says quit or closes stdin, then calls `on_exit` or the `close` handler. `handlers` is an object with one method per verb, or a verb → callable mapping. |
+| `serve(handlers, verbs=None, on_exit=None)` | Answers requests until TANDEM says quit or closes stdin, then calls `on_exit` or the `close` handler. `handlers` is an object with one method per verb, or a verb → callable mapping. |
 | `log(message, level="info")` | Writes to the session log. Safe from any thread. |
 | `event(name, **fields)` | Sends an event. The fields can't be named `id`, `log` or `event`. |
-| `should_stop()` | True once tandem asks for a cooperative stop. |
+| `should_stop()` | True once TANDEM asks for a cooperative stop. |
 
 ## A runtime recipe
 
@@ -480,14 +480,14 @@ tandem planners use myplanner --option scene_file=kitchen.yml   # a task setting
 tandem rig set planners.myplanner.server_url http://HOST:9000 # a machine setting
 ```
 
-tandem calls `validate_options(options)` when a profile loads, and `validate_rig_options(options)` when the
+TANDEM calls `validate_options(options)` when a profile loads, and `validate_rig_options(options)` when the
 rig is read. The defaults refuse any key that isn't declared, suggest the nearest one, and say which file a
 misplaced key belongs in. If you override either one, it must:
 
 - Accept its own output, because the result is validated again on every read.
 - Return plain data: string-keyed mappings, lists, strings, numbers, booleans and `None`. Use
   `model_dump(mode="json")`, never `Path`, `Enum` or numpy values.
-- Raise `TandemError` or `ValueError` (pydantic's `ValidationError` counts). tandem reports it under
+- Raise `TandemError` or `ValueError` (pydantic's `ValidationError` counts). TANDEM reports it under
   `planner.options.` or `planners.<name>.`.
 
 To make a setting required, refuse `{}` with a `TandemError` naming it. Put a machine setting in
@@ -510,7 +510,7 @@ exactly what the planner gets.
 - With `profile=None` (the preflight of `tandem init`), check only the machine.
 - With `probe_hardware=False` (`--no-hardware`), touch no network or bus.
 - A FAIL stops a session. It also stops `tandem init` before it builds the runtime (interactively, it asks).
-- tandem already reports the runtime, so don't repeat it.
+- TANDEM already reports the runtime, so don't repeat it.
 
 ## Registering it
 
@@ -524,7 +524,7 @@ arm = "tandem_arm.planner:ArmPlanner"     # a Planner subclass, or any BackendFa
 Then select it with `tandem planners use arm`, or `planner: {backend: arm}` in a profile.
 `tandem planners default arm` makes it the planner new profiles get ([Commands](USAGE.md#commands)).
 
-tandem looks up a name in this order, and the first match wins:
+TANDEM looks up a name in this order, and the first match wins:
 
 1. `tandem.register_backend(name, factory)` (alias `register_planner`), called at runtime. `factory` may be
    a lazily imported `"module:attribute"` string. A taken name is an error unless you pass `replace=True`.
@@ -543,7 +543,7 @@ When something goes wrong:
 
 ## The recording contract
 
-`execute` records one leg of trial `leg.trajectory_id`. tandem's merge orders a trial's legs by their
+`execute` records one leg of trial `leg.trajectory_id`. TANDEM's merge orders a trial's legs by their
 recording windows and joins them into one episode. When `leg.record` is set, `save_dir` must hold three
 things: `_meta.json`, `robot_state.npz` and the camera clips.
 

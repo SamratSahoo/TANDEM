@@ -1,6 +1,6 @@
 # Data on disk
 
-This page describes what a trial leaves on disk, and where tandem writes its logs. Paths are the Linux defaults
+This page describes what a trial leaves on disk, and where TANDEM writes its logs. Paths are the Linux defaults
 ([moving them](CONFIGURATION.md#tandem-settings-and-credentials)). For the terms used here, see
 [README.md](README.md#terms).
 
@@ -164,7 +164,7 @@ A trimmed example, for a trial where the robot moves the bread and a person clos
 | `phase_index` | How far the trial got. It equals the phase count if the plan finished. |
 
 `provenance` has `phases_and_their_order`, `phase_sub_goals`, `invented_predicates` and `human_instructions` (the
-model), `robot_phases` (the planner), `who_does_what` (tandem), and `human_steps` (the intended executor; each
+model), `robot_phases` (the planner), `who_does_what` (TANDEM), and `human_steps` (the intended executor; each
 phase's `carried_out` says who actually did it). `human_operators` and `robot_operators` are `{by, signatures}`,
 with signatures written `Name(param: type)`.
 
@@ -228,7 +228,7 @@ This directory holds every model query of the trial. It is written when phase pl
 filed. Each query leaves:
 
 - `NNN_<label>_input.png`: the image sent.
-- `NNN_<label>_output.png`: that image above the answer. It is marked REJECTED if tandem rejected the answer, or
+- `NNN_<label>_output.png`: that image above the answer. It is marked REJECTED if TANDEM rejected the answer, or
   CACHED if it was replayed from `hitl.cache_path`.
 - An `index.jsonl` line with `seq`, `label`, `attempt`, `model`, `input_image`, `output_image`, `rejected` (why, or
   `null`), `cached`, `prompt` and `response`.
@@ -307,7 +307,7 @@ A session's live state. The web UI gets it from `GET /api/sessions/{id}`, and `t
 | `…/<id>/vlm/<trajectory id>/` | Each trial's [model queries](#vlm). This is the only copy if the trial recorded nothing. |
 | `…/<id>/perception/<leg dir>/` | Perception passes that recorded nothing, moved out of `eval/`. TiPToP's `metadata.json` there has the planning result and failure reason. |
 | `…/<id>/teleop/leg-*/teleop-events.jsonl` | Teleop driver events, one directory per hand-off. |
-| `~/.local/state/tandem/logs/server-<name>.log` | A perception server tandem started (`m2t2`, `foundation_stereo`), appended per start. Its pid is in `~/.local/state/tandem/servers/<name>.pid` while it runs. |
+| `~/.local/state/tandem/logs/server-<name>.log` | A perception server TANDEM started (`m2t2`, `foundation_stereo`), appended per start. Its pid is in `~/.local/state/tandem/servers/<name>.pid` while it runs. |
 | `~/.local/state/tandem/logs/export.log` | `tandem export lerobot`'s log, appended on each run. |
 | `~/.local/state/tandem/logs/runtime-build-<YYYYMMDD-HHMMSS>.log` | One per runtime build (`tandem planners install`, `tandem runtime build`, `tandem init`). |
 | `~/tandem-data/exports/<owner>/<name>/` | Exported datasets, or `--out DIR` ([exporting](USAGE.md#exporting)). |

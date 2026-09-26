@@ -1,4 +1,4 @@
-# Using tandem
+# Using TANDEM
 
 ## A typical session
 
@@ -40,7 +40,7 @@ keys work at each step.
 **Preempt** (`p`) files the attempt's legs as aborted. The session stays warm for the next trial.
 
 **Hand-off** (`t` outside a human phase) gives you the arm through teleop at the next plan-step boundary. When
-you press `r`, tandem perceives again and replans the phase from where you left the arm, without homing. The
+you press `r`, TANDEM perceives again and replans the phase from where you left the arm, without homing. The
 legs merge into one episode.
 
 **Human phase.** The screen says what to do and what a fresh camera image will then check.
@@ -48,7 +48,7 @@ legs merge into one episode.
 - If the check fails, the screen lists what is missing and you get `hitl.verify_retries` more tries.
 - `d` is refused while recording, unless
   [`hitl.allow_unrecorded_human_phase`](CONFIGURATION.md#phase-planning-hitl) is true.
-- If you don't return control within an hour, tandem ends the leg and takes the arm back.
+- If you don't return control within an hour, TANDEM ends the leg and takes the arm back.
 
 **Label.** You are asked for one only if the plan ran to the end, or if a check failed under
 `hitl.on_verification_failure: label`. [Settled](README.md#terms) trials are filed without a label, with the
@@ -67,7 +67,7 @@ tandem plan "place the bread inside the box" --image workspace.png -o bread -o b
 ```
 
 This previews a task's phases before you collect. It prints who does each phase, each phase's goal or magic
-operator, and the invented predicates. It needs only tandem (Python 3.10+) and a
+operator, and the invented predicates. It needs only TANDEM (Python 3.10+) and a
 [Gemini key](CONFIGURATION.md#tandem-settings-and-credentials): no runtime, GPU or robot. Answers vary between
 runs.
 
@@ -127,7 +127,7 @@ tandem traj relabel <id> failure        # move it to success, failure or eval
 | `traj rm <id>` | Delete it. `-y` skips the confirmation. |
 | `traj path <id>` | Print its directory. |
 
-**Relabeling a settled trial.** `relabel ... success` refuses a trial tandem settled. `--force` overrules it
+**Relabeling a settled trial.** `relabel ... success` refuses a trial TANDEM settled. `--force` overrules it
 (the web UI asks you to confirm), and `hitl.json` records it as `overruled`. This is the only way to export an
 excluded trial.
 
@@ -164,9 +164,9 @@ What goes into each episode:
 | `--repo OWNER/NAME` | The dataset. The default is the profile's `export.hf_repo`. `hf_org` fills in a missing owner. |
 | `--out DIR` | Write to `DIR/<owner>/<name>` instead. |
 | `-n`, `--max-episodes N` | Export only the first N. |
-| `--push` | Upload after building. Needs a Hugging Face token ([where tandem looks](CONFIGURATION.md#tandem-settings-and-credentials)). |
+| `--push` | Upload after building. Needs a Hugging Face token ([where TANDEM looks](CONFIGURATION.md#tandem-settings-and-credentials)). |
 | `--private`, `--public` | Visibility when pushing. The default is the profile's `export.private`. |
-| `--force` | Replace whatever is at the destination. Without it, a rebuild replaces only a dataset tandem built, and only once the new one is complete. |
+| `--force` | Replace whatever is at the destination. Without it, a rebuild replaces only a dataset TANDEM built, and only once the new one is complete. |
 
 ## The web UI
 
@@ -281,7 +281,7 @@ it isn't ready, and `●` marks the profile's choice.
 ### Settings and runtime
 
 `tandem config list|get|set|edit|path|set-gemini-key|set-hf-token` manages
-[tandem's settings](CONFIGURATION.md#tandem-settings-and-credentials). `set KEY VALUE` takes one dotted key,
+[TANDEM's settings](CONFIGURATION.md#tandem-settings-and-credentials). `set KEY VALUE` takes one dotted key,
 such as `ui.port`. The `set-*` commands store a credential typed at a prompt, or read it with `--stdin`.
 `set-gemini-key --key KEY` also works, but leaves the key in your shell history.
 
@@ -294,7 +294,7 @@ tandem runtime run viz-calibration --camera external   # a planner script, run w
 
 - `run` and `shell` run the planner's own scripts with your [rig](CONFIGURATION.md#the-rig) settings. `--raw`
   uses the planner's stock config instead.
-- tandem's options (`--planner`, `-p`, `--raw`) go before the script's name, and the script's own after it.
+- TANDEM's options (`--planner`, `-p`, `--raw`) go before the script's name, and the script's own after it.
   `--` still works.
 - `build` builds or repairs the runtime (`--force` refetches, plus `--env-only` and `--sources DIR`).
   `python` prints the interpreter, and `clean` deletes the runtime (`-y` skips the confirmation).
@@ -308,9 +308,9 @@ them, and `tandem collect` starts any that are down and stops the ones it starte
 | command | what it does |
 |---|---|
 | `servers install` | Build their runtimes. `--force` (refetch, rebuild), `--sources DIR`, `-y/--yes`. |
-| `servers status` | Whether each is installed and answering, and whether tandem started it. `--json`. |
+| `servers status` | Whether each is installed and answering, and whether TANDEM started it. `--json`. |
 | `servers start [NAME]` | Start those that are down, wait for each to load, and leave them running. |
-| `servers stop [NAME]` | Stop the ones tandem started, such as after a crashed session. |
+| `servers stop [NAME]` | Stop the ones TANDEM started, such as after a crashed session. |
 
-`NAME` is `m2t2` or `foundation_stereo`. tandem never starts a server whose URL points at another machine.
+`NAME` is `m2t2` or `foundation_stereo`. TANDEM never starts a server whose URL points at another machine.
 Each server's log is `server-<name>.log` ([logs](DATA.md#logs-and-session-files)).

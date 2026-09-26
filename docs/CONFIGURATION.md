@@ -1,6 +1,6 @@
 # Configuration
 
-This page lists every setting tandem reads. For setup, see the [README](../README.md#setup); for commands, [USAGE.md](USAGE.md).
+This page lists every setting TANDEM reads. For setup, see the [README](../README.md#setup); for commands, [USAGE.md](USAGE.md).
 
 ## Profiles
 
@@ -101,7 +101,7 @@ added to the rig's `calibration.json` only for cameras without an entry.
 - Old directories aren't deleted. Each is archived in `profiles/.migrated/<name>/` with a `migration.json`.
 - If the rig can't be set up from them, no profile is moved. A profile that fails to move is left as it was, and
   running the command again finishes a partial move.
-- `tandem rig set` and `rig edit` wait until old profiles are moved. Older tandem can't read version 3.
+- `tandem rig set` and `rig edit` wait until old profiles are moved. Older TANDEM can't read version 3.
 - Version-1 profiles keep `hitl.on_robot_phase_failure: teleop`, the old default. Set `abort` unless you
   chose teleop.
 
@@ -242,7 +242,7 @@ A session won't start if a camera has no entry. To get the poses, see
 - **TiPToP's scripts** (`calibrate-wrist-cam`, `viz-calibration`, `cutamp-demo`, …) run through
   `tandem runtime run` or `shell` use your rig settings, through `$TIPTOP_CONFIG` and `$TIPTOP_CALIBRATION`.
   `--raw` uses tiptop's stock config instead.
-- **Teleop** uses `robot.host` too; tandem passes it to the teleop driver.
+- **Teleop** uses `robot.host` too; TANDEM passes it to the teleop driver.
 - **Gripper mask** (`perception: hand` only): make yours with `tandem runtime run compute-gripper-mask` (or
   `paint-gripper-mask`). It writes the runtime's `tiptop/tiptop/config/assets/gripper_mask.png`.
 
@@ -259,7 +259,7 @@ planner:
 ```
 
 Task settings go in the profile's `planner.options`. Machine settings (a server's address, a robot's ports) go
-in [the rig](#the-rig) under `planners.<name>`. If you put a key in the wrong file, tandem refuses it and says
+in [the rig](#the-rig) under `planners.<name>`. If you put a key in the wrong file, TANDEM refuses it and says
 where it goes. `tandem planners info NAME` lists both ([how planners declare them](ADDING_A_PLANNER.md#options-and-doctor-rows)).
 
 **Did my setting apply?** `tandem profile show NAME --planner` prints exactly what the planner receives.
@@ -372,9 +372,9 @@ tamp:
 | `disjoint_object_masks` | Disjoint object masks (a shared pixel goes to the smaller object), so a container's hull stops at what rests on it. Surface-fitted placement always uses them. |
 | `blend_stretch_to_caps` | With `blend_trajectory`, slow a stroke that can't be re-timed within the velocity and acceleration caps until it fits. It can get many times slower. |
 
-## tandem settings and credentials
+## TANDEM settings and credentials
 
-tandem's own settings live in `~/.config/tandem/config.toml`:
+TANDEM's own settings live in `~/.config/tandem/config.toml`:
 
 ```bash
 tandem config list
@@ -460,7 +460,7 @@ tandem planners bundle tiptop --out /media/usb/planner-sources      # on a machi
 tandem planners install tiptop --sources /media/usb/planner-sources # on the workstation
 ```
 
-- Use the same tandem version on both: commits are checked against their pins and files against the digest.
+- Use the same TANDEM version on both: commits are checked against their pins and files against the digest.
 - `$TANDEM_PLANNER_SOURCES` can replace `--sources` (one directory per source: `tiptop/`, `cuTAMP/`,
   `curobo/`). While set, nothing is fetched.
 - Only sources are bundled. `pixi install` still needs conda-forge, PyPI and GitHub (to build SAM-2), and the
@@ -468,8 +468,8 @@ tandem planners install tiptop --sources /media/usb/planner-sources # on the wor
 
 ## Installing
 
-tandem isn't on PyPI; install it from git ([README](../README.md#1-install)). Plain `pip install git+…` needs
+TANDEM isn't on PyPI; install it from git ([README](../README.md#1-install)). Plain `pip install git+…` needs
 a virtualenv on Debian and Ubuntu. Every install includes what `tandem export lerobot` needs (`av`, `pyarrow`
 and `huggingface_hub`).
 
-To develop tandem: `pip install -e '.[dev]'` in a virtualenv, then `pytest -q`.
+To develop TANDEM: `pip install -e '.[dev]'` in a virtualenv, then `pytest -q`.
