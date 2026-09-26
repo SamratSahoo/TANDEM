@@ -49,8 +49,10 @@ ZED_PYTHON_API = "/usr/local/zed/get_python_api.py"
 # tiptop and cuTAMP are the TANDEM branches of SamratSahoo's forks: their mains (tiptop 81569ff,
 # cuTAMP 3a2e4d0) plus LJ1356's surface-fitted placement, ported from LJ1356/tiptop@ffe370a and
 # @37b9678 and LJ1356/cuTAMP@10ce0cc and @46c3a61. Every piece of it is OPT-IN: with none of the
-# placement_* keys, table_plane_support_vote, disjoint_object_masks or blend_stretch_to_caps set, the
-# pair plans exactly as the two mains do. It is what lets "Solve Constrained Puzzle" and "Store Bread in
+# placement_* keys, table_plane_support_vote, disjoint_object_masks or retime_stretch_to_caps set, the
+# pair plans exactly as the two mains do. tiptop's TANDEM branch also carries DATAFARM's d193fee, 313c5da
+# and 1d3dedf: stroke re-timing is the trajectory encoder's alone (encoder_path, encoder_weight, the
+# retime_* keys), and tiptop refuses any tamp_overrides key it does not read (tiptop/override_keys.py). It is what lets "Solve Constrained Puzzle" and "Store Bread in
 # Closed Box" set the placement_* keys their configs were tuned with (tamp_keys.py says what each does).
 # A pin names the branch it follows (SourcePin.ref), so a bump moves along that branch.
 #
@@ -70,7 +72,7 @@ TIPTOP = Source(
     SourcePin(
         "tiptop",
         "https://github.com/SamratSahoo/tiptop.git",
-        "682047493b88e5301c6b2b49da914ea4f173e5d9",
+        "6cabf0f598515c5e149627456c0fdd889cc701d4",
         ref="TANDEM",
     ),
     trim=(

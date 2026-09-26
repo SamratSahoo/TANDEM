@@ -36,7 +36,7 @@ PAPER = {
 }
 
 #: What LJ1356's tiptop did unconditionally, and the pinned TANDEM branch does only when asked.
-LJ3 = {"table_plane_support_vote": True, "disjoint_object_masks": True, "blend_stretch_to_caps": True}
+LJ3 = {"table_plane_support_vote": True, "disjoint_object_masks": True, "retime_stretch_to_caps": True}
 
 #: What a v3 config says about the machine it ran on, none of which is a task's.
 RIG_KEYS = {"cameras", "robot", "perception", "calibration", "extrinsics"}
@@ -115,9 +115,9 @@ def test_a_built_in_profile_holds_nothing_of_the_machine(name):
 
 
 @pytest.mark.parametrize("name", [*PAPER, "template"])
-def test_the_vae_checkpoint_is_the_one_tandem_ships_where_the_runtime_puts_it(name, tmp_path):
-    # vae_path is relative: render finds it in the runtime, where the recipe puts the checkpoint the wheel
-    # ships. A path that drifted from the recipe's would be "vae_path does not exist" on every machine.
+def test_the_encoder_checkpoint_is_the_one_tandem_ships_where_the_runtime_puts_it(name, tmp_path):
+    # encoder_path is relative: render finds it in the runtime, where the recipe puts the checkpoint the wheel
+    # ships. A path that drifted from the recipe's would be "encoder_path does not exist" on every machine.
     from tandem.core.rig import Rig
     from tandem.planners.tiptop import render
     from tandem.planners.tiptop.options import resolve
@@ -125,13 +125,13 @@ def test_the_vae_checkpoint_is_the_one_tandem_ships_where_the_runtime_puts_it(na
 
     profile = _template() if name == "template" else _builtin(name)
     vae = next(asset for asset in RECIPE.assets if asset.source.name == "vae_full_v2.pt")
-    assert profile.planner.options["tamp"]["vae_path"] == vae.dest
+    assert profile.planner.options["tamp"]["encoder_path"] == vae.dest
     runtime = tmp_path / "runtime"
     (runtime / vae.dest).parent.mkdir(parents=True)
     (runtime / vae.dest).write_bytes(b"")
     options = resolve(Rig(), {}, profile.planner.options)
     rendered = render.render_tamp_overrides(profile, options, runtime_dir=runtime)
-    assert rendered["vae_path"] == str((runtime / vae.dest).resolve())
+    assert rendered["encoder_path"] == str((runtime / vae.dest).resolve())
 
 
 @pytest.mark.parametrize("name", [*PAPER, "template"])
@@ -143,7 +143,7 @@ def test_a_built_in_profile_raises_none_of_tiptops_warnings(name, machine_rig):
 
     profile = _template() if name == "template" else _builtin(name)
     problems = render.check_assets(profile, machine_rig, resolve_profile(profile, machine_rig))
-    assert [p for p in problems if "vae_path does not exist" not in p] == []
+    assert [p for p in problems if "encoder_path does not exist" not in p] == []
 
 
 @pytest.mark.parametrize("name", list(PAPER))

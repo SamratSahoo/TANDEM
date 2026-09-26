@@ -872,7 +872,7 @@ def test_the_web_ui_and_doctor_read_the_same_runtime_the_terminal_does(profile):
 
 
 def test_tiptop_pins_the_tandem_branches():
-    """tiptop 6820474 and cuTAMP fc8f233 are the heads of the TANDEM branches of SamratSahoo's forks --
+    """tiptop 6cabf0f and cuTAMP fc8f233 are the heads of the TANDEM branches of SamratSahoo's forks --
     main plus LJ1356's surface-fitted placement, opt-in -- and move together (the recipe says why);
     cuRobo's main has not moved from 3a90ff4. Full hashes, each with the branch it follows. Moving a pin
     is a deliberate act that moves the sidecar checks with it (tests/test_tiptop_bump.py,
@@ -881,7 +881,7 @@ def test_tiptop_pins_the_tandem_branches():
     from tandem.planners.tiptop.recipe import RECIPE
 
     assert {pin.name: (pin.commit, pin.ref) for pin in RECIPE.pins} == {
-        "tiptop": ("682047493b88e5301c6b2b49da914ea4f173e5d9", "TANDEM"),
+        "tiptop": ("6cabf0f598515c5e149627456c0fdd889cc701d4", "TANDEM"),
         "cuTAMP": ("fc8f233cf6694f069a7a9e1774ae3f31dbedcb17", "TANDEM"),
         "curobo": ("3a90ff49eee169d9636b2a679d98457a2592fb52", "main"),
     }

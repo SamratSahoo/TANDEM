@@ -324,10 +324,14 @@ planner:
 - These are cuTAMP and cuRobo overrides with tiptop's key names, so a `cfg/tamp/*.yml`'s `tamp_overrides`
   paste in as is. Accepted keys: `src/tandem/planners/tiptop/tamp_keys.py`.
 - For `contact_threshold_m` and `voxel_downsample_size`, the `tamp` value overrides the rig's.
-- `tandem doctor` warns about a key that needs another (`blend_ops` without `blend_trajectory`).
-- Relative checkpoint paths (`vae_path`, `blend_model_path`, `blend_stats_path`, `posture_ref`) resolve beside
+- `tandem doctor` warns about a key that needs another (`retime_ops` without `retime_trajectory`).
+- Relative checkpoint paths (`encoder_path`, `posture_ref`) resolve beside
   the profile, then in the runtime, where the install puts the DATAFARM checkpoints
   (`vae/checkpoints/vae_full_v2.pt`, `rnd/checkpoints/rnd_droid.pt`).
+- Stroke re-timing is the trajectory encoder's: `retime_trajectory` with `encoder_path` and the other
+  `retime_*` keys. A profile written with the older names (`vae_path`, `vae_manifold_weight`, `blend_*`) still
+  loads, read under the new names; `vae_retiming: false` and `blend_mode: vae` are dropped, and a setting of a
+  removed mode (the VAE-owned clock, spline or flow re-timing) is refused with the reason.
 
 ### Surface-fitted placement
 
@@ -363,14 +367,14 @@ because every run in the paper used them.
 tamp:
   table_plane_support_vote: true
   disjoint_object_masks: true
-  blend_stretch_to_caps: true
+  retime_stretch_to_caps: true
 ```
 
 | key | what it switches on |
 |---|---|
 | `table_plane_support_vote` | Pick the table among RANSAC's planes by the objects resting on each, instead of by every object within 3 cm above or below. |
 | `disjoint_object_masks` | Disjoint object masks (a shared pixel goes to the smaller object), so a container's hull stops at what rests on it. Surface-fitted placement always uses them. |
-| `blend_stretch_to_caps` | With `blend_trajectory`, slow a stroke that can't be re-timed within the velocity and acceleration caps until it fits. It can get many times slower. |
+| `retime_stretch_to_caps` | With `retime_trajectory`, slow a stroke that can't be re-timed within the velocity and acceleration caps until it fits. It can get many times slower. |
 
 ## TANDEM settings and credentials
 
@@ -437,7 +441,7 @@ pinned sources are below; the `TANDEM` branches add [surface-fitted placement](#
 
 | source | branch | pinned commit |
 |---|---|---|
-| [SamratSahoo/tiptop](https://github.com/SamratSahoo/tiptop/tree/TANDEM) | `TANDEM` | `6820474` |
+| [SamratSahoo/tiptop](https://github.com/SamratSahoo/tiptop/tree/TANDEM) | `TANDEM` | `6cabf0f` |
 | [SamratSahoo/cuTAMP](https://github.com/SamratSahoo/cuTAMP/tree/TANDEM) | `TANDEM` | `fc8f233` |
 | [SamratSahoo/curobo](https://github.com/SamratSahoo/curobo) | `main` | `3a90ff4` |
 

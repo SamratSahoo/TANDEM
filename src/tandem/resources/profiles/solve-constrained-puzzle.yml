@@ -52,26 +52,24 @@ planner:
   options:
     tamp:   # TiPToP's cuTAMP and cuRobo overrides, by tiptop's own key names
       # DATAFARM: plan motions that look like the DROID teleoperation data
-      vae_manifold_weight: 25000.0
-      vae_path: vae/checkpoints/vae_full_v2.pt
-      vae_retiming: false
+      encoder_weight: 25000.0
+      encoder_path: vae/checkpoints/vae_full_v2.pt
       joint_density_weight: 0.0
       uniform_velocity_weight: 0.0
       posture_selection_seeds: 12
       posture_grasp_roll: true
       transit_apex_height: 0.075
       transit_apex_min_dist: 0.1
-      # trajectory blending, timed by the VAE
-      blend_trajectory: true
-      blend_mode: vae
-      blend_ops: [Pick, MoveFree, MoveHolding, Place, GoToInitial]
-      blend_smoothing: 0.0003
-      blend_boundary_speed: 0.07
-      blend_vae_sample_target: false
-      blend_max_duration_mult: 2.0
-      blend_vel_slack: 1.0
-      blend_acc_slack: 1.0
-      # Planned motions run at blending's pace, not slowed by the rig's robot speed, as in the
+      # stroke re-timing, by the trajectory encoder
+      retime_trajectory: true
+      retime_ops: [Pick, MoveFree, MoveHolding, Place, GoToInitial]
+      retime_smoothing: 0.0003
+      retime_boundary_speed: 0.07
+      retime_sample_target: false
+      retime_max_duration_mult: 2.0
+      retime_vel_slack: 1.0
+      retime_acc_slack: 1.0
+      # Planned motions run at the encoder's re-timed pace, not slowed by the rig's robot speed, as in the
       # paper's runs: keep a hand on the E-stop.
       time_dilation_factor_literal: 1.0
       # cuTAMP search and grasps
@@ -84,7 +82,7 @@ planner:
       # What LJ1356's tiptop always did, so every v3 run had them
       table_plane_support_vote: true
       disjoint_object_masks: true
-      blend_stretch_to_caps: true
+      retime_stretch_to_caps: true
       # this task's own: place the toy where it would rest, on the cloth's observed surface
       placement_support: true
       placement_support_required: true

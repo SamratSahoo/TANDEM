@@ -536,12 +536,12 @@ def test_tiptops_asset_warnings_reach_the_operator(profile, tmp_path, gemini_key
         _context(
             profile,
             tmp_path,
-            options={**profile.planner.options, "tamp": {"blend_ops": ["Pick"]}},
+            options={**profile.planner.options, "tamp": {"retime_ops": ["Pick"]}},
             on_log=lambda stream, text: logs.append((stream, text)),
         )
     )
     assert any(
-        stream == "tandem" and text.startswith("warning: blend_ops is set but blend_trajectory is not true")
+        stream == "tandem" and text.startswith("warning: retime_ops only applies when retime_trajectory is true")
         for stream, text in logs
     )
 

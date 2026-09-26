@@ -365,7 +365,7 @@ def validate_tamp(raw: dict | None) -> dict:
         raise ValueError("tamp must be a mapping")
 
     out: dict[str, Any] = {}
-    for key, value in raw.items():
+    for key, value in _upgrade_renamed(raw).items():
         if value is None:
             if key in tamp_keys.NULL_REFUSED:
                 raise ValueError(tamp_keys.NULL_REFUSED[key])
@@ -382,7 +382,7 @@ def validate_tamp(raw: dict | None) -> dict:
         elif key in tamp_keys.PATH_KEYS:
             out[key] = str(value)
         elif key in tamp_keys.LIST_KEYS:
-            out[key] = _validate_blend_ops(key, value)
+            out[key] = _validate_retime_ops(key, value)
         elif key in tamp_keys.INDEX_MAP_KEYS:
             out[key] = _validate_index_map(key, value)
         else:
@@ -390,6 +390,35 @@ def validate_tamp(raw: dict | None) -> dict:
 
     _check_enums(out)
     _check_positives(out)
+    if out.get("retime_trajectory") and not out.get("encoder_path"):
+        # tiptop's own check (override_keys.check_override_keys), made when the profile loads rather than
+        # when a session starts with the arm about to move.
+        raise ValueError("retime_trajectory needs encoder_path, the trajectory-encoder checkpoint that times each stroke")
+    return out
+
+
+def _upgrade_renamed(raw: dict) -> dict:
+    """A ``tamp:`` block written before tiptop's re-timing rename, read under the new names.
+
+    A renamed key (``tamp_keys.RENAMED``) is the same setting, so it is read as its new name. A key of a
+    removed mode (``tamp_keys.REMOVED``) is dropped when its value describes what tiptop still does
+    (``vae_retiming: false``, ``blend_mode: vae``) and refused otherwise, because that behavior is gone.
+    Setting a key under both names with different values is refused rather than guessed.
+    """
+    out: dict = {}
+    for key, value in raw.items():
+        if key in tamp_keys.REMOVED:
+            kept = tamp_keys.REMOVED[key]
+            if value is None or (kept is not None and value == kept):
+                continue
+            raise ValueError(f"TAMP setting {key!r}: {tamp_keys.REMOVED_BECAUSE}. Remove it from the profile.")
+        new = tamp_keys.RENAMED.get(key, key)
+        if new in out and out[new] != value:
+            raise ValueError(
+                f"TAMP setting {key!r} is the old name of {new!r}, and the profile sets both, differently. "
+                f"Keep {new!r} only."
+            )
+        out[new] = value
     return out
 
 
@@ -422,15 +451,15 @@ def _normalise_traj_norm(value: Any) -> str | float:
     return norm
 
 
-def _validate_blend_ops(key: str, value: Any) -> list[str]:
+def _validate_retime_ops(key: str, value: Any) -> list[str]:
     if not isinstance(value, (list, tuple)):
         raise ValueError(f"{key} must be a list of operation names")
     ops = [str(x).strip() for x in value]
-    unknown = [o for o in ops if o not in tamp_keys.BLEND_OPS]
+    unknown = [o for o in ops if o not in tamp_keys.RETIME_OPS]
     if unknown:
         # The source shipped a config with `MoveFree. MoveHolding` -- a typo'd '.' that YAML
         # folded into one token and the planner silently ignored. Catch that class here.
-        raise ValueError(f"{key} names unknown operations {unknown}; valid: {', '.join(tamp_keys.BLEND_OPS)}")
+        raise ValueError(f"{key} names unknown operations {unknown}; valid: {', '.join(tamp_keys.RETIME_OPS)}")
     return ops
 
 
@@ -468,8 +497,11 @@ def _coerce_scalar(key: str, value: Any) -> Any:
 
 def _check_enums(cfg: dict) -> None:
     for key, allowed in tamp_keys.ENUMS.items():
-        if key in cfg and str(cfg[key]).lower() not in allowed:
-            raise ValueError(f"{key} must be one of {sorted(allowed)} (got {cfg[key]!r})")
+        if key in cfg:
+            if str(cfg[key]).lower() not in allowed:
+                raise ValueError(f"{key} must be one of {sorted(allowed)} (got {cfg[key]!r})")
+            # tiptop compares it as written (override_keys: retime_mode != "encoder"), so pass it lowercase.
+            cfg[key] = str(cfg[key]).lower()
 
 
 def _check_positives(cfg: dict) -> None:

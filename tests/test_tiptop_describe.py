@@ -1,8 +1,8 @@
 """What `tandem profile show` and a web profile card say about a TiPToP profile, read by someone new.
 
 - The speed: every paper profile, and every new one, sets tamp.time_dilation_factor_literal: 1.0, so the
-  planned motions run at blending's pace. "20% speed" read as an arm that moves slowly.
-- The warnings: on a machine with no runtime yet, "vae_path does not exist: <data>/profiles/vae/..."
+  planned motions run at the encoder's pace. "20% speed" read as an arm that moves slowly.
+- The warnings: on a machine with no runtime yet, "encoder_path does not exist: <data>/profiles/vae/..."
   for every profile sent people to put a checkpoint beside their profiles that the runtime installs; and
   on a laptop with no rig.yml, every profile warned about missing cameras.
 """
@@ -17,12 +17,12 @@ from tandem.planners.tiptop import render
 from tandem.planners.tiptop.doctor import planned_speed
 
 
-def test_a_paper_profile_says_its_planned_motions_run_at_blendings_pace(machine_rig):
+def test_a_paper_profile_says_its_planned_motions_run_at_the_encoders_pace(machine_rig):
     profile = profiles.create("cups", prompt="stack the cups")
     view = registry.describe_options("tiptop", profile, settings=settings.load())
-    assert view.summary.endswith("planned motions at blending's pace; homing and capture at 20%")
+    assert view.summary.endswith("planned motions at the encoder's pace; homing and capture at 20%")
     (speed,) = [value for key, value in view.sections[0].rows if key == "speed"]
-    assert "blending's pace (time_dilation_factor_literal 1)" in speed and "homing and capture: 20%" in speed
+    assert "the encoder's pace (time_dilation_factor_literal 1)" in speed and "homing and capture: 20%" in speed
 
 
 @pytest.mark.parametrize(
@@ -34,11 +34,9 @@ def test_a_paper_profile_says_its_planned_motions_run_at_blendings_pace(machine_
         ({"time_dilation_factor_literal": 0.4}, ("40%", "time_dilation_factor_literal")),
         ({"time_dilation_factor_literal": 1.0}, ("full speed", "time_dilation_factor_literal 1")),
         (
-            {"time_dilation_factor_literal": 1.0, "blend_trajectory": True},
-            ("blending's pace", "time_dilation_factor_literal 1"),
+            {"time_dilation_factor_literal": 1.0, "retime_trajectory": True},
+            ("the encoder's pace", "time_dilation_factor_literal 1"),
         ),
-        ({"vae_retiming": True, "vae_manifold_weight": 1.0, "time_dilation_factor_literal": 0.3},
-         ("the VAE's timing", "vae_retiming")),
     ],
 )
 def test_the_planned_speed_is_tiptops_own_reading_of_the_settings(tamp, expected):
@@ -51,18 +49,18 @@ def test_a_checkpoint_the_runtime_installs_is_not_warned_about_before_there_is_a
 
     resolved = resolve_profile(profile, machine_rig)
     absent = tmp_path / "no-runtime-here"
-    assert not any("vae_path" in p for p in render.check_assets(profile, machine_rig, resolved, runtime_dir=absent))
-    assert not any("vae_path" in p for p in render.check_assets(profile, machine_rig, resolved))
+    assert not any("encoder_path" in p for p in render.check_assets(profile, machine_rig, resolved, runtime_dir=absent))
+    assert not any("encoder_path" in p for p in render.check_assets(profile, machine_rig, resolved))
 
     # A runtime that is there but lacks it: that is a real problem, and said.
     built = tmp_path / "runtime"
     built.mkdir()
-    (problem,) = [p for p in render.check_assets(profile, machine_rig, resolved, runtime_dir=built) if "vae_path" in p]
-    assert "vae_path does not exist" in problem
+    (problem,) = [p for p in render.check_assets(profile, machine_rig, resolved, runtime_dir=built) if "encoder_path" in p]
+    assert "encoder_path does not exist" in problem
 
     # An absolute path is the person's own: always checked.
     elsewhere = profile.model_copy(deep=True)
-    elsewhere.planner.options["tamp"]["vae_path"] = str(tmp_path / "mine.pt")
+    elsewhere.planner.options["tamp"]["encoder_path"] = str(tmp_path / "mine.pt")
     resolved = resolve_profile(elsewhere, machine_rig)
     assert any("mine.pt" in p for p in render.check_assets(elsewhere, machine_rig, resolved, runtime_dir=absent))
 

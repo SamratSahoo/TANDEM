@@ -8,11 +8,14 @@ something:
     resolve_time_dilation_factor, resolve_traj_length_norm, resolve_grasp_orientation_cost,
     resolve_grasp_center_cost, resolve_grasp_rank_conf_weight, resolve_transit_apex,
     resolve_posture_selection, resolve_ik_num_seeds, resolve_require_m2t2_grasps,
-    resolve_max_motion_refine_attempts, resolve_vae_retiming, resolve_placement_support,
+    resolve_max_motion_refine_attempts, resolve_placement_support,
     apply_perception_overrides, summarize_curobo_config
   * ``tiptop/planning.py``          — run_planning's grasp soft-cost weights
   * ``tiptop/trajectory_blending.py`` — resolve_blend_config
   * ``tiptop/tiptop_run.py`` — num_particles / opt_steps_per_skeleton
+
+tiptop now lists them itself too (``tiptop/override_keys.py``, SUPPORTED_OVERRIDE_KEYS) and refuses any
+other key when it loads the overrides. tandem accepts that set minus the keys in ``REFUSED``.
 
 ...as of the tiptop the TiPToP recipe pins (planners/tiptop/recipe.py). "Reads" is not enough on its
 own: the key also has to be read on a path tandem's sidecar actually runs. tiptop's interactive
@@ -69,15 +72,8 @@ SCALAR_KEYS: dict[str, type] = {
     "max_motion_refine_attempts": int,
     # --- gradient_trajopt cost weights ---
     "uniform_velocity_weight": float,
-    "vae_manifold_weight": float,
-    # The VAE manifold cost owns the trajectory clock: each waypoint interval's duration becomes a
-    # trajopt variable, and time_dilation_factor, cuRobo's optimize_dt and blending are all switched
-    # off (resolve_vae_retiming). Ignored, with a warning from tiptop, when vae_manifold_weight is 0.
-    "vae_retiming": bool,
-    # The three guard knobs of that retiming, read only when it is on (apply_cost_overrides).
-    "retime_scale": float,
-    "retime_smooth_weight": float,
-    "retime_limit_weight": float,
+    # The trajectory-encoder manifold cost's weight (encoder_path is its checkpoint, below).
+    "encoder_weight": float,
     "rnd_novelty_weight": float,
     "rnd_novelty_log": bool,
     "joint_density_weight": float,
@@ -94,35 +90,28 @@ SCALAR_KEYS: dict[str, type] = {
     "velocity_scale": float,
     "acceleration_scale": float,
     "jerk_scale": float,
-    # --- trajectory blending (resolve_blend_config) ---
-    "blend_trajectory": bool,
-    "blend_mode": str,
-    "blend_smoothing": float,
-    "blend_vel_slack": float,
-    "blend_acc_slack": float,
-    "blend_boundary_speed": float,
-    "blend_speed_scale": float,
-    "blend_boundary_window": float,
-    "blend_boundary_window_sec": float,
-    "blend_boundary_mode": str,
-    "blend_pace": str,
-    "blend_pace_scale": float,
-    "blend_profile_end_sec": float,
-    "blend_max_duration_mult": float,
-    "blend_flow_steps": int,
-    "blend_flow_retime_only": bool,
-    # blend_mode: vae only -- aim each stroke at a latent DRAWN from the DROID cluster instead of its
-    # mean, which restores the between-stroke timing variance the mean target collapses.
-    "blend_vae_sample_target": bool,
-    "blend_seed": int,
+    # --- stroke re-timing (trajectory_blending.resolve_blend_config) ---
+    # The trajectory encoder re-times each stroke of the plan against the DROID cluster it was
+    # trained on; encoder is the only mode, and it needs encoder_path.
+    "retime_trajectory": bool,
+    "retime_mode": str,
+    "retime_smoothing": float,
+    "retime_vel_slack": float,
+    "retime_acc_slack": float,
+    "retime_boundary_speed": float,
+    "retime_speed_scale": float,
+    "retime_max_duration_mult": float,
+    # Aim each stroke at a latent DRAWN from the DROID cluster instead of its mean, which restores the
+    # between-stroke timing variance the mean target collapses.
+    "retime_sample_target": bool,
     # What an operation whose stroke cannot be re-timed inside the vel/accel caps gets. Off (tiptop's
-    # default): blend_mode vae gives up on it and the run keeps its original segments at the plan's own
-    # timing. On: the stroke is slowed past blend_max_duration_mult until it fits, and a run whose
-    # blending failed is slowed into the same caps -- which can make a stroke many times slower than
+    # default): the re-timer gives up on it and the run keeps its original segments at the plan's own
+    # timing. On: the stroke is slowed past retime_max_duration_mult until it fits, and a run whose
+    # re-timing failed is slowed into the same caps -- which can make a stroke many times slower than
     # the planner's. LJ1356's tiptop always did this; hitl-tamp-vla's toy-puzzle and bread/box configs
     # were tuned with it on. tiptop refuses a quoted "false" (it takes a boolean, or 0/1); tandem
     # takes a boolean, like every other switch here.
-    "blend_stretch_to_caps": bool,
+    "retime_stretch_to_caps": bool,
     # --- surface-fitted placement (resolve_placement_support) ---
     # Where an object may be put down. Off (the default), the region is the surface's oriented bounding
     # box, with the object's bottom at the box's TOP: right for a slab, wrong for anything with
@@ -175,10 +164,10 @@ SCALAR_KEYS: dict[str, type] = {
 # relative path means "relative to the profile", not "relative to whatever cwd tiptop ran in".
 # posture_ref is cuTAMP's baked posture prior (an .npz); unset, cuTAMP uses its own posture_ref.npz
 # or $CUTAMP_POSTURE_REF.
-PATH_KEYS: frozenset[str] = frozenset({"vae_path", "blend_model_path", "blend_stats_path", "posture_ref"})
+PATH_KEYS: frozenset[str] = frozenset({"encoder_path", "posture_ref"})
 
 # List-valued knobs.
-LIST_KEYS: frozenset[str] = frozenset({"blend_ops"})
+LIST_KEYS: frozenset[str] = frozenset({"retime_ops"})
 
 # Per-index dict knobs: {index -> value} applied into a cuRobo vector cost field.
 INDEX_MAP_KEYS: frozenset[str] = frozenset(
@@ -249,12 +238,55 @@ NULL_REFUSED: dict[str, str] = {
     ),
 }
 
-# Enumerated string knobs -> their legal values (from resolve_blend_config).
+# Enumerated string knobs -> their legal values (tiptop's override_keys.check_override_keys).
 ENUMS: dict[str, frozenset[str]] = {
-    "blend_mode": frozenset({"spline", "flow", "vae"}),
-    "blend_pace": frozenset({"plan", "droid"}),
-    "blend_boundary_mode": frozenset({"const", "droid"}),
+    "retime_mode": frozenset({"encoder"}),
 }
+
+# Keys tiptop renamed when stroke re-timing became the trajectory encoder's alone (tiptop 1d3dedf), old
+# name -> new. Each is the same setting under a new name, so a profile written before the rename still
+# loads: validate_tamp reads the old name as the new one. `tandem profile edit` shows the new names.
+RENAMED: dict[str, str] = {
+    "vae_path": "encoder_path",
+    "vae_manifold_weight": "encoder_weight",
+    "blend_trajectory": "retime_trajectory",
+    "blend_smoothing": "retime_smoothing",
+    "blend_vel_slack": "retime_vel_slack",
+    "blend_acc_slack": "retime_acc_slack",
+    "blend_boundary_speed": "retime_boundary_speed",
+    "blend_speed_scale": "retime_speed_scale",
+    "blend_ops": "retime_ops",
+    "blend_max_duration_mult": "retime_max_duration_mult",
+    "blend_vae_sample_target": "retime_sample_target",
+    "blend_stretch_to_caps": "retime_stretch_to_caps",
+}
+
+# Settings of modes tiptop removed in the same change: the VAE-owned trajectory clock (vae_retiming and
+# its three guard knobs) and the spline and flow re-timing modes. key -> (the value that describes what
+# tiptop still does, so it is dropped; or None when no value does). Any other value is refused: that
+# behavior is gone, and reading the setting as something else would change what the profile does.
+REMOVED: dict[str, object] = {
+    "vae_retiming": False,
+    "retime_scale": None,
+    "retime_smooth_weight": None,
+    "retime_limit_weight": None,
+    "blend_mode": "vae",
+    "blend_boundary_window": None,
+    "blend_boundary_window_sec": None,
+    "blend_boundary_mode": None,
+    "blend_pace": None,
+    "blend_pace_scale": None,
+    "blend_profile_end_sec": None,
+    "blend_flow_steps": None,
+    "blend_flow_retime_only": None,
+    "blend_seed": None,
+    "blend_model_path": None,
+    "blend_stats_path": None,
+}
+REMOVED_BECAUSE = (
+    "tiptop removed it: stroke re-timing is now the trajectory encoder's alone (retime_trajectory, "
+    "encoder_path, the retime_* keys), and the VAE-owned clock and the spline and flow modes are gone"
+)
 
 # Range limits, each the check the planner itself applies -- only later, at warm-up or at the first
 # plan (resolve_blend_config, apply_perception_overrides, cuTAMP's validate_tamp_config), and with
@@ -264,10 +296,7 @@ ENUMS: dict[str, frozenset[str]] = {
 POSITIVE_KEYS: tuple[str, ...] = (
     "num_particles",
     "opt_steps_per_skeleton",
-    "blend_speed_scale",
-    "blend_pace_scale",
-    # tiptop raises for <= 0 here, not < 0 like its sibling blend_boundary_window.
-    "blend_boundary_window_sec",
+    "retime_speed_scale",
     "contact_threshold_m",
     "grasp_threshold",
     "m2t2_num_runs",
@@ -279,8 +308,6 @@ POSITIVE_KEYS: tuple[str, ...] = (
     "placement_flatness_tol",
 )
 NON_NEGATIVE_KEYS: tuple[str, ...] = (
-    "blend_boundary_window",
-    "blend_profile_end_sec",
     "transit_apex_height",
     "transit_apex_min_dist",
     "posture_selection_seeds",
@@ -290,8 +317,8 @@ NON_NEGATIVE_KEYS: tuple[str, ...] = (
 # A fraction, in [0, 1] both ends included, as cuTAMP's validate_tamp_config has it.
 UNIT_INTERVAL_KEYS: tuple[str, ...] = ("placement_min_seen_frac",)
 
-# Operations blend_ops may name (cuTAMP plan operation names).
-BLEND_OPS = ("Pick", "Place", "MoveFree", "MoveHolding", "GoToInitial")
+# Operations retime_ops may name (cuTAMP plan operation names).
+RETIME_OPS = ("Pick", "Place", "MoveFree", "MoveHolding", "GoToInitial")
 
 INFINITY_ALIASES = frozenset({"inf", "infinity", "max"})
 

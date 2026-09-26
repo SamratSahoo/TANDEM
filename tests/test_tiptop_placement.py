@@ -45,7 +45,7 @@ FIXTURES = Path(__file__).parent / "fixtures" / "cfg_tamp"
 _yaml = YAML(typ="safe")
 
 PLACEMENT = ("placement_support", *tamp_keys.PLACEMENT_GATED)
-SWITCHES = ("table_plane_support_vote", "disjoint_object_masks", "blend_stretch_to_caps")
+SWITCHES = ("table_plane_support_vote", "disjoint_object_masks", "retime_stretch_to_caps")
 
 # What resolve_placement_support uses for each gated key the profile leaves out, once placement_support
 # is on -- as docs/CONFIGURATION.md documents them. Checked against the pinned source below.
@@ -78,7 +78,7 @@ def test_the_placement_keys_and_switches_are_settings_of_their_types():
         "placement_min_seen_frac": float,
         "table_plane_support_vote": bool,
         "disjoint_object_masks": bool,
-        "blend_stretch_to_caps": bool,
+        "retime_stretch_to_caps": bool,
     }
     assert not set(types) & set(tamp_keys.REFUSED)
     assert set(DEFAULTS) == set(tamp_keys.PLACEMENT_GATED)
@@ -201,19 +201,19 @@ def test_a_placement_key_without_placement_support_is_said_to_do_nothing(profile
     assert f"{key} only applies when placement_support is true; it is ignored here" in problems
 
 
-def test_blend_stretch_to_caps_without_blending_is_said_to_do_nothing(profile):
-    profile.planner.options["tamp"] = validate_tamp({"blend_stretch_to_caps": True})
+def test_retime_stretch_to_caps_without_retiming_is_said_to_do_nothing(profile):
+    profile.planner.options["tamp"] = validate_tamp({"retime_stretch_to_caps": True})
     assert any(
-        "blend_stretch_to_caps only applies when blend_trajectory" in p for p in render.check_assets(profile, rig_mod.load(), _opts(profile))
+        "retime_stretch_to_caps only applies when retime_trajectory" in p for p in render.check_assets(profile, rig_mod.load(), _opts(profile))
     )
-    profile.planner.options["tamp"] = validate_tamp({"blend_stretch_to_caps": True, "blend_trajectory": True})
-    assert not any("blend_stretch_to_caps" in p for p in render.check_assets(profile, rig_mod.load(), _opts(profile)))
+    profile.planner.options["tamp"] = validate_tamp({"retime_stretch_to_caps": True, "retime_trajectory": True, "encoder_path": "vae/checkpoints/vae_full_v2.pt"})
+    assert not any("retime_stretch_to_caps" in p for p in render.check_assets(profile, rig_mod.load(), _opts(profile)))
 
 
 @pytest.mark.parametrize("name", ["1_toy_puzzle_v3.yml", "4_bread_box.yml", "4_bread_box_v3.yml"])
 def test_the_two_tasks_with_all_three_switches_raise_no_warning(profile, name):
     profile.planner.options["tamp"] = validate_tamp({**_overrides(name), **dict.fromkeys(SWITCHES, True)})
-    problems = [p for p in render.check_assets(profile, rig_mod.load(), _opts(profile)) if "vae_path does not exist" not in p]
+    problems = [p for p in render.check_assets(profile, rig_mod.load(), _opts(profile)) if "encoder_path does not exist" not in p]
     assert not [p for p in problems if "only applies" in p], problems
 
 
@@ -360,7 +360,7 @@ def test_the_perception_switches_default_off_in_tiptop():
     assert stock["perception"]["disjoint_object_masks"] is False
 
     blending = _function(_parse(root / "trajectory_blending.py"), "resolve_blend_config")
-    assert "_as_bool('blend_stretch_to_caps', raw_stretch)" in ast.unparse(blending)
+    assert "_as_bool('retime_stretch_to_caps', raw_stretch)" in ast.unparse(blending)
     assert "stretch_to_caps = False if raw_stretch is None" in ast.unparse(blending)
 
 

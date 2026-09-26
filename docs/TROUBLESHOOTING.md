@@ -148,7 +148,7 @@ With `placement_support: true`, no visible level patch of the goal surface fits 
 session log, or in that pass's `metadata.json` under the session's `perception/`
 ([where](DATA.md#logs-and-session-files)).
 
-## "vae_path does not exist"
+## "encoder_path does not exist"
 
 ```bash
 tandem planners install tiptop

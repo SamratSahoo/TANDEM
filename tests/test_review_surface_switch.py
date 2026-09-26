@@ -277,7 +277,7 @@ def test_a_paper_tasks_settings_survive_a_round_trip_through_the_web(active):
     assert client.post("/api/planners/pure/use", json={"profile": name}).status_code == 200
     assert client.post("/api/planners/tiptop/use", json={"profile": name}).status_code == 200
     after = profiles.load(name).planner.options
-    assert after == before and after["tamp"]["vae_manifold_weight"] == 25000
+    assert after == before and after["tamp"]["encoder_weight"] == 25000
     assert after["tamp"]["placement_support"] is True, "its own placement settings too"
 
 

@@ -244,6 +244,7 @@ class Sidecar:
             resolve_placement_support,
             resolve_posture_selection,
             resolve_require_m2t2_grasps,
+            resolve_solver_effort,
             resolve_time_dilation_factor,
             resolve_traj_length_norm,
             resolve_transit_apex,
@@ -262,8 +263,9 @@ class Sidecar:
 
         # Same knobs an ordinary tiptop-run reads, from the same file tandem already renders for it.
         self.cost_overrides = _load_curobo_overrides(cost_overrides)
-        num_particles = int(self.cost_overrides.get("num_particles") or 256)
-        opt_steps = int(self.cost_overrides.get("opt_steps_per_skeleton") or 500)
+        # tiptop-run's own resolution (a num_particles / opt_steps_per_skeleton key wins over its defaults,
+        # 256 and 500), which also refuses a non-positive value.
+        num_particles, opt_steps = resolve_solver_effort(self.cost_overrides, 256, 500)
         max_planning_time = float(self.cost_overrides.get("max_planning_time") or 60.0)
 
         cfg = tiptop_cfg()
@@ -276,8 +278,7 @@ class Sidecar:
 
         # The config default is required, not optional: an override of None or 1.0 means "no extra
         # scaling" and falls back to it, and tiptop.yml ships 0.2 -- passing 1.0 here would run every
-        # trajectory at five times the intended speed. (vae_retiming forces 1.0: the VAE owns the
-        # clock then.)
+        # trajectory at five times the intended speed.
         time_dilation_factor = resolve_time_dilation_factor(
             self.cost_overrides, cfg.robot.time_dilation_factor
         )

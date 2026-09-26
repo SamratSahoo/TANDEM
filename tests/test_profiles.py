@@ -43,10 +43,10 @@ def test_save_and_load_roundtrip(profile):
 
 def test_unknown_tamp_key_is_rejected_with_a_suggestion():
     with pytest.raises(ValueError) as excinfo:
-        validate_tamp({"vae_manifold_weigth": 100})  # transposed letters
+        validate_tamp({"encoder_wieght": 100})  # transposed letters
     message = str(excinfo.value)
     assert "unknown TAMP setting" in message
-    assert "vae_manifold_weight" in message  # the suggestion
+    assert "encoder_weight" in message  # the suggestion
 
 
 def test_traj_length_norm_normalises_to_the_string_inf():
@@ -61,25 +61,67 @@ def test_traj_length_norm_normalises_to_the_string_inf():
     assert validate_tamp({"traj_length_norm": 2})["traj_length_norm"] == 2.0
 
 
-def test_blend_ops_typo_is_caught():
+def test_retime_ops_typo_is_caught():
     """An upstream config really did ship `MoveFree. MoveHolding` — one typo'd period that
     YAML folded into a single token and the planner ignored for months."""
     with pytest.raises(ValueError) as excinfo:
-        validate_tamp({"blend_ops": ["Pick", "MoveFree. MoveHolding"]})
+        validate_tamp({"retime_ops": ["Pick", "MoveFree. MoveHolding"]})
     assert "unknown operations" in str(excinfo.value)
 
 
-def test_blend_mode_enum_is_enforced():
-    with pytest.raises(ValueError):
-        validate_tamp({"blend_mode": "neural"})  # documented once, never implemented
-    assert validate_tamp({"blend_mode": "flow"})["blend_mode"] == "flow"
+def test_retime_mode_is_encoder_only():
+    with pytest.raises(ValueError, match="retime_mode must be one of"):
+        validate_tamp({"retime_mode": "spline"})  # a mode tiptop removed
+    assert validate_tamp({"retime_mode": "encoder"})["retime_mode"] == "encoder"
+
+
+def test_retiming_needs_the_encoder_checkpoint():
+    with pytest.raises(ValueError, match="retime_trajectory needs encoder_path"):
+        validate_tamp({"retime_trajectory": True})
+    assert validate_tamp({"retime_trajectory": True, "encoder_path": "e.pt"})["retime_trajectory"] is True
+
+
+def test_a_profile_written_before_tiptops_rename_loads_under_the_new_names():
+    """tiptop renamed the re-timing keys (vae_path -> encoder_path, blend_* -> retime_*) and removed the
+    VAE clock and the spline and flow modes. A profile from before still loads, meaning the same thing."""
+    old = {
+        "vae_manifold_weight": 25000.0,
+        "vae_path": "vae/checkpoints/vae_full_v2.pt",
+        "vae_retiming": False,  # what tiptop still does: dropped
+        "blend_trajectory": True,
+        "blend_mode": "vae",  # the mode tiptop kept: dropped
+        "blend_ops": ["Pick", "Place"],
+        "blend_stretch_to_caps": True,
+    }
+    assert validate_tamp(old) == {
+        "encoder_weight": 25000.0,
+        "encoder_path": "vae/checkpoints/vae_full_v2.pt",
+        "retime_trajectory": True,
+        "retime_ops": ["Pick", "Place"],
+        "retime_stretch_to_caps": True,
+    }
+
+
+@pytest.mark.parametrize(
+    "setting",
+    [{"vae_retiming": True}, {"blend_mode": "flow"}, {"blend_mode": "spline"}, {"blend_pace": "droid"}, {"retime_scale": 1.0}],
+)
+def test_a_setting_of_a_removed_mode_is_refused_not_read_as_something_else(setting):
+    with pytest.raises(ValueError, match="tiptop removed it"):
+        validate_tamp(setting)
+
+
+def test_a_key_set_under_both_names_differently_is_refused():
+    with pytest.raises(ValueError, match="old name of 'retime_smoothing'"):
+        validate_tamp({"blend_smoothing": 0.001, "retime_smoothing": 0.002})
+    assert validate_tamp({"blend_smoothing": 0.001, "retime_smoothing": 0.001}) == {"retime_smoothing": 0.001}
 
 
 def test_scalar_types_are_enforced():
     with pytest.raises(ValueError):
         validate_tamp({"num_particles": "many"})
     with pytest.raises(ValueError):
-        validate_tamp({"blend_trajectory": "yes"})  # a string, not a bool
+        validate_tamp({"retime_trajectory": "yes"})  # a string, not a bool
     assert validate_tamp({"num_particles": 128})["num_particles"] == 128
 
 

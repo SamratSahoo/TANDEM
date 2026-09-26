@@ -225,44 +225,21 @@ def check_assets(
             return None
         return path
 
-    if tamp.get("vae_manifold_weight") and tamp.get("vae_path"):
-        path = missing("vae_path")
+    if tamp.get("encoder_weight") and tamp.get("encoder_path"):
+        path = missing("encoder_path")
         if path is not None:
-            problems.append(f"vae_manifold_weight is set but vae_path does not exist: {path}")
-
-    if str(tamp.get("blend_mode", "")).lower() == "flow":
-        if tamp.get("blend_model_path"):
-            path = missing("blend_model_path")
-            if path is not None:
-                problems.append(f"blend_mode is 'flow' but blend_model_path does not exist: {path}")
-
-    if tamp.get("blend_ops") and not tamp.get("blend_trajectory"):
-        problems.append("blend_ops is set but blend_trajectory is not true, so no blending happens")
-
-    for key in ("blend_pace", "blend_boundary_mode", "blend_flow_steps", "blend_flow_retime_only"):
-        if key in tamp and str(tamp.get("blend_mode", "spline")).lower() != "flow":
-            problems.append(f"{key} only applies when blend_mode is 'flow'; it is ignored here")
-    if tamp.get("blend_vae_sample_target") and str(tamp.get("blend_mode", "spline")).lower() != "vae":
-        problems.append("blend_vae_sample_target only applies when blend_mode is 'vae'; it is ignored here")
+            problems.append(f"encoder_weight is set but encoder_path does not exist: {path}")
+    if tamp.get("retime_trajectory") and tamp.get("encoder_path"):
+        # The re-timer loads the same checkpoint when the first stroke is re-timed, after warm-up.
+        path = missing("encoder_path")
+        if path is not None and not tamp.get("encoder_weight"):
+            problems.append(f"retime_trajectory is set but encoder_path does not exist: {path}")
 
     # The knobs below are each read only behind another one, by the same resolve_* function that
     # reads the gate -- so set without it, they are accepted, passed on, and change nothing.
-    retiming = bool(tamp.get("vae_retiming")) and bool(tamp.get("vae_manifold_weight"))
-    if tamp.get("vae_retiming") and not retiming:
-        problems.append(
-            "vae_retiming is set but vae_manifold_weight is 0 or unset, so nothing would optimize the "
-            "trajectory clock and the planner ignores vae_retiming"
-        )
-    for key in ("retime_scale", "retime_smooth_weight", "retime_limit_weight"):
-        if key in tamp and not retiming:
-            problems.append(f"{key} only applies when vae_retiming is on; it is ignored here")
-    if retiming and tamp.get("blend_trajectory"):
-        # Not a mistake -- the planner means it -- but it turns a whole blend_* block off, and the
-        # planner's own warning about it lands in the sidecar log, not in front of anyone.
-        problems.append(
-            "vae_retiming gives the VAE cost the trajectory clock, so trajectory blending "
-            "(blend_trajectory and every blend_* key) is switched off for every plan"
-        )
+    if not tamp.get("retime_trajectory"):
+        for key in sorted(k for k in tamp if k.startswith("retime_") and k != "retime_trajectory"):
+            problems.append(f"{key} only applies when retime_trajectory is true; it is ignored here")
 
     seeds = int(tamp.get("posture_selection_seeds") or 0)
     for key in ("posture_grasp_roll", "posture_ref", "posture_pos_tol", "posture_rot_tol"):
@@ -285,12 +262,6 @@ def check_assets(
         for key in tamp_keys.PLACEMENT_GATED:
             if key in tamp:
                 problems.append(f"{key} only applies when placement_support is true; it is ignored here")
-    # Both of its effects are inside trajectory blending (resolve_blend_config's BlendConfig).
-    if "blend_stretch_to_caps" in tamp and not tamp.get("blend_trajectory"):
-        problems.append(
-            "blend_stretch_to_caps only applies when blend_trajectory is true; it is ignored here"
-        )
-
     # Settings tiptop never reads (see options.GeminiSpec): kept so a profile can say which detector
     # labelled its data, and warned about when what they say is not what runs.
     gemini = o.perception.gemini
@@ -388,7 +359,7 @@ def render_env(
         env["GEMINI_API_KEY"] = key
         env["GOOGLE_API_KEY"] = key
 
-    # The cuRobo fork's VAE/RND costs default their checkpoints relative to what they assume
+    # The cuRobo fork's encoder (VAE) and RND costs default their checkpoints relative to what they assume
     # is a monorepo root. The runtime dir mirrors that layout, but set the env vars they also
     # honour so a relocated or profile-local checkpoint wins regardless.
     if runtime_dir is not None:
@@ -398,8 +369,10 @@ def render_env(
             env.setdefault("VAE_MANIFOLD_CKPT", str(vae))
         if rnd.is_file():
             env.setdefault("RND_NOVELTY_CKPT", str(rnd))
-    if o.tamp.get("vae_path"):
-        env["VAE_MANIFOLD_CKPT"] = str(_resolve_asset(profile, str(o.tamp["vae_path"]), "vae_path", runtime_dir))
+    if o.tamp.get("encoder_path"):
+        env["VAE_MANIFOLD_CKPT"] = str(
+            _resolve_asset(profile, str(o.tamp["encoder_path"]), "encoder_path", runtime_dir)
+        )
 
     # opencv's LAPACK and torch both drive one shared libmkl_core; the threaded path returns a
     # corrupt pivot array and cuRobo's get_stomp_cov() dies inside torch.inverse. Planning runs

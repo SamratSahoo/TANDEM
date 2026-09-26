@@ -233,17 +233,15 @@ def planned_speed(tamp: dict) -> tuple[str, str] | None:
     something other than the robot's own speed (``robot.time_dilation_factor``, which homing and the capture
     pose always run at). None when they do not.
 
-    tiptop's resolve_time_dilation_factor, read for a person: the VAE's retiming owns the clock when it is
-    on; else ``time_dilation_factor_literal`` is taken as it is -- 1.0 meaning cuRobo's own pace, which
-    trajectory blending then retimes; else a ``time_dilation_factor`` other than 1.0. Every paper profile
-    sets the literal to 1.0, so "20% speed" would tell a person the arm moves slowly when it does not.
+    tiptop's resolve_time_dilation_factor, read for a person: ``time_dilation_factor_literal`` is taken as
+    it is -- 1.0 meaning cuRobo's own pace, which the trajectory encoder then re-times when
+    ``retime_trajectory`` is on -- else a ``time_dilation_factor`` other than 1.0. Every paper profile sets
+    the literal to 1.0, so "20% speed" would tell a person the arm moves slowly when it does not.
     """
-    if tamp.get("vae_retiming") and tamp.get("vae_manifold_weight"):
-        return "the VAE's timing", "vae_retiming"
     literal = tamp.get("time_dilation_factor_literal")
     if literal is not None:
         if float(literal) >= 1.0:
-            pace = "blending's pace" if tamp.get("blend_trajectory") else "full speed"
+            pace = "the encoder's pace" if tamp.get("retime_trajectory") else "full speed"
             return pace, f"time_dilation_factor_literal {float(literal):g}"
         return f"{float(literal):.0%}", "time_dilation_factor_literal"
     tdf = tamp.get("time_dilation_factor")

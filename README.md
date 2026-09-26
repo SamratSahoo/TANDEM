@@ -56,7 +56,7 @@ question again.
 ### 3. Robot
 
 The NUC runs two programs: [DROID](https://github.com/SamratSahoo/droid/tree/TANDEM)'s server, which drives the arm and gripper through [polymetis](https://facebookresearch.github.io/fairo/polymetis/)
-(teleop uses it), and TiPToP's [shim](https://github.com/SamratSahoo/tiptop/blob/682047493b88e5301c6b2b49da914ea4f173e5d9/bamboo_polymetis_shim.py), which the planner uses to control the arm. Do steps 1–4 on the NUC.
+(teleop uses it), and TiPToP's [shim](https://github.com/SamratSahoo/tiptop/blob/6cabf0f598515c5e149627456c0fdd889cc701d4/bamboo_polymetis_shim.py), which the planner uses to control the arm. Do steps 1–4 on the NUC.
 
 1. **Install DROID.** Follow DROID's NUC guide
    ([Docker](https://github.com/SamratSahoo/droid/blob/TANDEM/docs/software-setup/docker.md) or
@@ -73,7 +73,7 @@ The NUC runs two programs: [DROID](https://github.com/SamratSahoo/droid/tree/TAN
 2. **Add TiPToP's shim.** In the DROID checkout, with DROID's polymetis environment active:
 
    ```bash
-   curl -LO https://raw.githubusercontent.com/SamratSahoo/tiptop/682047493b88e5301c6b2b49da914ea4f173e5d9/bamboo_polymetis_shim.py
+   curl -LO https://raw.githubusercontent.com/SamratSahoo/tiptop/6cabf0f598515c5e149627456c0fdd889cc701d4/bamboo_polymetis_shim.py
    pip install pyzmq msgpack
    ```
 
@@ -157,7 +157,7 @@ To fill it in:
   describes. DROID writes [`droid/calibration/calibration_info.json`](https://github.com/SamratSahoo/droid/blob/TANDEM/droid/calibration/calibration_info.json) in the same format. Copy each
   `"<serial>_left"` entry into the rig's file under the bare serial (`"32439448_left"` becomes `"32439448"`).
 - **Wrist camera:** run `tandem runtime run calibrate-wrist-cam`, following TiPToP's
-  [guide](https://github.com/SamratSahoo/tiptop/blob/682047493b88e5301c6b2b49da914ea4f173e5d9/docs/getting-started.md)
+  [guide](https://github.com/SamratSahoo/tiptop/blob/6cabf0f598515c5e149627456c0fdd889cc701d4/docs/getting-started.md)
   but skipping its Bamboo controller step (the shim replaces it). It writes the entry for you.
 - **Any other tool:** write the entry yourself. A 4×4 transform `T` becomes `T[:3, 3]` followed by
   `Rotation.from_matrix(T[:3, :3]).as_euler("xyz")`.

@@ -1,4 +1,4 @@
-"""TiPToP at the TANDEM branches (tiptop 6820474 / cuTAMP fc8f233): what tandem accepts, renders and builds,
+"""TiPToP at the TANDEM branches (tiptop 6cabf0f / cuTAMP fc8f233): what tandem accepts, renders and builds,
 checked against them.
 
 A bump of the planner changes three things on tandem's side, and each can go wrong without an error:
@@ -153,8 +153,12 @@ def _keys_tiptop_reads(tiptop: Path) -> dict[str, set[str]]:
 def test_tandem_accepts_exactly_the_tamp_keys_the_pinned_tiptop_reads():
     read = _keys_tiptop_reads(_sources() / "tiptop")
     # The extraction itself is sound: it finds knobs of every shape tiptop reads them in.
-    shapes = {"vae_retiming", "retime_scale", "m2t2_num_runs", "posture_grasp_roll", "smooth_weight"}
+    shapes = {"encoder_weight", "retime_trajectory", "m2t2_num_runs", "posture_grasp_roll", "smooth_weight"}
     assert shapes <= set(read)
+    # tiptop also lists them itself now, and refuses any other key when it loads the overrides.
+    supported = _override_keys(_sources()).SUPPORTED_OVERRIDE_KEYS
+    assert tamp_keys.ALL_KEYS == supported - set(tamp_keys.REFUSED)
+    assert set(tamp_keys.REFUSED) <= supported
 
     unhandled = sorted(set(read) - tamp_keys.ALL_KEYS - set(tamp_keys.REFUSED))
     assert not unhandled, (
@@ -237,24 +241,28 @@ def test_the_perception_keys_are_rendered_where_the_pinned_tiptop_reads_them():
     assert 'cfg.perception.m2t2.get("num_runs"' in wrapper
 
 
-def test_the_enumerated_blend_settings_are_the_ones_tiptop_accepts():
-    module = _parse(_sources() / "tiptop" / "tiptop" / "trajectory_blending.py")
-    fn = _function(module, "resolve_blend_config")
-    variable_to_key = {
-        "mode": "blend_mode",
-        "pace_mode": "blend_pace",
-        "boundary_mode": "blend_boundary_mode",
-    }
-    theirs = {
-        variable_to_key[n.left.id]: frozenset(e.value for e in n.comparators[0].elts)
-        for n in ast.walk(fn)
-        if isinstance(n, ast.Compare)
-        and isinstance(n.ops[0], ast.NotIn)
-        and isinstance(n.left, ast.Name)
-        and n.left.id in variable_to_key
-    }
-    assert theirs == tamp_keys.ENUMS
-    assert "vae" in tamp_keys.ENUMS["blend_mode"]
+def test_the_enumerated_settings_are_the_ones_tiptop_accepts():
+    """retime_mode is tiptop's only enumerated knob now, and check_override_keys accepts one value."""
+    keys = _override_keys(_sources())
+    keys.check_override_keys({"retime_mode": "encoder"})
+    for other in ("spline", "flow", "vae", "Encoder"):
+        with pytest.raises(ValueError):
+            keys.check_override_keys({"retime_mode": other})
+    assert tamp_keys.ENUMS == {"retime_mode": frozenset({"encoder"})}
+
+
+def test_every_paper_profile_renders_overrides_the_pinned_tiptop_loads(machine_rig, tmp_path):
+    """The sidecar loads the rendered overrides through tiptop's _load_curobo_overrides, which refuses a key
+    it does not read, retime_mode other than "encoder", and retime_trajectory without encoder_path."""
+    from helpers import builtin_path
+
+    from tandem.core import profiles
+
+    keys = _override_keys(_sources())
+    for name in profiles.BUILTIN:
+        profile = profiles.load_file(builtin_path(name), name=name)
+        rendered = render.render_tamp_overrides(profile, resolve_profile(profile, machine_rig), runtime_dir=tmp_path)
+        keys.check_override_keys(rendered)
 
 
 # --- the sidecar, against the pinned tiptop --------------------------------------------------------
@@ -366,6 +374,17 @@ def test_the_pinned_tiptop_and_cutamp_are_a_pair():
 # --- the monorepo's own configs --------------------------------------------------------------------
 
 
+def _override_keys(sources: Path):
+    """tiptop's own list of the tamp_overrides keys it reads (tiptop/override_keys.py), loaded on its own: it
+    imports nothing."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("tiptop_override_keys", sources / "tiptop/tiptop/override_keys.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _fixture_overrides(name: str) -> dict:
     return dict(_yaml.load((FIXTURES / name).read_text())["tamp_overrides"])
 
@@ -392,13 +411,19 @@ def test_the_fixtures_cover_what_the_monorepo_configs_use():
 
 @pytest.mark.parametrize("name", FIXTURE_FILES)
 def test_a_monorepo_config_validates_whole(name):
+    """The configs predate tiptop's re-timing rename. Each still loads: renamed keys under their new names,
+    and the two settings that only restate what tiptop still does (vae_retiming: false, blend_mode: vae)
+    dropped. Nothing else the config sets is lost."""
     raw = _fixture_overrides(name)
     out = validate_tamp(raw)
-    assert set(out) == set(raw), "nothing the config sets is dropped"
-    assert out["blend_mode"] == "vae" and out["traj_length_norm"] == "inf"
+    kept = {tamp_keys.RENAMED.get(k, k) for k in raw if k not in tamp_keys.REMOVED}
+    assert set(out) == kept, "nothing the config sets is dropped"
+    assert raw["blend_mode"] == "vae" and raw["vae_retiming"] is False
+    assert out["retime_trajectory"] is True and out["traj_length_norm"] == "inf"
+    assert out["encoder_path"] == raw["vae_path"] and out["encoder_weight"] == raw["vae_manifold_weight"]
     assert out["m2t2_num_runs"] == 60 and isinstance(out["m2t2_num_runs"], int)
     assert out["posture_selection_seeds"] == 12 and out["posture_grasp_roll"] is True
-    assert out["vae_retiming"] is False and out["require_m2t2_grasps"] is False
+    assert out["require_m2t2_grasps"] is False
     for key in (k for k in raw if k.startswith("placement_")):
         assert out[key] == raw[key] and type(out[key]) is tamp_keys.SCALAR_KEYS[key], key
 
@@ -446,7 +471,7 @@ def test_a_null_that_means_something_to_tiptop_is_refused_not_read_as_unset():
         ("ik_num_seeds", 0, "> 0"),
         ("max_motion_refine_attempts", 0, "> 0"),
         ("posture_pos_tol", 0.0, "> 0"),
-        ("blend_boundary_window_sec", 0.0, "> 0"),
+        ("retime_speed_scale", 0.0, "> 0"),
         ("transit_apex_height", -0.1, ">= 0"),
         ("transit_apex_min_dist", -0.1, ">= 0"),
         ("posture_selection_seeds", -1, ">= 0"),
@@ -468,12 +493,11 @@ def test_the_new_knobs_accept_their_meaningful_edge_values():
             "transit_apex_height": 0.0,  # apex off
             "posture_selection_seeds": 0,  # selection off
             "posture_ref": "priors/fr3.npz",
-            "retime_scale": 1.1,
-            "blend_mode": "VAE",
+            "retime_mode": "Encoder",
         }
     )
     assert out["grasp_rank_conf_weight"] == 0.0 and out["posture_ref"] == "priors/fr3.npz"
-    assert out["blend_mode"] == "VAE", "case is tiptop's to fold, and it does"
+    assert out["retime_mode"] == "encoder", "tiptop compares it as written, so it goes over lowercase"
 
 
 # --- rendering and warnings ------------------------------------------------------------------------
@@ -518,13 +542,9 @@ def test_unset_perception_knobs_leave_tiptops_own_defaults_in_force(profile, mac
         ),
         ({"posture_selection_seeds": 1, "posture_rot_tol": 0.1}, "posture_rot_tol only applies"),
         ({"posture_selection_seeds": 12, "posture_ref": "missing.npz"}, "posture_ref does not exist"),
-        ({"retime_scale": 1.1}, "retime_scale only applies when vae_retiming is on"),
-        ({"vae_retiming": True}, "vae_manifold_weight is 0 or unset"),
-        (
-            {"vae_retiming": True, "vae_manifold_weight": 25000.0, "blend_trajectory": True},
-            "trajectory blending (blend_trajectory and every blend_* key) is switched off",
-        ),
-        ({"blend_vae_sample_target": True, "blend_mode": "spline"}, "only applies when blend_mode is 'vae'"),
+        ({"retime_ops": ["Pick"]}, "retime_ops only applies when retime_trajectory is true"),
+        ({"retime_sample_target": True}, "retime_sample_target only applies when retime_trajectory is true"),
+        ({"encoder_weight": 25000.0, "encoder_path": "missing.pt"}, "encoder_path does not exist"),
         ({"transit_apex_min_dist": 0.1}, "transit_apex_min_dist only applies when transit_apex_height"),
     ],
 )
@@ -541,7 +561,7 @@ def test_the_monorepo_v3_settings_raise_none_of_those_warnings(profile, machine_
     problems = [
         p
         for p in render.check_assets(profile, machine_rig, resolve_profile(profile, machine_rig))
-        if "vae_path does not exist" not in p
+        if "encoder_path does not exist" not in p
     ]
     assert problems == []
 
