@@ -44,7 +44,7 @@ Each trial is one directory, under `success/` or `failure/`:
 ```
 
 The videos and arrays join every leg of the trial in order. The episode takes the
-[primary leg](README.md#terms)'s directory name, its `_meta.json`, and its other files except `*.log`. For TiPToP
+[primary leg](README.md#terms)'s directory name, its `_meta.json`, and its other files except `*.log`. For [TiPToP](https://github.com/SamratSahoo/tiptop/tree/TANDEM)
 those are `tiptop_plan.json`, `metadata.json`, `rgb.png` and `perception/`.
 
 A trial with a single leg is not merged: the leg is the episode. The format is the same as hitl-tamp-vla's. To
@@ -58,7 +58,7 @@ The file has one row per frame. The per-leg arrays are listed in
 | array | shape | what it is |
 |---|---|---|
 | `video_time` | `[F]` float64 | Merged episodes only: the frame's time in the joined videos, in seconds. |
-| `action_joint_velocity` | `[F,7]` | The DROID joint-velocity action, if any leg recorded it (TiPToP does). For legs without it, teleop and policy legs copy `cmd_joint_velocity`, and planner legs get `5 × (cmd_joint_position − joint_position)`. |
+| `action_joint_velocity` | `[F,7]` | The [DROID](https://droid-dataset.github.io/) joint-velocity action, if any leg recorded it (TiPToP does). For legs without it, teleop and policy legs copy `cmd_joint_velocity`, and planner legs get `5 × (cmd_joint_position − joint_position)`. |
 
 To match frames to video in a merged episode, use `video_time`. Don't use `frame_time`, which keeps the gaps
 between legs. In a single leg, frame *i* sits `(frame_time[i] − record_start) / (record_stop − record_start)` of
@@ -176,7 +176,7 @@ The proposal's reading of the instruction.
 |---|---|
 | `invented_predicates[]` | `{name, types, instructions}`. `instructions` is the classifier sentence, with `{0}`, `{1}`, … for arguments. |
 | `human_operators[]` | `{phase, name, args, signature, instance, preconditions, add_effects, delete_effects}` for each human phase with an operator. Load one with `tandem.planning.structs.HumanOperator.from_json`. |
-| `surfaces[]`, `movables[]` | The task's object types. |
+| `surfaces[]`, `movables[]` | The object types in the task. |
 | `unrepresented[]` | `{clause, reason}` for each clause the plan leaves out. |
 | `coverage[]` | `{clause, phase}` for each clause. `phase` is `-1` if left out. |
 

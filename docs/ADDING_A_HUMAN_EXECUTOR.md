@@ -1,7 +1,8 @@
 # Adding a human executor
 
-A [human executor](README.md#terms) carries out a human phase and records it as one leg. It decides only
-**how** the phase is done. The proposal picks the phase, and the camera check judges it.
+A [human executor](README.md#terms) carries out a human phase and records it as one leg. It only decides
+**how** the phase is done: the plan decides which phase comes next, and the camera check decides whether it
+worked.
 
 tandem ships one executor, `teleop`. A package can add others, such as a learned policy. The code is in
 `src/tandem/executors/`.
@@ -86,7 +87,7 @@ module light: listing executors imports it.
 | field | meaning |
 |---|---|
 | `profile`, `session_dir` | The validated profile; scratch space (not for recordings). |
-| `rig` | This machine's [rig](CONFIGURATION.md#the-rig): the cameras a leg records from and the robot's address. `None` in a context built by hand; then read `tandem.core.rig.load()`. |
+| `rig` | The [rig](CONFIGURATION.md#the-rig): the cameras a leg records from and the robot's address. `None` in a context built by hand; then read `tandem.core.rig.load()`. |
 | `settings` | tandem's settings. `None` in a session: call `tandem.core.settings.load()` each leg, so `tandem config set` applies at the next hand-off. |
 | `on_log(stream, text)`, `on_emit(payload)`, `on_problem(message)` | Log a line; message every UI subscriber; show the operator a problem until the leg ends. |
 | `options` | The profile's `hitl.human_executor_options.<name>`, or `{}` if unset. |
@@ -160,16 +161,16 @@ Any other exception from `run` fails the trial at `human_policy`, and the sessio
 
 ## The teleop executor
 
-`TeleopExecutor` runs the DROID teleop driver, one process per leg. It needs:
+`TeleopExecutor` runs the [DROID](https://github.com/SamratSahoo/droid/tree/TANDEM) teleop driver, one process per leg. It needs:
 
 - the teleop runtime, from `tandem executors install teleop` ([setup](../README.md#6-teleop)). It holds the
   workstation side of [DROID's TANDEM branch](https://github.com/SamratSahoo/droid/tree/TANDEM) and
-  oculus_reader, in their own environment;
+  [oculus_reader](https://github.com/rail-berkeley/oculus_reader), in their own environment;
 - `teleop.enabled` ([keys](CONFIGURATION.md#tandem-settings-and-credentials)), which the install turns on;
-- a VR headset and controller (Meta Quest).
+- a VR headset and controller ([Meta Quest](https://www.meta.com/quest/)).
 
 tandem sets `DROID_NUC_IP` and `TIPTOP_*_CAMERA_ID` for the driver from the rig, which DROID's
-`droid/misc/parameters.py` reads. To run a DROID checkout and environment of your own instead, set both
+[`droid/misc/parameters.py`](https://github.com/SamratSahoo/droid/blob/TANDEM/droid/misc/parameters.py) reads. To run a DROID checkout and environment of your own instead, set both
 `teleop.droid_dir` and `teleop.python`; the driver then runs there, and the runtime is ignored.
 
 `tandem executors list` checks `teleop.enabled` and the runtime (or both overrides), but not the device. A

@@ -12,11 +12,11 @@ The planner is pluggable. [TiPToP](https://github.com/SamratSahoo/tiptop/tree/TA
 
 You need:
 
-- a Linux x86-64 workstation with an NVIDIA GPU, CUDA 12, ffmpeg and about 25 GB of free disk;
-- a Franka FR3 or Panda with a Robotiq 2F-85 gripper, and its polymetis NUC;
+- a Linux x86-64 workstation with an NVIDIA GPU, CUDA 12, [ffmpeg](https://ffmpeg.org) and about 25 GB of free disk;
+- a [Franka FR3](https://franka.de/products/franka-research-3) or Panda with a [Robotiq 2F-85](https://robotiq.com/products/adaptive-grippers) gripper, and its [polymetis](https://facebookresearch.github.io/fairo/polymetis/) NUC;
 - a wrist ZED camera, 1 third-person ZED camera and the [ZED SDK](https://www.stereolabs.com/developers/release);
 - [pipx](https://pipx.pypa.io) or [uv](https://docs.astral.sh/uv/), and a [Gemini API key](https://aistudio.google.com/apikey);
-- for human phases, a VR headset (Meta Quest). tandem builds the teleop driver's environment itself (step 6);
+- for human phases, a VR headset ([Meta Quest](https://www.meta.com/quest/)). tandem builds the teleop driver's environment itself (step 6);
   the NUC runs [DROID's server](https://github.com/SamratSahoo/droid) (step 3).
 
 Every command below runs on the workstation unless it says otherwise.
@@ -50,12 +50,13 @@ It walks through the setup, in this order:
 6. The paper's five tasks, added as profiles.
 7. Teleop (step 6), if you want it.
 
-It is safe to re-run: it skips what is done. `tandem init --repair` asks everything again.
+You can run it again at any time; it skips steps that are already done. `tandem init --repair` asks every
+question again.
 
 ### 3. Robot
 
-The NUC runs two programs. DROID's server drives the arm and gripper through polymetis, and teleop uses it.
-TiPToP's shim is what the planner talks to. Do steps 1–4 on the NUC.
+The NUC runs two programs: [DROID](https://github.com/SamratSahoo/droid/tree/TANDEM)'s server, which drives the arm and gripper through [polymetis](https://facebookresearch.github.io/fairo/polymetis/)
+(teleop uses it), and TiPToP's [shim](https://github.com/SamratSahoo/tiptop/blob/682047493b88e5301c6b2b49da914ea4f173e5d9/bamboo_polymetis_shim.py), which the planner uses to control the arm. Do steps 1–4 on the NUC.
 
 1. **Install DROID.** Follow DROID's NUC guide
    ([Docker](https://github.com/SamratSahoo/droid/blob/TANDEM/docs/software-setup/docker.md) or
@@ -66,8 +67,8 @@ TiPToP's shim is what the planner talks to. Do steps 1–4 on the NUC.
    git clone -b TANDEM --recurse-submodules https://github.com/SamratSahoo/droid.git
    ```
 
-   Its "Configure Parameters" step sets `robot_ip` (the arm's control box) and `sudo_password` in
-   `droid/misc/parameters.py`. The server needs both.
+   Its ["Configure Parameters"](https://github.com/SamratSahoo/droid/blob/TANDEM/docs/software-setup/docker.md#configure-parameters) step sets `robot_ip` (the arm's control box) and `sudo_password` in
+   [`droid/misc/parameters.py`](https://github.com/SamratSahoo/droid/blob/TANDEM/droid/misc/parameters.py). The server needs both.
 
 2. **Add TiPToP's shim.** In the DROID checkout, with DROID's polymetis environment active:
 
@@ -100,7 +101,7 @@ TiPToP's shim is what the planner talks to. Do steps 1–4 on the NUC.
    tandem doctor
    ```
 
-   The robot rows should pass. If the NUC's address is wrong, run `tandem rig set robot.host 172.16.0.5`.
+   The robot rows should pass. If the NUC's address is wrong, run `tandem rig set robot.host NUC_ADDRESS`, with your NUC's IP address or hostname.
 
 Leave both terminals running while you collect. Steps 3 and 4 are needed again after the NUC restarts.
 
@@ -108,16 +109,16 @@ Leave both terminals running while you collect. Steps 3 and 4 are needed again a
 
 TiPToP asks two servers on every rollout: [M2T2](https://github.com/SamratSahoo/M2T2/tree/TANDEM) for grasps
 and [FoundationStereo](https://github.com/SamratSahoo/FoundationStereo/tree/TANDEM) for depth. `tandem init`
-builds both, with torch compiled for your GPU and their model weights. There is nothing to start by hand:
-`tandem collect` starts a server that isn't running before the session warms up, and stops the ones it started
-when the session ends.
+builds both, with torch compiled for your GPU and their model weights. You don't need to start them yourself:
+`tandem collect` starts any server that isn't running before the session warms up, and stops the ones it
+started when the session ends.
 
 ```bash
 tandem servers status   # installed? answering?
 tandem servers start    # start them ahead of time; they keep running until `tandem servers stop`
 ```
 
-A server on another machine is that machine's to run. Point tandem at it, and tandem won't try to start it:
+If the perception servers are on another machine, point tandem at it:
 
 ```bash
 tandem rig set planners.tiptop.perception.m2t2.url http://HOST:8123
@@ -126,8 +127,7 @@ tandem rig set planners.tiptop.perception.foundation_stereo.url http://HOST:1234
 
 ### 5. Cameras and calibration
 
-The robot and cameras are this machine's [rig](docs/CONFIGURATION.md#the-rig), shared by every profile.
-`tandem init` already asked for them. Change one setting at a time:
+You can configure camera settings through TANDEM:
 
 ```bash
 tandem rig show                                   # the robot, the cameras, and which have extrinsics
@@ -136,7 +136,7 @@ tandem rig set cameras.external_2.serial SERIAL   # roles: hand, external, exter
 ```
 
 **Extrinsics.** Every configured camera needs extrinsics before a session can start. `tandem rig show` and
-`tandem doctor` list the missing ones. They go in the rig's `calibration.json` (`tandem rig path --calibration`),
+`tandem doctor` list the missing ones. They go in `calibration.json` (`tandem rig path --calibration` prints where it is),
 one entry per camera, keyed by serial:
 
 ```json
@@ -152,9 +152,9 @@ relative to the end effector; for an external camera it is relative to the robot
 
 To fill it in:
 
-- **External cameras:** calibrate each from DROID's GUI with the ChArUco board, as DROID's
+- **External cameras:** calibrate each from [DROID's GUI](https://droid-dataset.github.io/droid/example-workflows/data-collection.html) with the [ChArUco board](https://github.com/SamratSahoo/droid/blob/TANDEM/docs/hardware-setup/assembly.md#mounting-calibration-board), as DROID's
   [calibration guide](https://droid-dataset.github.io/droid/example-workflows/calibrating-cameras.html)
-  describes. DROID writes `droid/calibration/calibration_info.json` in the same format. Copy each
+  describes. DROID writes [`droid/calibration/calibration_info.json`](https://github.com/SamratSahoo/droid/blob/TANDEM/droid/calibration/calibration_info.json) in the same format. Copy each
   `"<serial>_left"` entry into the rig's file under the bare serial (`"32439448_left"` becomes `"32439448"`).
 - **Wrist camera:** run `tandem runtime run calibrate-wrist-cam`, following TiPToP's
   [guide](https://github.com/SamratSahoo/tiptop/blob/682047493b88e5301c6b2b49da914ea4f173e5d9/docs/getting-started.md)
@@ -163,8 +163,8 @@ To fill it in:
   `Rotation.from_matrix(T[:3, :3]).as_euler("xyz")`.
 
 Check the result with `tandem runtime run viz-calibration` (the wrist camera) or
-`tandem runtime run viz-calibration --camera external`. `tandem runtime run` points TiPToP's scripts at your
-rig: your NUC, your cameras and this calibration file. Recalibrate a camera whenever it moves.
+`tandem runtime run viz-calibration --camera external`. `tandem runtime run` runs TiPToP's scripts with your
+NUC address, cameras and calibration file. Recalibrate a camera whenever it moves.
 
 ### 6. Teleop
 
@@ -176,12 +176,12 @@ tandem executors list             # teleop should say `ready`
 `tandem init` offers to do this for you. The install fetches the workstation side of
 [DROID](https://github.com/SamratSahoo/droid/tree/TANDEM) and builds a small environment for it, with the ZED
 Python API when the ZED SDK is installed. Human phases then drive the arm through the DROID server from step 3.
-tandem passes the driver your rig's `robot.host` and camera serials, so nothing in DROID needs editing.
+tandem passes the driver your NUC address and camera serials, so you don't need to edit anything in DROID.
 
 Teleop uses a Meta Quest headset, driven with the right controller by default
-(`tandem config set teleop.controller left` switches). The workstation also needs `adb`
-(`sudo apt install adb`), and the headset must be in developer mode and connected by USB. A headset that has
-never run DROID teleop needs its app installed once:
+(`tandem config set teleop.controller left` switches). The workstation also needs [`adb`](https://developer.android.com/tools/adb)
+(`sudo apt install adb`), and the headset must be in [developer mode](https://github.com/SamratSahoo/droid/blob/TANDEM/docs/software-setup/docker.md#configuring-the-oculus-quest) and
+connected by USB. A headset that has never run DROID teleop needs the [oculus_reader](https://github.com/rail-berkeley/oculus_reader) app installed once:
 
 ```bash
 curl -L -o teleop.apk https://media.githubusercontent.com/media/rail-berkeley/oculus_reader/de73f3d259b3c41c4564f70a64682e24aa3ac31c/oculus_reader/APK/teleop-debug.apk
@@ -229,8 +229,8 @@ tandem plan "place the bread inside the box" --image workspace.png
 This needs only the photo and the Gemini key. It prints the phases, who does each, each human phase's magic
 operator and the invented predicates. `-o LABEL` (repeatable) pins object labels.
 
-It also lists any part of the task the plan can't express. That is usually an object that wasn't detected: put
-it on the table, or reword the task.
+If part of the task can't be planned, it says so. Usually an object wasn't detected; put it on the table or
+reword the task.
 
 ### 3. Collect
 
@@ -253,9 +253,9 @@ session warms the planner once, then waits for you. The footer shows the keys ea
 
 > **`p` does not stop the arm.** The current motion segment still finishes. Only the E-stop stops it at once.
 
-After you give the arm back from a `t` hand-off, the planner replans from where you left it. At a human phase,
-the screen says what to do. When you give the arm back, a fresh camera image must show the step done. If it
-doesn't, you get one more try; a trial that still fails is saved as excluded and never exported.
+When you give the arm back after a `t` hand-off, the planner replans from where you left it. At a human phase,
+the screen tells you what to do. When you give the arm back, tandem takes a new camera image to check the step
+is done. If it isn't, you get one more try; a trial that still fails is saved as excluded and never exported.
 
 A robot phase the planner can't plan ends the trial. More in [USAGE.md](docs/USAGE.md#collecting).
 
@@ -269,11 +269,11 @@ tandem export lerobot --repo <hf-user>/my-task --push   # and upload it
 ```
 
 Each trial becomes one episode, with its robot and human legs merged ([on-disk format](docs/DATA.md)).
-`--push` needs a Hugging Face token: `tandem config set-hf-token`, or `HF_TOKEN`.
+`--push` needs a [Hugging Face token](https://huggingface.co/settings/tokens): `tandem config set-hf-token`, or `HF_TOKEN`.
 
 ## Adding a planner
 
-A planner perceives the scene, plans one goal in it, and executes and records that plan. TANDEM does the rest.
+A planner looks at the scene, plans toward one goal, and executes and records the plan. TANDEM handles the rest.
 
 ```bash
 tandem planners new myplanner       # scaffolds ./tandem-myplanner (--sidecar: runs in its own environment)

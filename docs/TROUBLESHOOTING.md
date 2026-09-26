@@ -16,7 +16,7 @@ described in [DATA.md](DATA.md#logs-and-session-files).
 ps aux | grep -E 'tandem|tiptop'   # find the process holding the camera
 ```
 
-Another process holds the camera. Right after a hand-off, TiPToP's save workers free the cameras within a few
+Another process holds the camera. Right after a hand-off, [TiPToP](https://github.com/SamratSahoo/tiptop/tree/TANDEM)'s save workers free the cameras within a few
 seconds, so wait and retry first.
 
 ## "the ZED SDK is not installed …, so ZED cameras will not open"
@@ -42,7 +42,7 @@ A camera in the rig has no entry in the rig's `calibration.json`, so the session
 
 ```bash
 tandem rig show                          # the address tandem uses: robot.host
-tandem rig set robot.host 172.16.0.5     # if that isn't the NUC's address
+tandem rig set robot.host NUC_ADDRESS    # if that isn't the NUC's address
 ```
 
 - `TimeoutError`: nothing answers at that address.
@@ -58,8 +58,8 @@ tandem servers install   # if it says "not installed"
 tandem servers start     # starts it and waits; a failure names its log
 ```
 
-TiPToP asks both servers on every rollout ([step 4](../README.md#4-perception-servers)). A session starts a
-server on this machine that isn't running, so this usually means it isn't built, or it crashed while loading.
+TiPToP asks both servers on every rollout ([step 4](../README.md#4-perception-servers)). Sessions start local
+servers automatically, so this usually means the server isn't built, or it crashed while loading.
 The log is `~/.local/state/tandem/logs/server-<name>.log`. Running out of GPU memory is the usual crash.
 
 For a server on another machine, check its URL (`tandem rig show`):
@@ -111,8 +111,8 @@ again. It adds only what is missing.
 adb devices   # the headset should be listed as "device"
 ```
 
-oculus_reader talks to the headset over `adb` (`sudo apt install adb`). Connect the headset by USB, turn on
-developer mode, and accept the prompt in the headset. A headset that has never run DROID teleop also needs the
+[oculus_reader](https://github.com/rail-berkeley/oculus_reader) talks to the headset over `adb` (`sudo apt install adb`). Connect the headset by USB, turn on
+developer mode, and accept the prompt in the headset. A headset that has never run [DROID](https://github.com/SamratSahoo/droid/tree/TANDEM) teleop also needs the
 app ([step 6](../README.md#6-teleop)).
 
 ## The planner shows as outdated
@@ -165,8 +165,8 @@ tandem profile show <name> --planner   # exactly what the planner receives
 ```
 
 A key missing from that output never applied. `tandem doctor`'s `tamp settings` row flags a key that needs
-another, such as a `placement_*` key without `placement_support: true`. It isn't a typo: a misspelled key stops
-the profile from loading and names the closest key ([details](CONFIGURATION.md#planner-settings)).
+another, such as a `placement_*` key without `placement_support: true`. It isn't a typo; tandem refuses to load a
+profile with a misspelled key and suggests the closest one ([details](CONFIGURATION.md#planner-settings)).
 
 ## The videos won't scrub in the browser
 
@@ -180,7 +180,7 @@ tandem profile migrate   # or tandem init
 ```
 
 Profiles from before version 3 (a directory each, with its own cameras and robot) aren't listed until they are
-moved. Migrating moves them and sets up the rig from them. Nothing is deleted
+moved. Migrating moves them and sets up the rig from them, without deleting anything
 ([details](CONFIGURATION.md#older-profiles)).
 
 ## A profile's planner or executor isn't installed
@@ -195,5 +195,5 @@ still browse, export and edit it.
 
 ## A sidecar dies with "No module named 'tandem_sidecar'"
 
-Your environment's activation (for example pixi's `[activation.env]`) overwrote `PYTHONPATH`, dropping tandem's
+Your environment's activation (for example [pixi](https://pixi.sh)'s `[activation.env]`) overwrote `PYTHONPATH`, dropping tandem's
 `tandem_sidecar` kit. Make it append to `PYTHONPATH` instead ([details](ADDING_A_PLANNER.md#sidecars)).

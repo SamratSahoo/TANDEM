@@ -1,8 +1,8 @@
 """`tandem rig` — this machine's robot, cameras and calibration, which every profile shares.
 
     tandem rig show [--json]          the robot, the cameras (and which are calibrated), each planner's settings
-    tandem rig set KEY VALUE          robot.host 172.16.0.5 · cameras.hand.serial 14846828 ·
-                                      cameras.external_2 null · planners.tiptop.perception.m2t2.url http://gpu:8123
+    tandem rig set KEY VALUE          robot.host NUC_ADDRESS · cameras.hand.serial SERIAL ·
+                                      cameras.external_2 null · planners.tiptop.perception.m2t2.url http://HOST:8123
     tandem rig edit                   rig.yml in $EDITOR, validated on save
     tandem rig path [--calibration]   where rig.yml is, or its calibration file
 
@@ -195,7 +195,7 @@ def _shown(value: Any) -> str:
 # --------------------------------------------------------------------------- changing it
 
 
-@app.command("set", help="Change one rig setting, e.g. `tandem rig set robot.host 172.16.0.5`. `null` removes one.")
+@app.command("set", help="Change one rig setting, e.g. `tandem rig set robot.host NUC_ADDRESS`. `null` removes one.")
 def set_(
     key: str = typer.Argument(..., help="Dotted key: robot.host, cameras.hand.serial, planners.tiptop.robot.port, ..."),
     value: str = typer.Argument(..., help="The new value, as YAML (a serial stays text); null removes the key."),

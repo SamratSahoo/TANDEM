@@ -231,7 +231,7 @@ class itself.
 | `CAPABILITIES` | yes | See [Capabilities](#capabilities). |
 | `recipe` | no | A [`RuntimeRecipe`](#a-runtime-recipe). `None` means pure Python. |
 | `OPTIONS` | no | The task's settings: each key of a profile's `planner.options`, with a one-line description. |
-| `RIG_OPTIONS` | no | This machine's settings, shared by every profile: each key of `planners.<name>` in [rig.yml](CONFIGURATION.md#the-rig), with a one-line description. A key can't be in both. |
+| `RIG_OPTIONS` | no | Settings for this workstation, shared by all profiles: each key of `planners.<name>` in [rig.yml](CONFIGURATION.md#the-rig), with a one-line description. A key can't be in both. |
 
 A bad declaration raises one `TandemError` at import that lists every problem. For a shared base class,
 pass `abstract=True` (`class MyBase(Planner, abstract=True)`). It is not checked and can't be registered.
@@ -244,9 +244,9 @@ What you get without writing it:
 | `require_ready` | Checks that the recipe's runtime is installed. |
 | `capture_frame`, `move_to_joints` | Raise `UnsupportedVerb`. A session won't start without `capture_frame` when phase planning is on with `hitl.check_human_effects`, `check_human_preconditions` or `check_tamp_effects`. |
 | `create(ctx)` | Runs `validate_options(ctx.options)` and `validate_rig_options(ctx.rig_options)`, then `cls(ctx)`. |
-| `runtime_env(*, rig, settings=None)` | Returns `{}`. It is what `tandem runtime run` and `shell` add to the environment of the planner's own scripts. TiPToP's writes a `tiptop.yml` from the rig and points `$TIPTOP_CONFIG` at it. |
+| `runtime_env(*, rig, settings=None)` | Returns `{}`. It is what `tandem runtime run` and `shell` add to the environment of the planner's own scripts. [TiPToP](https://github.com/SamratSahoo/tiptop/tree/TANDEM)'s writes a `tiptop.yml` from the rig and points `$TIPTOP_CONFIG` at it. |
 | `replay(rollout_dir, *, settings=None)` | Raises `UnsupportedVerb`, so `tandem traj open` isn't available. |
-| `services(settings=None)` | Not defined, so the planner runs no helper servers. Define it to return servers such as TiPToP's M2T2 and FoundationStereo, each with `name`, `title`, `runtime(settings)` (a `RecipeRuntime`), `url()`, `local()`, `healthy()`, `started_pid()`, `log_path`, `start()` and `stop()`. `tandem init` builds their runtimes and `tandem servers` manages them; starting them for a session is the planner's own (TiPToP's backend does it in `warm` and `perceive`). |
+| `services(settings=None)` | Not defined, so the planner runs no helper servers. Define it to return servers such as TiPToP's [M2T2](https://github.com/SamratSahoo/M2T2/tree/TANDEM) and [FoundationStereo](https://github.com/SamratSahoo/FoundationStereo/tree/TANDEM), each with `name`, `title`, `runtime(settings)` (a `RecipeRuntime`), `url()`, `local()`, `healthy()`, `started_pid()`, `log_path`, `start()` and `stop()`. `tandem init` builds their runtimes and `tandem servers` manages them; the planner starts them for a session itself (TiPToP's backend does it in `warm` and `perceive`). |
 | `runtime(settings)`, `runtime_root(settings)` | The runtime at `~/.local/share/tandem/runtimes/<name>` (or `$TANDEM_RUNTIMES_DIR`). `None` without a recipe. |
 
 Inside a planner you can use:
@@ -256,7 +256,7 @@ Inside a planner you can use:
 | `self.ctx` | The session's `BackendContext`: `profile`, `session_dir`, `output_dir`, `execute`, `record`, `on_log`, `options`, `settings`, `session_id`, `task`, `events_file`, `runtime_dir`, `rig`, `rig_options`. |
 | `self.options` | The validated task settings. |
 | `self.rig_options` | The validated machine settings. |
-| `self.rig` | The machine's rig: `robot.host`, `robot.type`, `cameras`, `calibration_file()`. |
+| `self.rig` | The rig: `robot.host`, `robot.type`, `cameras`, `calibration_file()`. |
 | `self.log(text)` | Writes a line to the session log. |
 
 Any `tandem.planners.base.BackendFactory` also works in place of a `Planner` subclass. It needs `info`,
@@ -331,7 +331,7 @@ Rules for the script:
   warm-up with its error, instead of a sidecar that never starts. The conformance kit checks the import order.
 - **Import only `tandem_sidecar` from tandem.** It is one standard-library file (Python 3.8+), and tandem puts
   it on the script's `PYTHONPATH`.
-- **Append to `PYTHONPATH`; don't replace it.** If your pixi environment sets `PYTHONPATH` (for example in
+- **Append to `PYTHONPATH`; don't replace it.** If your [pixi](https://pixi.sh) environment sets `PYTHONPATH` (for example in
   `[activation.env]`), the sidecar dies with `No module named 'tandem_sidecar'`. To run a sidecar by hand,
   put tandem's `planners/sidecar_kit` directory on `PYTHONPATH` yourself.
 
@@ -445,7 +445,7 @@ Other details:
   that take their version from git.
 - **Offline installs** use `--sources DIR`, `$TANDEM_PLANNER_SOURCES` or `tandem planners bundle`
   ([Offline install](CONFIGURATION.md#offline-install)).
-- **ffmpeg:** merging legs uses the environment's `bin/ffmpeg`, or the one on `PATH`.
+- **[ffmpeg](https://ffmpeg.org):** merging legs uses the environment's `bin/ffmpeg`, or the one on `PATH`.
 
 ## Options and doctor rows
 
@@ -477,7 +477,7 @@ People set them like this:
 
 ```bash
 tandem planners use myplanner --option scene_file=kitchen.yml   # a task setting
-tandem rig set planners.myplanner.server_url http://gpu-box:9000 # a machine setting
+tandem rig set planners.myplanner.server_url http://HOST:9000 # a machine setting
 ```
 
 tandem calls `validate_options(options)` when a profile loads, and `validate_rig_options(options)` when the
@@ -596,8 +596,8 @@ learns to echo its commands.
 dataset key. Only those names are merged, viewed and exported. Only cameras that every leg recorded are
 joined.
 
-`tandem.core.trajectories.is_complete(leg_dir)` checks a leg against this contract. Any other files are the
-planner's own, and the merge copies the first planner leg's into the episode. The merged layout is in
+`tandem.core.trajectories.is_complete(leg_dir)` checks a leg against this contract. Any other files belong to
+the planner, and the merge copies the first planner leg's into the episode. The merged layout is in
 [Episode layout](DATA.md#episode-layout).
 
 Edge cases:
@@ -630,7 +630,7 @@ It tests the declarations, options, machine settings, doctor rows, sidecar scrip
 With `records_legs`, it also tests the recording. It skips anything the planner doesn't declare or ship.
 
 The backend is always built for a stand-in machine (`stand_in_rig`): the default arm at 172.16.0.2, a hand
-camera and an external camera, and no extrinsics. It never reads this machine's rig.yml. So a planner that
+camera and an external camera, and no extrinsics. It never reads your rig.yml. So a planner that
 reads `self.rig.robot.host` runs, and the tests don't depend on the machine.
 
 Two switches hold the planner to what phase planning needs. Both are on by default, and the scaffold passes

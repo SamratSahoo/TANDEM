@@ -5,7 +5,7 @@ To set up and start collecting, begin with the [repo README](../README.md).
 | I want to… | Read |
 |---|---|
 | Look up a command, or run collection, `plan`, the web UI, review or export | [USAGE.md](USAGE.md) |
-| Change a setting: profiles, the paper's five tasks, the rig, `hitl:`, TiPToP, credentials, the runtime | [CONFIGURATION.md](CONFIGURATION.md) |
+| Change a setting: profiles, the paper's five tasks, the rig, `hitl:`, [TiPToP](https://github.com/SamratSahoo/tiptop/tree/TANDEM), credentials, the runtime | [CONFIGURATION.md](CONFIGURATION.md) |
 | Understand the files a trial writes, or the logs | [DATA.md](DATA.md) |
 | Fix something that went wrong | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) |
 | Plug in another task and motion planner | [ADDING_A_PLANNER.md](ADDING_A_PLANNER.md) |
@@ -18,7 +18,8 @@ To set up and start collecting, begin with the [repo README](../README.md).
 - **profile**: one task, kept in one YAML file (`~/tandem-data/profiles/<name>.yml` by default). It holds the
   prompt, the phase-planning settings and the planner's settings. Its trajectories go in
   `~/tandem-data/trajectories/<name>/`. `tandem init` adds the paper's five tasks as profiles.
-- **rig**: this machine's robot, cameras and calibration, in `~/.config/tandem/rig.yml`. Every profile shares it.
+- **rig**: the robot, camera and calibration settings for this workstation, in `~/.config/tandem/rig.yml`. All
+  profiles use the same rig.
 
 ### Phase planning
 
@@ -56,8 +57,8 @@ To set up and start collecting, begin with the [repo README](../README.md).
 
 ### Planners
 
-- **runtime**: a planner's pinned sources, and usually a pixi environment, built by `tandem planners install`.
+- **runtime**: a planner's pinned sources, and usually a [pixi](https://pixi.sh) environment, built by `tandem planners install`.
 - **sidecar**: a planner running as a subprocess that tandem drives over JSON lines, inside its runtime if it
   has one.
 - **DATAFARM**: TiPToP `tamp` motion costs (a VAE manifold and RND novelty) that make planned motion resemble
-  DROID teleop motion.
+  [DROID](https://github.com/SamratSahoo/droid/tree/TANDEM) teleop motion.

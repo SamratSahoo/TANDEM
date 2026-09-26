@@ -47,7 +47,7 @@ async def change_rig(body: dict[str, Any] = Body(...)) -> dict:
     value leaves rig.yml as it was; and it is a round trip, so the comments a person wrote in it survive.
     """
     if not body:
-        raise TandemError("Nothing to change.", hint='Send the settings to change, such as {"robot.host": "172.16.0.5"}.')
+        raise TandemError("Nothing to change.", hint='Send the settings to change, such as {"robot.host": "NUC_ADDRESS"}.')
     from tandem.core import layout
 
     for key in body:

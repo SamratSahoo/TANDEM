@@ -10,7 +10,7 @@ tandem traj list --status success                             # review what was 
 tandem export lerobot --repo <hf-user>/bread-box --push       # build and upload a dataset
 ```
 
-Each step has a section below. Every command is listed at the end, in [Commands](#commands).
+Each step has its own section below, and every command is listed at the end in [Commands](#commands).
 
 ## Collecting
 
@@ -22,8 +22,8 @@ tandem collect --no-execute               # plan only; the arm never moves
 tandem collect --web                      # drive the session from the browser
 ```
 
-The session warms the planner once, then loops: task prompt, trial, label prompt. The footer shows the keys
-each state accepts.
+The session starts the planner once, then repeats: task prompt, trial, label prompt. The footer shows which
+keys work at each step.
 
 | state | keys |
 |---|---|
@@ -35,7 +35,7 @@ each state accepts.
 | any | `q` or Ctrl-C finish |
 
 > **Preempt does not stop motion.** `p` stops further plan steps, but the motion segment already sent still
-> finishes (TiPToP has no cooperative stop). Only the E-stop stops the arm at once.
+> finishes ([TiPToP](https://github.com/SamratSahoo/tiptop/tree/TANDEM) has no cooperative stop). Only the E-stop stops the arm at once.
 
 **Preempt** (`p`) files the attempt's legs as aborted. The session stays warm for the next trial.
 
@@ -71,8 +71,8 @@ operator, and the invented predicates. It needs only tandem (Python 3.10+) and a
 [Gemini key](CONFIGURATION.md#tandem-settings-and-credentials): no runtime, GPU or robot. Answers vary between
 runs.
 
-**It flags any part of the instruction the plan can't express.** That is usually an object that wasn't
-detected. Put it on the table, or reword the task.
+**It tells you if part of the instruction can't be planned.** Usually an object wasn't detected; put it on
+the table or reword the task.
 
 | flag | what it does |
 |---|---|
@@ -142,7 +142,7 @@ tandem export lerobot --repo <owner>/<name> --push   # and uploads it
 tandem export manifest --out index.json              # a JSON index of the trajectories (default: stdout)
 ```
 
-`export lerobot` writes a LeRobot v3.0 dataset in `lerobot/droid_1.0.1`'s schema, for π₀.₅-DROID fine-tuning.
+`export lerobot` writes a [LeRobot](https://github.com/huggingface/lerobot) v3.0 dataset in [`lerobot/droid_1.0.1`](https://huggingface.co/datasets/lerobot/droid_1.0.1)'s schema, for [π₀.₅-DROID](https://github.com/Physical-Intelligence/openpi) fine-tuning.
 Each run is logged to `export.log` ([logs](DATA.md#logs-and-session-files)).
 
 **Only `success/` is exported.** These are skipped, each with its reason:
@@ -150,7 +150,7 @@ Each run is logged to `export.log` ([logs](DATA.md#logs-and-session-files)).
 - settled trials, unless a forced relabel overruled them;
 - episodes whose `cmd_gripper` isn't binary;
 - episodes missing an exterior or wrist video;
-- episodes whose state arrays don't fit DROID's schema.
+- episodes whose state arrays don't fit [DROID](https://droid-dataset.github.io/)'s schema.
 
 What goes into each episode:
 
@@ -181,10 +181,10 @@ it is.
 
 - **Trajectories:** click a plot to seek every video. A merged trajectory's ribbon shows who drove each
   stretch. Shaded bands mark the frames π₀.₅-DROID's training drops as idle.
-- **Collect:** the terminal's controls. Any part of the instruction the plan leaves out shows before the arm
-  moves, and the label prompt has an inline review.
-- **Profiles:** the paper's five and yours. Create one from a task or as a copy, edit one, and see what its
-  planner receives.
+- **Collect:** the same controls as the terminal. Anything the plan leaves out is shown before the arm moves,
+  and you can review the trial right at the label prompt.
+- **Profiles:** the paper's five and your own. You can create one from a task or as a copy, edit it, and see
+  what its planner receives.
 - **Settings:** the rig (robot, cameras, calibration, each planner's machine settings), credentials, paths,
   catalogs, runtime status and `tandem doctor`.
 
@@ -195,7 +195,7 @@ Flags: `-p/--port`, `--host`, `--no-open`, and `--profile` (open on a profile an
 ```bash
 curl http://127.0.0.1:8787/api/rig
 curl -X PATCH http://127.0.0.1:8787/api/rig -H 'Content-Type: application/json' \
-     -d '{"robot.host": "172.16.0.5", "cameras.external_2": null}'
+     -d '{"robot.host": "NUC_ADDRESS", "cameras.external_2": null}'
 ```
 
 | route | returns or does |
@@ -208,7 +208,7 @@ curl -X PATCH http://127.0.0.1:8787/api/rig -H 'Content-Type: application/json' 
 | `GET /api/sessions/{id}` | The [session summary](DATA.md#session-summary) and its last 500 log lines. |
 | `GET /api/media/{profile}/{id}/{file}` | A trajectory video, served with HTTP Range. A proxy in front must pass `Range` headers. |
 
-No endpoint installs a planner. Catalog rows carry the `install_command` to run instead.
+The API can't install a planner. Each catalog row includes the `install_command` to run instead.
 
 ## Commands
 
@@ -222,7 +222,7 @@ first: `tandem --debug collect` shows full tracebacks, and `--no-color` (or `NO_
 
 | command | what it does |
 |---|---|
-| `tandem init` | Checks, data directory, planner runtime and its [servers](#servers), Gemini key, [the rig](CONFIGURATION.md#the-rig), [the paper's five](CONFIGURATION.md#the-papers-five) and teleop. Moves [older profiles](CONFIGURATION.md#older-profiles). Skips steps already done. |
+| `tandem init` | Checks, data directory, planner runtime and its [servers](#servers), [Gemini key](https://aistudio.google.com/apikey), [the rig](CONFIGURATION.md#the-rig), [the paper's five](CONFIGURATION.md#the-papers-five) and teleop. Moves [older profiles](CONFIGURATION.md#older-profiles). Skips steps already done. |
 | `tandem doctor` | Runs every check and says how to fix what fails. Changes nothing. |
 
 | flag | what it does |
@@ -256,7 +256,7 @@ one YAML file each.
 
 ### Rig
 
-`tandem rig show|set|edit|path` manages [this machine's robot, cameras and calibration](CONFIGURATION.md#the-rig).
+`tandem rig show|set|edit|path` manages [the robot, camera and calibration settings](CONFIGURATION.md#the-rig).
 `set KEY VALUE` takes one dotted key, such as `robot.host`, and `null` removes it. `path --calibration` prints
 where the extrinsics file is.
 
@@ -289,11 +289,11 @@ such as `ui.port`. The `set-*` commands store a credential typed at a prompt, or
 `--planner NAME` or `-p/--profile` picks another.
 
 ```bash
-tandem runtime run viz-calibration --camera external   # a planner script, pointed at the rig
+tandem runtime run viz-calibration --camera external   # a planner script, run with your rig settings
 ```
 
-- `run` and `shell` point the planner's own scripts at [the rig](CONFIGURATION.md#the-rig). `--raw` uses the
-  planner's stock config instead.
+- `run` and `shell` run the planner's own scripts with your [rig](CONFIGURATION.md#the-rig) settings. `--raw`
+  uses the planner's stock config instead.
 - tandem's options (`--planner`, `-p`, `--raw`) go before the script's name, and the script's own after it.
   `--` still works.
 - `build` builds or repairs the runtime (`--force` refetches, plus `--env-only` and `--sources DIR`).
@@ -301,8 +301,8 @@ tandem runtime run viz-calibration --camera external   # a planner script, point
 
 ### Servers
 
-`tandem servers install|status|start|stop` manages the helper servers the planner calls: TiPToP's M2T2 (grasps)
-and FoundationStereo (depth), at the URLs in [the rig](CONFIGURATION.md#tiptop-options). `tandem init` builds
+`tandem servers install|status|start|stop` manages the helper servers the planner calls: TiPToP's [M2T2](https://github.com/SamratSahoo/M2T2/tree/TANDEM) (grasps)
+and [FoundationStereo](https://github.com/SamratSahoo/FoundationStereo/tree/TANDEM) (depth), at the URLs in [the rig](CONFIGURATION.md#tiptop-options). `tandem init` builds
 them, and `tandem collect` starts any that are down and stops the ones it started when it ends.
 
 | command | what it does |
@@ -312,5 +312,5 @@ them, and `tandem collect` starts any that are down and stops the ones it starte
 | `servers start [NAME]` | Start those that are down, wait for each to load, and leave them running. |
 | `servers stop [NAME]` | Stop the ones tandem started, such as after a crashed session. |
 
-`NAME` is `m2t2` or `foundation_stereo`. A server whose URL is another machine's is never started. Each
-server's log is `server-<name>.log` ([logs](DATA.md#logs-and-session-files)).
+`NAME` is `m2t2` or `foundation_stereo`. tandem never starts a server whose URL points at another machine.
+Each server's log is `server-<name>.log` ([logs](DATA.md#logs-and-session-files)).
