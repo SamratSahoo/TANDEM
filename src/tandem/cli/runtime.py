@@ -337,9 +337,13 @@ def run_build(
             progress.advance(task)
             progress.update(task, step="done", description="environment only" if env_only else "done")
     except TandemError as exc:
-        name = planner or getattr(getattr(rt, "recipe", None), "planner", None)
-        if name:
-            command = f"tandem planners install {name}" + (f" --sources {sources_dir}" if sources_dir else "")
+        recipe_ = getattr(rt, "recipe", None)
+        name = planner or getattr(recipe_, "planner", None)
+        base_command = (
+            getattr(recipe_, "build_command", None) if recipe_ is not None and not planner else None
+        ) or (f"tandem planners install {name}" if name else None)
+        if base_command:
+            command = base_command + (f" --sources {sources_dir}" if sources_dir else "")
             again = f"`{command}`"
         else:
             again = "the same command"

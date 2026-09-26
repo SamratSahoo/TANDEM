@@ -17,8 +17,8 @@ You need:
 - a Franka FR3 or Panda with a Robotiq 2F-85 gripper, and its polymetis NUC;
 - 2–3 ZED cameras and the [ZED SDK](https://www.stereolabs.com/developers/release);
 - [pipx](https://pipx.pypa.io) or [uv](https://docs.astral.sh/uv/), and a [Gemini API key](https://aistudio.google.com/apikey);
-- for human phases, a [DROID fork](https://github.com/SamratSahoo/droid) checkout and environment, with a VR
-  headset or a SpaceMouse.
+- for human phases, a VR headset (Meta Quest) or a SpaceMouse. tandem builds the teleop driver's environment
+  itself (step 6); the NUC runs [DROID's server](https://github.com/SamratSahoo/droid) (step 3).
 
 Every command below runs on the workstation unless it says otherwise.
 
@@ -133,17 +133,24 @@ rig: your NUC, your cameras and this calibration file. Recalibrate a camera when
 ### 6. Teleop
 
 ```bash
-tandem config set teleop.enabled true
-tandem config set teleop.droid_dir /path/to/droid
-tandem config set teleop.python /path/to/droid/env/bin/python
+tandem executors install teleop              # builds the teleop driver's environment and turns teleop on
 tandem config set teleop.device spacemouse   # default: vr
 tandem executors list                        # teleop should say `ready`
 ```
 
-`tandem init` offers to do this for you. Human phases run TANDEM's teleop driver in the DROID fork's
-environment, through the DROID server from step 3. With VR, `teleop.controller left|right` picks the hand.
+`tandem init` offers to do this for you. The install fetches the workstation side of
+[DROID](https://github.com/SamratSahoo/droid/tree/TANDEM) and builds a small environment for it, with the ZED
+Python API when the ZED SDK is installed. Human phases then drive the arm through the DROID server from step 3.
+tandem passes the driver your rig's `robot.host` and camera serials, so nothing in DROID needs editing.
 
-The fork's `droid/misc/parameters.py` must name your NUC: set `nuc_ip` to the rig's `robot.host`.
+With VR, `teleop.controller left|right` picks the hand. VR also needs `adb` (`sudo apt install adb`) and the
+headset in developer mode, connected by USB. A headset that has never run DROID teleop needs its app installed
+once:
+
+```bash
+curl -L -o teleop.apk https://media.githubusercontent.com/media/rail-berkeley/oculus_reader/de73f3d259b3c41c4564f70a64682e24aa3ac31c/oculus_reader/APK/teleop-debug.apk
+adb install teleop.apk
+```
 
 ### 7. Check the setup
 

@@ -6,12 +6,14 @@ through teleop is the one that ships, and a package adds another through the
 
     tandem executors list             every executor, whether it is ready here, which one is in use
     tandem executors use NAME         make a profile's human phases run with it
+    tandem executors install teleop   build the teleop driver's runtime, and turn teleop on
 
-There is no install step. An executor is a Python package, and what it needs on this machine (a DROID
-checkout, a policy server) is its own requirements list, which the listing shows with whatever is
-still unmet -- the same way ``tandem planners`` shows whether a planner's runtime is built. As there,
-choosing one that is not ready yet is allowed and warned about, never refused: a profile is edited
-wherever it is edited, and collected with on the machine that has the hardware.
+An executor is a Python package, and what it needs on this machine (a policy server, say) is its own
+requirements list, which the listing shows with whatever is still unmet -- the same way ``tandem
+planners`` shows whether a planner's runtime is built. Teleop is the one with a runtime tandem builds:
+DROID's workstation side (``tandem.teleop.recipe``). As with planners, choosing an executor that is not
+ready yet is allowed and warned about, never refused: a profile is edited wherever it is edited, and
+collected with on the machine that has the hardware.
 
 The payloads here are also what the web UI reads (``server/routes/planners.py``).
 """
@@ -19,9 +21,11 @@ The payloads here are also what the web UI reads (``server/routes/planners.py``)
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import typer
+from rich.markup import escape
 from rich.text import Text
 
 from tandem.cli import theme
@@ -194,3 +198,106 @@ def use(
             "Phase planning is off in this profile, so nothing runs a human phase until it is on",
             "hitl.enabled",
         )
+
+
+# --------------------------------------------------------------------------- the teleop runtime
+
+
+def _runtime(name: str, cfg: Any):
+    """The runtime ``name`` is driven through. Only teleop has one tandem builds."""
+    if name != "teleop":
+        from tandem.executors import base
+
+        base.check_name(name)
+        raise typer.BadParameter(f"{name} has no runtime for tandem to install", param_hint="NAME")
+    from tandem.teleop import recipe
+
+    return recipe.runtime(cfg)
+
+
+def install_teleop(*, force: bool = False, sources: Path | None = None, yes: bool = False) -> bool:
+    """Build the teleop runtime (skipped when it is built at its pins), then turn teleop on.
+
+    Shared by `tandem executors install teleop` and `tandem init`. Returns whether teleop is ready to
+    drive with this runtime: False when the person declined the build.
+    """
+    from tandem.cli import runtime as runtime_cli
+
+    cfg = settings_mod.load()
+    rt = _runtime("teleop", cfg)
+    title = rt.recipe.display_name
+    status = rt.status()
+    pending = runtime_cli.optional_steps_to_run(rt)
+    if status.installed and not status.mismatched(rt.recipe.pins) and not force and not pending:
+        theme.ok(f"The {title} runtime is already installed", str(status.path or ""))
+        runtime_cli.say_notes(status)
+    else:
+        interactive = theme.is_tty() and not yes
+        if runtime_cli.needs_pixi(rt):
+            runtime_cli.ensure_pixi(title, ask=interactive, allowed=yes)
+        theme.heading(f"installing {title}", escape(str(status.path or "")))
+        if status.installed and not status.mismatched(rt.recipe.pins) and not force:
+            theme.info(f"It is built; now installing {', '.join(pending)}.")
+        else:
+            for note in rt.recipe.notes:
+                theme.info(note)
+        if interactive and not typer.confirm(f"  Install {title} now?", default=True):
+            return False
+        runtime_cli.run_build(rt, force=force, sources_dir=sources)
+
+    cfg = settings_mod.load()
+    if not cfg.teleop.enabled:
+        cfg.teleop.enabled = True
+        settings_mod.save(cfg)
+        theme.ok("Teleop enabled", f"device: {cfg.teleop.device}")
+    if cfg.teleop.python or cfg.teleop.droid_dir:
+        theme.warn(
+            "teleop.python and teleop.droid_dir are set, so the driver still runs your own DROID checkout",
+            "unset both to use this runtime: tandem config set teleop.python '' && "
+            "tandem config set teleop.droid_dir ''",
+        )
+    return True
+
+
+@app.command("install", help="Build an executor's runtime. teleop: DROID's workstation side, then teleop is on.")
+def install(
+    name: str = typer.Argument(..., help="The executor whose runtime to build (only teleop has one)."),
+    sources: Path = typer.Option(
+        None,
+        "--sources",
+        help="Take the sources from this directory of checkouts or exports instead of fetching them "
+        "(default: $TANDEM_PLANNER_SOURCES). The environment is still downloaded (conda-forge).",
+        file_okay=False,
+    ),
+    force: bool = typer.Option(False, "--force", help="Fetch every source again and rebuild, even if installed."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Ask nothing: install pixi if it is missing, and build."),
+) -> None:
+    _runtime(name, settings_mod.load())
+    if not install_teleop(force=force, sources=sources, yes=yes):
+        raise typer.Abort()
+    theme.next_steps(
+        [
+            ("tandem config set teleop.device spacemouse", "drive with a SpaceMouse instead of VR (the default)"),
+            ("tandem executors list", "teleop should say ready"),
+        ]
+    )
+
+
+@app.command("remove", help="Delete an executor's runtime. It can be installed again.")
+def remove(
+    name: str = typer.Argument(..., help="The executor whose runtime to delete (only teleop has one)."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation."),
+) -> None:
+    rt = _runtime(name, settings_mod.load())
+    title = rt.recipe.display_name
+    root = rt.root
+    if not (root.exists() or root.is_symlink()):
+        theme.info(f"The {title} runtime is not installed: there is nothing to remove.")
+        return
+    size_gb = sum(f.stat().st_size for f in root.rglob("*") if f.is_file() and not f.is_symlink()) / 1e9
+    theme.warn(f"This deletes {root} ({size_gb:.1f} GB), the {title} runtime.")
+    if not yes and not typer.confirm("Delete the runtime?", default=False):
+        raise typer.Abort()
+    rt.uninstall()
+    theme.ok(f"Removed the {title} runtime", str(root))
+    theme.info(f"`{rt.recipe.build_command}` builds it again.")

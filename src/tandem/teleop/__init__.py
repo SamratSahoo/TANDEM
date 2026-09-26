@@ -11,10 +11,11 @@ Every leg is stamped with a shared ``trajectory_id`` and joined into one traject
 ``tandem.core.merge`` as soon as the operator labels it.
 
 **The driver runs under a DROID environment's interpreter, not tandem's.** It needs
-``droid.controllers.oculus_controller`` and ``droid.stable_camera_env``, which are a separate
-install with their own hardware bindings — so tandem ships the driver and the user points it
-at their DROID checkout (``tandem config set teleop.droid_dir …`` / ``teleop.python``). All
-``droid.*`` imports inside the driver are lazy, so this package stays importable anywhere.
+``droid.controllers.oculus_controller`` and ``droid.stable_camera_env``, which have their own
+hardware bindings — so tandem ships the driver and runs it in the teleop runtime ``tandem executors
+install teleop`` builds (``recipe.py``), or in a DROID checkout of the user's own when
+``teleop.droid_dir`` and ``teleop.python`` name one. All ``droid.*`` imports inside the driver are
+lazy, so this package stays importable anywhere.
 ``child.py``, which launches the driver and answers it, is the exception: it runs in tandem's own
 process and needs nothing beyond the base install.
 """

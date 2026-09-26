@@ -352,12 +352,22 @@ def test_the_pyproject_declares_every_built_in_under_the_entry_point_group():
 # --- readiness ------------------------------------------------------------------------------------
 
 
-def test_readiness_says_what_teleop_still_needs_on_this_machine(tmp_path):
+def test_readiness_says_what_teleop_still_needs_on_this_machine(tmp_path, monkeypatch):
+    monkeypatch.setenv("TANDEM_RUNTIMES_DIR", str(tmp_path / "runtimes"))
     fresh = Settings()
     unmet = base.info("teleop", settings=fresh).unmet
     assert any("teleop is not enabled" in item for item in unmet)
-    assert any("teleop.python" in item for item in unmet)
+    # With neither override set, the driver runs in the runtime tandem builds, and that is what is missing.
+    assert any("tandem executors install teleop" in item for item in unmet)
+    assert not any("teleop.python" in item or "teleop.droid_dir" in item for item in unmet)
+
+    # One override without the other is a checkout of one's own, half named: both are asked for.
+    half = Settings()
+    half.teleop.enabled = True
+    half.teleop.python = sys.executable
+    unmet = base.info("teleop", settings=half).unmet
     assert any("teleop.droid_dir" in item for item in unmet)
+    assert not any("tandem executors install teleop" in item for item in unmet)
 
     ready = _settings()
     assert base.info("teleop", settings=ready).ready

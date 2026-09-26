@@ -13,10 +13,10 @@ what it would have asked.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import Any
 
+import click
 import typer
 
 from tandem.cli import runtime as runtime_cli
@@ -573,38 +573,41 @@ def _say_when_the_planners_differ(active: str, planner: str) -> None:
 
 
 def _setup_teleop(*, interactive: bool, repair: bool) -> None:
+    from tandem.cli import executors as executors_cli
+    from tandem.executors import teleop as teleop_executor
+
     cfg = settings_mod.load()
-    if cfg.teleop.enabled and not repair:
-        theme.ok("Teleop hand-off is configured", cfg.teleop.droid_dir)
+    if cfg.teleop.enabled and not repair and not teleop_executor.unmet_requirements(cfg):
+        theme.ok("Teleop hand-off is configured", cfg.teleop.droid_dir or f"device: {cfg.teleop.device}")
         return
 
     theme.info('"Switch to teleop" lends the arm to a human mid-task and takes it back,')
     theme.info("without homing — the plan resumes from wherever they left it.")
-    theme.info("It needs a DROID checkout and that environment's Python.")
+    theme.info("tandem builds the teleop driver's environment (DROID's workstation side) for it.")
 
     if not interactive:
-        theme.info("Skipped (non-interactive). Configure it with `tandem config set teleop.enabled true`.")
+        theme.info("Skipped (non-interactive). Set it up with `tandem executors install teleop`.")
         return
     if not typer.confirm("  Set it up now?", default=False):
         theme.info("Skipped — collection works without it; the hand-off button stays disabled.")
         return
 
-    droid_dir = typer.prompt("  DROID checkout directory", default=cfg.teleop.droid_dir or "").strip()
-    if not droid_dir or not Path(droid_dir).expanduser().is_dir():
-        theme.warn("That directory does not exist — leaving teleop disabled.")
-        return
-    python = typer.prompt(
-        "  Python for the DROID environment", default=cfg.teleop.python or sys.executable
-    ).strip()
-    if not Path(python).expanduser().is_file():
-        theme.warn("That interpreter does not exist — leaving teleop disabled.")
-        return
-
-    cfg.teleop.enabled = True
-    cfg.teleop.droid_dir = str(Path(droid_dir).expanduser().resolve())
-    cfg.teleop.python = str(Path(python).expanduser().resolve())
-    settings_mod.save(cfg)
-    theme.ok("Teleop hand-off enabled", cfg.teleop.droid_dir)
+    device = typer.prompt(
+        "  Drive with (vr or spacemouse)",
+        default=cfg.teleop.device or "vr",
+        type=click.Choice(["vr", "spacemouse"]),
+        show_choices=False,
+    )
+    if device != cfg.teleop.device:
+        cfg.teleop.device = device
+        settings_mod.save(cfg)
+    try:
+        # The person just said yes, so this asks nothing more (pixi was offered with the planner's runtime).
+        executors_cli.install_teleop(yes=True)
+    except TandemError as exc:
+        # Teleop is optional: a failed build is said, with how to retry, and the rest of init goes on.
+        theme.warn(f"The teleop runtime did not build: {exc.message}", exc.hint or "")
+        theme.info("Collection works without it. `tandem executors install teleop` tries again.")
 
 
 def _summary(*, viz_only: bool, profile_name: str, planner: str | None) -> None:

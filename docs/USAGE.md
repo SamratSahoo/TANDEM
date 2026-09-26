@@ -272,6 +272,7 @@ where the extrinsics file is.
 | `planners bundle NAME --out DIR` | Save its pinned sources for an [offline install](CONFIGURATION.md#offline-install). `--only SOURCE` and `--from SOURCE=PATH` (a local checkout), both repeatable; `--archive` (also `DIR.tar.gz`). |
 | `planners new NAME` | Scaffold [your own planner](ADDING_A_PLANNER.md#quick-start). `--sidecar`, `--dir DIR`. |
 | `executors list`, `use NAME` | Human executors and readiness; set a profile's ([choosing one](ADDING_A_HUMAN_EXECUTOR.md#choosing-one)). `-p/--profile`. |
+| `executors install teleop`, `remove teleop` | Build (or delete) the teleop driver's runtime; install also turns teleop on. `install --force` (refetch, rebuild), `--sources DIR`, `-y/--yes`; `remove -y`. |
 
 Planner states are `installed`, `not installed`, `outdated` (built at commits other than the pinned ones),
 `no runtime needed` and `broken`. Executor states are `ready`, `needs setup` and `broken`. Each says why when

@@ -43,8 +43,8 @@ DISPLAY_NAME = "Teleoperation"
 SUMMARY = "A person drives the arm with a VR controller or a SpaceMouse, through the DROID teleop driver."
 REQUIREMENTS = (
     "teleop.enabled is true",
-    "teleop.python is the DROID environment's interpreter",
-    "teleop.droid_dir is a DROID checkout",
+    "the teleop runtime (`tandem executors install teleop`), or teleop.python and teleop.droid_dir naming a "
+    "DROID environment and checkout of your own",
     "a VR headset and controller, or a SpaceMouse (teleop.device)",
 )
 
@@ -58,7 +58,15 @@ def unmet_requirements(settings: Any) -> list[str]:
     teleop = settings.teleop
     unmet = []
     if not teleop.enabled:
-        unmet.append("teleop is not enabled (`tandem init`, or `tandem config set teleop.enabled true`)")
+        unmet.append("teleop is not enabled (`tandem executors install teleop` turns it on)")
+    if not (teleop.python or teleop.droid_dir):
+        # The runtime tandem builds. Reading its record is cheap and starts nothing.
+        from tandem.teleop import recipe
+
+        if not recipe.runtime(settings).is_ready():
+            unmet.append(f"the teleop runtime is not installed (`{recipe.INSTALL_COMMAND}`)")
+        return unmet
+    # A DROID checkout and environment of the user's own, named by both settings.
     python = Path(teleop.python).expanduser() if teleop.python else None
     if python is None or not python.is_file():
         unmet.append(
@@ -349,12 +357,16 @@ class _ProfileView:
         self._rig = rig
 
     @property
-    def cameras(self) -> Any:
+    def rig(self) -> Any:
         if self._rig is None:
             from tandem.core import rig as rig_mod
 
             self._rig = rig_mod.load()
-        return self._rig.cameras
+        return self._rig
+
+    @property
+    def cameras(self) -> Any:
+        return self.rig.cameras
 
     def trajectories_dir(self) -> Path:
         return self._save_root

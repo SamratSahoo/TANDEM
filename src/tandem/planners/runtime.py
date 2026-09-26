@@ -243,6 +243,9 @@ class RuntimeRecipe:
     assets: tuple[Asset, ...] = ()
     # Shown before a build starts: what it is about to install and how long it takes.
     notes: tuple[str, ...] = ()
+    # The command that builds this runtime, for every hint that says how to. A planner's is
+    # `tandem planners install NAME`; a runtime that is not a planner's (teleop's) names its own.
+    install_command: str = ""
 
     def __post_init__(self) -> None:
         _validate(self)
@@ -250,6 +253,10 @@ class RuntimeRecipe:
     @property
     def display_name(self) -> str:
         return self.title or self.planner
+
+    @property
+    def build_command(self) -> str:
+        return self.install_command or f"tandem planners install {self.planner}"
 
     @property
     def pins(self) -> tuple[SourcePin, ...]:
@@ -596,7 +603,7 @@ class RecipeRuntime:
         """What status says about an optional step that has not run: why not, and what does it."""
         if step.unmet():
             return f"{step.title} {step.todo}: {step.missing}"
-        return f"{step.title} {step.todo}: `tandem planners install {self.recipe.planner}` installs it"
+        return f"{step.title} {step.todo}: `{self.recipe.build_command}` installs it"
 
     def optional_to_run(self, st: RecipeStatus | None = None) -> list[str]:
         """The optional steps an install would run now: not done, and everything they require is here."""
@@ -658,7 +665,7 @@ class RecipeRuntime:
         detail = "\n".join(f"  · {p}" for p in st.problems)
         raise RuntimeNotReady(
             f"The {self.recipe.display_name} runtime at {self.root} is not ready.\n{detail}",
-            hint=f"Run `tandem planners install {self.recipe.planner}` to build or repair it; every step "
+            hint=f"Run `{self.recipe.build_command}` to build or repair it; every step "
             "already done is skipped.",
         )
 
@@ -1104,7 +1111,7 @@ class RecipeRuntime:
             prefix = self.env_prefix
             raise RuntimeNotReady(
                 f"No interpreter at {prefix / 'bin' / 'python' if prefix else self.root}.",
-                hint=f"Run `tandem planners install {self.recipe.planner}`.",
+                hint=f"Run `{self.recipe.build_command}`.",
             )
         return path
 

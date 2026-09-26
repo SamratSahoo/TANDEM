@@ -28,15 +28,15 @@ class UiSettings(BaseModel):
 
 
 class TeleopSettings(BaseModel):
-    """The TAMP⇄teleop hand-off needs a DROID checkout and its interpreter.
+    """The TAMP⇄teleop hand-off: whether it is on, and what drives the arm.
 
-    Both empty means the feature is simply unavailable; the UI disables its button with a
-    reason rather than failing mid-session.
+    The driver runs in the teleop runtime `tandem executors install teleop` builds. ``droid_dir`` and
+    ``python`` override it with a DROID checkout and environment of one's own; set both, or neither.
     """
 
     enabled: bool = False
-    droid_dir: str = ""
-    python: str = ""
+    droid_dir: str = ""  # blank -> the teleop runtime's
+    python: str = ""  # blank -> the teleop runtime's
     device: str = "vr"  # vr | spacemouse
     controller: str = "right"  # right | left, VR only
 

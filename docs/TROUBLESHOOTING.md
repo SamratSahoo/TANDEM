@@ -48,7 +48,7 @@ tandem rig set robot.host 172.16.0.5     # if that isn't the NUC's address
 - `TimeoutError`: nothing answers at that address.
 - `ConnectionRefusedError`: the NUC answers, but the shim isn't running. Start it ([step 3](../README.md#3-robot)).
 
-Teleop reaches the NUC through DROID's `nuc_ip` instead of `robot.host`. Keep the two equal.
+Teleop uses the same `robot.host`, so fixing it fixes both.
 
 ## A perception server doesn't answer ("foundation stereo depth server …", "m2t2 grasp server …")
 
@@ -90,6 +90,26 @@ While recording, a human phase must run through its executor. Do one of these:
 - Take the arm with `t`. If `t` isn't offered, `tandem executors list` says why.
 - Set [`hitl.allow_unrecorded_human_phase: true`](CONFIGURATION.md#phase-planning-hitl).
 - Run `tandem collect --no-record`.
+
+## Teleop says "the teleop runtime is not installed"
+
+```bash
+tandem executors install teleop
+```
+
+Teleop's driver runs in an environment tandem builds. This builds it (a few minutes) and turns teleop on. If it
+says ZED cameras won't open, install the [ZED SDK](https://www.stereolabs.com/developers/release) and run it
+again. It adds only what is missing.
+
+## The teleop driver can't reach the VR headset
+
+```bash
+adb devices   # the headset should be listed as "device"
+```
+
+oculus_reader talks to the headset over `adb` (`sudo apt install adb`). Connect the headset by USB, turn on
+developer mode, and accept the prompt in the headset. A headset that has never run DROID teleop also needs the
+app ([step 6](../README.md#6-teleop)).
 
 ## The planner shows as outdated
 

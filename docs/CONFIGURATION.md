@@ -241,7 +241,7 @@ A camera with no entry stops the session before warm-up. How to get the poses:
 - **TiPToP's scripts** (`calibrate-wrist-cam`, `viz-calibration`, `cutamp-demo`, …) run through
   `tandem runtime run` or `shell` use the rig: `$TIPTOP_CONFIG` and `$TIPTOP_CALIBRATION` point at it.
   `--raw` uses tiptop's stock config instead.
-- **Teleop** reaches the NUC through DROID's `droid/misc/parameters.py` (`nuc_ip`). Keep it equal to `robot.host`.
+- **Teleop** reaches the NUC at `robot.host` too: tandem passes it to the teleop driver.
 - **Gripper mask** (`perception: hand` only): make yours with `tandem runtime run compute-gripper-mask` (or
   `paint-gripper-mask`). It writes the runtime's `tiptop/tiptop/config/assets/gripper_mask.png`.
 
@@ -389,7 +389,8 @@ tandem config edit                 # also: get KEY, path
 | `runtime_dir` | `~/.local/share/tandem/runtime` | TiPToP's runtime (about 25 GB). `$TANDEM_RUNTIME_DIR` wins. |
 | `default_planner` | `tiptop` | The planner new profiles get (`tandem planners default NAME`). |
 | `hf_org` | | Owner for an export repo named without one. |
-| `teleop.enabled`, `teleop.droid_dir`, `teleop.python` | off | The teleop driver: a DROID checkout and its Python ([teleop](ADDING_A_HUMAN_EXECUTOR.md#the-teleop-executor)). |
+| `teleop.enabled` | `false` | Human phases can use teleop. `tandem executors install teleop` turns it on ([teleop](ADDING_A_HUMAN_EXECUTOR.md#the-teleop-executor)). |
+| `teleop.droid_dir`, `teleop.python` | blank | Blank: the driver runs in the teleop runtime. Set both to run a DROID checkout and environment of your own. |
 | `teleop.device`, `teleop.controller` | `vr`, `right` | `vr` or `spacemouse`, and which VR hand (`right` or `left`). |
 | `ui.host`, `ui.port`, `ui.open_browser` | `127.0.0.1`, `8787`, `true` | `tandem ui`. A busy port steps to the next free one. |
 
@@ -417,7 +418,7 @@ Linux defaults; other systems differ.
 | share: runtimes | `~/.local/share/tandem` | `$TANDEM_SHARE_DIR` |
 | data: profiles, trajectories | `~/tandem-data` | `$TANDEM_DATA_ROOT` |
 | TiPToP's runtime | `<share>/runtime` | `$TANDEM_RUNTIME_DIR` |
-| other planners' runtimes | `<share>/runtimes/NAME` | `$TANDEM_RUNTIMES_DIR` |
+| other planners' runtimes, and teleop's | `<share>/runtimes/NAME` (teleop: `<share>/runtimes/teleop`) | `$TANDEM_RUNTIMES_DIR` |
 | [offline install](#offline-install) sources | none | `$TANDEM_PLANNER_SOURCES` |
 
 ## The planner runtime

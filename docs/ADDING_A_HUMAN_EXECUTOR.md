@@ -162,12 +162,17 @@ Any other exception from `run` fails the trial at `human_policy`, and the sessio
 
 `TeleopExecutor` runs the DROID teleop driver, one process per leg. It needs:
 
-- the `teleop.*` settings ([keys](CONFIGURATION.md#tandem-settings-and-credentials), [setup](../README.md#6-teleop));
-- a [DROID fork](https://github.com/SamratSahoo/droid) checkout, since upstream DROID lacks
-  `droid.stable_camera_env`;
+- the teleop runtime, from `tandem executors install teleop` ([setup](../README.md#6-teleop)). It holds the
+  workstation side of [DROID's TANDEM branch](https://github.com/SamratSahoo/droid/tree/TANDEM) and
+  oculus_reader, in their own environment;
+- `teleop.enabled` ([keys](CONFIGURATION.md#tandem-settings-and-credentials)), which the install turns on;
 - a VR headset and controller, or a SpaceMouse.
 
-`tandem executors list` checks `teleop.enabled`, `teleop.python` and `teleop.droid_dir`, but not the device. A
+tandem sets `DROID_NUC_IP` and `TIPTOP_*_CAMERA_ID` for the driver from the rig, which DROID's
+`droid/misc/parameters.py` reads. To run a DROID checkout and environment of your own instead, set both
+`teleop.droid_dir` and `teleop.python`; the driver then runs there, and the runtime is ignored.
+
+`tandem executors list` checks `teleop.enabled` and the runtime (or both overrides), but not the device. A
 missing headset shows up as a driver error when the leg starts.
 
 If the driver can't start, the leg stays open and shows the problem until you return control. One hand-off can

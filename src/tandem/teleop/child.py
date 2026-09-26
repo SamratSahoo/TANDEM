@@ -77,18 +77,7 @@ class TeleopChild:
     def start(self) -> TeleopChild:
         from tandem import teleop as teleop_pkg
 
-        python = Path(self.cfg.teleop.python).expanduser()
-        if not python.is_file():
-            raise TandemError(
-                f"The configured teleop interpreter does not exist: {python}",
-                hint="Set it with `tandem config set teleop.python /path/to/droid/env/bin/python`.",
-            )
-        droid_dir = Path(self.cfg.teleop.droid_dir).expanduser()
-        if not droid_dir.is_dir():
-            raise TandemError(
-                f"The configured DROID checkout does not exist: {droid_dir}",
-                hint="Set it with `tandem config set teleop.droid_dir /path/to/droid`.",
-            )
+        python, droid_dir, import_paths = resolve_driver(self.cfg)
 
         session_dir = self.session._files["session_dir"]
         self.events_file = session_dir / "teleop-events.jsonl"
@@ -142,9 +131,22 @@ class TeleopChild:
 
         env = dict(os.environ)
         env["PYTHONPATH"] = os.pathsep.join(
-            filter(None, [str(droid_dir), env.get("PYTHONPATH", "")])
+            filter(None, [*(str(p) for p in import_paths), env.get("PYTHONPATH", "")])
         )
         env["TELEOP_EVENTS_FILE"] = str(self.events_file)
+        # DROID reads the NUC's address and the wrist camera's serial from droid.misc.parameters, which
+        # reads these (DROID's TANDEM branch). Set from the rig, so that file is never edited by hand and
+        # never disagrees with robot.host. A checkout without the override ignores them.
+        rig = getattr(self.session.profile, "rig", None)
+        if rig is not None:
+            env["DROID_NUC_IP"] = str(rig.robot.host)
+        for key, var in (
+            ("hand", "TIPTOP_HAND_CAMERA_ID"),
+            ("external", "TIPTOP_EXTERNAL_CAMERA_ID"),
+            ("external_2", "TIPTOP_EXTERNAL_2_CAMERA_ID"),
+        ):
+            if key in cameras:
+                env[var] = str(cameras[key].serial)
 
         self.session._log("tandem", "$ " + " ".join(args))
         self.proc = subprocess.Popen(
@@ -296,3 +298,35 @@ def _trajectory_id_of(directory: Path) -> str | None:
         return json.loads(meta.read_text()).get("trajectory_id")
     except (ValueError, OSError):
         return None
+
+
+def resolve_driver(cfg) -> tuple[Path, Path, list[Path]]:
+    """The interpreter the driver runs under, its working directory, and what goes on its PYTHONPATH.
+
+    ``teleop.python`` and ``teleop.droid_dir``, when either is set: a DROID checkout and environment of
+    the user's own, as before tandem managed one. Otherwise the teleop runtime ``tandem executors install
+    teleop`` builds (``tandem.teleop.recipe``).
+    """
+    teleop = cfg.teleop
+    if teleop.python or teleop.droid_dir:
+        python = Path(teleop.python).expanduser()
+        if not teleop.python or not python.is_file():
+            raise TandemError(
+                f"The configured teleop interpreter does not exist: {teleop.python or 'unset'}",
+                hint="Set it with `tandem config set teleop.python /path/to/droid/env/bin/python`, or unset "
+                "teleop.python and teleop.droid_dir to use the runtime `tandem executors install teleop` builds.",
+            )
+        droid_dir = Path(teleop.droid_dir).expanduser()
+        if not teleop.droid_dir or not droid_dir.is_dir():
+            raise TandemError(
+                f"The configured DROID checkout does not exist: {teleop.droid_dir or 'unset'}",
+                hint="Set it with `tandem config set teleop.droid_dir /path/to/droid`, or unset teleop.python and "
+                "teleop.droid_dir to use the runtime `tandem executors install teleop` builds.",
+            )
+        return python, droid_dir, [droid_dir]
+
+    from tandem.teleop import recipe
+
+    rt = recipe.runtime(cfg)
+    rt.require_ready()
+    return rt.python(), rt.source_dir("droid"), recipe.pythonpath(rt)
