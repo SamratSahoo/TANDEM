@@ -465,11 +465,3 @@ tandem planners install tiptop --sources /media/usb/planner-sources # on the wor
   `curobo/`). While set, nothing is fetched.
 - Only sources are bundled. `pixi install` still needs conda-forge, PyPI and GitHub (to build SAM-2), and the
   first warm-up downloads the SAM-2 checkpoint (about 0.9 GB).
-
-## Installing
-
-TANDEM isn't on PyPI; install it from git ([README](../README.md#1-install)). Plain `pip install git+…` needs
-a virtualenv on Debian and Ubuntu. Every install includes what `tandem export lerobot` needs (`av`, `pyarrow`
-and `huggingface_hub`).
-
-To develop TANDEM: `pip install -e '.[dev]'` in a virtualenv, then `pytest -q`.
