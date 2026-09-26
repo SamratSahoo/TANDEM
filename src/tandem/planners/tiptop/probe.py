@@ -86,7 +86,8 @@ def check_m2t2(url: str, *, timeout: float = 1.5) -> probe.Check:
         url,
         example="http://localhost:8123",
         setting="planners.tiptop.perception.m2t2.url",
-        hint="Start the M2T2 server; perception asks it for grasps every rollout. Another address: "
+        hint="Perception asks it for grasps every rollout. A session starts it when it is needed; "
+        "`tandem servers start` starts it now, and `tandem servers install` builds it. Another address: "
         "`tandem rig set planners.tiptop.perception.m2t2.url URL`.",
         timeout=timeout,
     )
@@ -98,8 +99,8 @@ def check_foundation_stereo(url: str, *, timeout: float = 1.5) -> probe.Check:
         url,
         example="http://localhost:1234",
         setting="planners.tiptop.perception.foundation_stereo.url",
-        hint="Start the FoundationStereo server (`pixi run server` in its checkout); TiPToP estimates the "
-        "ZEDs' depth with it every rollout. Another address: "
+        hint="TiPToP estimates the ZEDs' depth with it every rollout. A session starts it when it is needed; "
+        "`tandem servers start` starts it now, and `tandem servers install` builds it. Another address: "
         "`tandem rig set planners.tiptop.perception.foundation_stereo.url URL`.",
         timeout=timeout,
     )

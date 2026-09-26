@@ -2,8 +2,7 @@
 
 **TANDEM** (Task and Motion Planning with As-Needed Demonstrations) collects demonstrations for fine-tuning
 vision-language-action (VLA) models. A vision-language model splits a task into robot phases and human phases.
-The robot does its phases with task and motion planning (TAMP), and a person teleoperates the rest. Each trial
-is recorded as one demonstration.
+The robot does its phases with task and motion planning (TAMP), and a person teleoperates the rest.
 
 The planner is pluggable. [TiPToP](https://github.com/SamratSahoo/tiptop/tree/TANDEM) is built in.
 
@@ -15,10 +14,10 @@ You need:
 
 - a Linux x86-64 workstation with an NVIDIA GPU, CUDA 12, ffmpeg and about 25 GB of free disk;
 - a Franka FR3 or Panda with a Robotiq 2F-85 gripper, and its polymetis NUC;
-- 2–3 ZED cameras and the [ZED SDK](https://www.stereolabs.com/developers/release);
+- a wrist ZED camera, 1 third-person ZED camera and the [ZED SDK](https://www.stereolabs.com/developers/release);
 - [pipx](https://pipx.pypa.io) or [uv](https://docs.astral.sh/uv/), and a [Gemini API key](https://aistudio.google.com/apikey);
-- for human phases, a VR headset (Meta Quest) or a SpaceMouse. tandem builds the teleop driver's environment
-  itself (step 6); the NUC runs [DROID's server](https://github.com/SamratSahoo/droid) (step 3).
+- for human phases, a VR headset (Meta Quest). tandem builds the teleop driver's environment itself (step 6);
+  the NUC runs [DROID's server](https://github.com/SamratSahoo/droid) (step 3).
 
 Every command below runs on the workstation unless it says otherwise.
 
@@ -32,61 +31,98 @@ uv tool install git+https://github.com/SamratSahoo/tandem.git
 
 ### 2. Initialize
 
-Install the ZED SDK first. Otherwise the runtime still builds, but ZED cameras won't open until you install the
-SDK and run `tandem planners install tiptop` again.
+Before you start, install the [ZED SDK](https://www.stereolabs.com/developers/release) and plug in the cameras.
+Then run:
 
 ```bash
 tandem init
-tandem init -y --robot-host 172.16.0.2 --camera hand=SERIAL --camera external=SERIAL   # without a terminal
 ```
 
-`tandem init` builds TiPToP's runtime (5–20 minutes) and asks for your Gemini key, the robot's address (the NUC),
-the arm type and the camera serials. It also adds the paper's five tasks as profiles and offers to set up teleop
-(step 6). It is safe to re-run, and each step can be redone alone: `tandem planners install tiptop`,
-`tandem rig set KEY VALUE` or `tandem config set-gemini-key`.
+It walks through the setup, in this order:
 
-On a laptop used only to review trajectories, run `tandem init --viz-only` and point it at them with
-`tandem config set data_root DIR`. `tandem plan` there also needs `tandem config set-gemini-key`.
+1. The robot: the NUC's address and the arm type.
+2. TiPToP's runtime, which it builds (5–20 minutes).
+3. The perception servers TiPToP calls, M2T2 and FoundationStereo, which it builds too (step 4).
+4. The cameras. It lists the ZED cameras it finds and suggests a serial for each role (wrist, external, second
+   external). Press Enter to accept a suggestion or type another serial. Then it asks which camera perception
+   reads.
+5. Your Gemini key.
+6. The paper's five tasks, added as profiles.
+7. Teleop (step 6), if you want it.
+
+It is safe to re-run: it skips what is done. `tandem init --repair` asks everything again.
 
 ### 3. Robot
 
-```bash
-# on the NUC
-python scripts/server/run_server.py   # terminal 1: in the DROID checkout and its polymetis environment
-python bamboo_polymetis_shim.py       # terminal 2
-```
+The NUC runs two programs. DROID's server drives the arm and gripper through polymetis, and teleop uses it.
+TiPToP's shim is what the planner talks to. Do steps 1–4 on the NUC.
 
-Start DROID's server first. It launches polymetis's robot server (port 50051) and gripper server (port 50052),
-killing any already running, and teleop drives the arm through it. Without teleop,
-`droid/franka/launch_robot.sh` and `launch_gripper.sh` are enough.
+1. **Install DROID.** Follow DROID's NUC guide
+   ([Docker](https://github.com/SamratSahoo/droid/blob/TANDEM/docs/software-setup/docker.md) or
+   [host](https://github.com/SamratSahoo/droid/blob/TANDEM/docs/software-setup/host-installation.md)), using the
+   `TANDEM` branch of the fork:
 
-Then copy TiPToP's
-[`bamboo_polymetis_shim.py`](https://github.com/SamratSahoo/tiptop/blob/682047493b88e5301c6b2b49da914ea4f173e5d9/bamboo_polymetis_shim.py)
-to the NUC. Run it in an environment with polymetis, pyzmq, msgpack, numpy and scipy. Its log should show
-`PolymetisGripper connected to localhost:50052`.
+   ```bash
+   git clone -b TANDEM --recurse-submodules https://github.com/SamratSahoo/droid.git
+   ```
 
-tandem reaches the NUC at the address you gave `tandem init`. To change it: `tandem rig set robot.host 172.16.0.5`.
+   Its "Configure Parameters" step sets `robot_ip` (the arm's control box) and `sudo_password` in
+   `droid/misc/parameters.py`. The server needs both.
+
+2. **Add TiPToP's shim.** In the DROID checkout, with DROID's polymetis environment active:
+
+   ```bash
+   curl -LO https://raw.githubusercontent.com/SamratSahoo/tiptop/682047493b88e5301c6b2b49da914ea4f173e5d9/bamboo_polymetis_shim.py
+   pip install pyzmq msgpack
+   ```
+
+3. **Start DROID's server** in one terminal:
+
+   ```bash
+   python scripts/server/run_server.py
+   ```
+
+   It starts polymetis's robot server (port 50051) and gripper server (port 50052), replacing any already
+   running.
+
+4. **Start the shim** in a second terminal:
+
+   ```bash
+   python bamboo_polymetis_shim.py
+   ```
+
+   Its log should show `PolymetisGripper connected to localhost:50052`. It listens on ports 5555 (control),
+   5557 (state) and 5559 (gripper).
+
+5. **Check from the workstation:**
+
+   ```bash
+   tandem doctor
+   ```
+
+   The robot rows should pass. If the NUC's address is wrong, run `tandem rig set robot.host 172.16.0.5`.
+
+Leave both terminals running while you collect. Steps 3 and 4 are needed again after the NUC restarts.
 
 ### 4. Perception servers
 
-TiPToP needs an M2T2 grasp server and a FoundationStereo depth server. Install each as TiPToP's
-[installation guide](https://github.com/SamratSahoo/tiptop/blob/682047493b88e5301c6b2b49da914ea4f173e5d9/docs/installation.md#installing-m2t2)
-describes, and run each in its own terminal:
+TiPToP asks two servers on every rollout: [M2T2](https://github.com/SamratSahoo/M2T2/tree/TANDEM) for grasps
+and [FoundationStereo](https://github.com/SamratSahoo/FoundationStereo/tree/TANDEM) for depth. `tandem init`
+builds both, with torch compiled for your GPU and their model weights. There is nothing to start by hand:
+`tandem collect` starts a server that isn't running before the session warms up, and stops the ones it started
+when the session ends.
 
 ```bash
-git clone https://github.com/williamshen-nz/M2T2.git && cd M2T2
-pixi run setup && pixi run download-weights
-pixi run server   # http://localhost:8123
+tandem servers status   # installed? answering?
+tandem servers start    # start them ahead of time; they keep running until `tandem servers stop`
 ```
+
+A server on another machine is that machine's to run. Point tandem at it, and tandem won't try to start it:
 
 ```bash
-git clone https://github.com/williamshen-nz/FoundationStereo.git && cd FoundationStereo
-pixi run setup && pixi run download-checkpoints
-pixi run server   # http://localhost:1234
+tandem rig set planners.tiptop.perception.m2t2.url http://HOST:8123
+tandem rig set planners.tiptop.perception.foundation_stereo.url http://HOST:1234
 ```
-
-`tandem doctor` checks both. For a server on another machine, run
-`tandem rig set planners.tiptop.perception.m2t2.url http://HOST:8123` (or `...foundation_stereo.url`).
 
 ### 5. Cameras and calibration
 
@@ -133,9 +169,8 @@ rig: your NUC, your cameras and this calibration file. Recalibrate a camera when
 ### 6. Teleop
 
 ```bash
-tandem executors install teleop              # builds the teleop driver's environment and turns teleop on
-tandem config set teleop.device spacemouse   # default: vr
-tandem executors list                        # teleop should say `ready`
+tandem executors install teleop   # builds the teleop driver's environment and turns teleop on
+tandem executors list             # teleop should say `ready`
 ```
 
 `tandem init` offers to do this for you. The install fetches the workstation side of
@@ -143,9 +178,10 @@ tandem executors list                        # teleop should say `ready`
 Python API when the ZED SDK is installed. Human phases then drive the arm through the DROID server from step 3.
 tandem passes the driver your rig's `robot.host` and camera serials, so nothing in DROID needs editing.
 
-With VR, `teleop.controller left|right` picks the hand. VR also needs `adb` (`sudo apt install adb`) and the
-headset in developer mode, connected by USB. A headset that has never run DROID teleop needs its app installed
-once:
+Teleop uses a Meta Quest headset, driven with the right controller by default
+(`tandem config set teleop.controller left` switches). The workstation also needs `adb`
+(`sudo apt install adb`), and the headset must be in developer mode and connected by USB. A headset that has
+never run DROID teleop needs its app installed once:
 
 ```bash
 curl -L -o teleop.apk https://media.githubusercontent.com/media/rail-berkeley/oculus_reader/de73f3d259b3c41c4564f70a64682e24aa3ac31c/oculus_reader/APK/teleop-debug.apk

@@ -1,21 +1,20 @@
 # ruff: noqa
 """Teleoperation + capture driver: what a person drives the arm with for a human leg.
 
-Drives the arm from either the **VR** (Oculus) controller — same as DROID's ``scripts/main.py`` — or a
-**SpaceMouse** (``--device``), and captures each episode over an events file plus the stdin protocol
-below, which ``tandem/teleop/child.py``'s ``TeleopChild`` answers. The operator moves the end-effector
-with the chosen controller (6-DOF -> Cartesian velocity) and works the gripper (VR trigger, or the
-SpaceMouse's two buttons); the operator decides when each episode ends (from the UI or the terminal).
+Drives the arm from the **VR** (Oculus) controller — same as DROID's ``scripts/main.py`` — and captures
+each episode over an events file plus the stdin protocol below, which ``tandem/teleop/child.py``'s
+``TeleopChild`` answers. The operator moves the end-effector with the controller (6-DOF -> Cartesian
+velocity) and works the gripper with its trigger; the operator decides when each episode ends (from the
+UI or the terminal).
 Every episode is written in the raw episode format (``teleop/raw_episode.py``) so the export
 (``tandem.export``, ``export/build.py``) builds it exactly like a tamp episode.
 
 Unlike DROID's ``scripts/main.py`` + Tk GUI VR flow, session control (start / end / discard / label) is
-driven over the stdin protocol by tandem for BOTH devices — the controller only moves the arm.
+driven over the stdin protocol by tandem — the controller only moves the arm.
 
 Nothing is installed on the NUC — this is a drop-in for the existing PC-side teleop (still talks to the
 NUC's ``run_server.py`` over the same ``StableRobotEnv`` -> ServerInterface path); only the controller
-changes. VR uses ``droid.controllers.oculus_controller.VRPolicy``; the SpaceMouse is read
-dependency-free (see ``spacemouse.py``).
+changes. VR uses ``droid.controllers.oculus_controller.VRPolicy``.
 
 Protocol (stdin lines written by ``tandem/teleop/child.py``, launched once per leg by
 ``executors/teleop.py``):
@@ -61,7 +60,6 @@ import numpy as np
 # Neither import touches robot or policy code.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from raw_episode import emit, write_meta, write_robot_state_npz, _write_video  # noqa: E402
-from spacemouse import SpaceMouse  # noqa: E402
 
 CONTROL_HZ = 15  # matches StableRobotEnv.control_hz + the LeRobot build FPS
 # The env's action_dict["joint_velocity"] is the IK-commanded joint velocity ALREADY NORMALIZED to
@@ -129,65 +127,12 @@ def _poll_line():
     return _parse(line)
 
 
-# --------------------------------------------------------------------------- #
-# SpaceMouse -> Cartesian-velocity + gripper                                    #
-# --------------------------------------------------------------------------- #
-class SpaceMousePolicy:
-    """Maps the SpaceMouse 6-DOF deflection to a DROID Cartesian-velocity action
-    ``[vx,vy,vz, wx,wy,wz, gripper_vel]`` in [-1,1]. Buttons set the gripper target (left=open,
-    right=close); the gripper is velocity-driven toward it. Axis order/signs are configurable so the
-    puck can be aligned to the robot base frame without a code edit."""
-
-    def __init__(self, sm: SpaceMouse, *, pos_gain, rot_gain, gripper_gain, deadzone, axis_map, axis_sign):
-        self.sm = sm
-        self.pos_gain, self.rot_gain, self.gripper_gain = pos_gain, rot_gain, gripper_gain
-        self.deadzone = deadzone
-        self.axis_map = axis_map      # length-6: which SpaceMouse axis feeds robot DOF i
-        self.axis_sign = axis_sign    # length-6: +1/-1 per robot DOF
-        self.gripper_target = 0.0     # 0 open .. 1 closed; starts open
-        self._prev = {"left": False, "right": False}
-
-    def _dz(self, v):
-        return 0.0 if abs(v) < self.deadzone else v
-
-    def forward(self, obs):
-        st = self.sm.get_state()
-        raw = st["axes"]
-        a = [self.axis_sign[i] * self._dz(raw[self.axis_map[i]]) for i in range(6)]
-        lin = [a[0] * self.pos_gain, a[1] * self.pos_gain, a[2] * self.pos_gain]
-        rot = [a[3] * self.rot_gain, a[4] * self.rot_gain, a[5] * self.rot_gain]
-
-        b = st["buttons"]
-        if b["left"] and not self._prev["left"]:
-            self.gripper_target = 0.0  # open
-        if b["right"] and not self._prev["right"]:
-            self.gripper_target = 1.0  # close
-        self._prev = dict(b)
-
-        grip_meas = float(np.asarray(obs["robot_state"]["gripper_position"]).reshape(-1)[0])
-        grip_vel = float(np.clip((self.gripper_target - grip_meas) * self.gripper_gain, -1.0, 1.0))
-        action = np.clip(np.asarray(lin + rot + [grip_vel], dtype=np.float64), -1.0, 1.0)
-        return action, self.gripper_target
-
-    def reset(self):
-        """Called when the arm is sent home. The SpaceMouse action is a pure per-frame velocity (no
-        accumulated pose target), so nothing needs re-anchoring; just re-open the gripper target so a
-        new episode starts from a known gripper state."""
-        self.gripper_target = 0.0
-        self._prev = {"left": False, "right": False}
-
-    def wait_ready(self, timeout=8.0):
-        """The SpaceMouse is polled synchronously in ``forward`` (it's already open), so it is always
-        ready once the driver is up."""
-        return True
-
-
 class VRPolicyDriver:
-    """Wraps the DROID Oculus ``VRPolicy`` in the same ``forward(obs) -> (action, gripper_target)``
-    interface as ``SpaceMousePolicy``. The VR policy already produces the full 7-DOF Cartesian-velocity
-    action (including gripper velocity from the trigger); we surface the continuous trigger value as the
-    gripper target so the recorded ``cmd_gripper`` matches the SpaceMouse path. Only the arm is driven
-    from VR — session control (start/end/label) stays on the browser stdin protocol."""
+    """Wraps the DROID Oculus ``VRPolicy`` as ``forward(obs) -> (action, gripper_target)``. The VR policy
+    already produces the full 7-DOF Cartesian-velocity action (including gripper velocity from the
+    trigger); we surface the continuous trigger value as the gripper target, which is recorded as
+    ``cmd_gripper``. Only the arm is driven from VR — session control (start/end/label) stays on the
+    browser stdin protocol."""
 
     def __init__(self, controller: str):
         from droid.controllers.oculus_controller import VRPolicy  # lazy: pulls in oculus_reader
@@ -264,15 +209,7 @@ class Args:
     output_root: str = ""       # runs/<workspace>/teleop/<name>; episodes nest under eval/<ts> (staging)
     instruction: str = ""
     config_id: str = "teleop/teleop"
-    device: str = "vr"              # "vr" (Oculus) or "spacemouse"
-    controller: str = "right"       # VR hand: "right" or "left" (ignored for spacemouse)
-    max_deflection: float = 350.0
-    pos_gain: float = 1.0
-    rot_gain: float = 1.0
-    gripper_gain: float = 3.0
-    deadzone: float = 0.06
-    axis_map: str = "0,1,2,3,4,5"    # SpaceMouse axis feeding robot DOF [x,y,z,rx,ry,rz]
-    axis_sign: str = "1,1,1,1,1,1"   # sign per robot DOF (tune to align the puck to the base frame)
+    controller: str = "right"       # VR hand: "right" or "left"
     external_camera_id: str = ""
     external_2_camera_id: str = ""
     hand_camera_id: str = ""
@@ -462,28 +399,16 @@ def main(args: Args):
     args.external_camera_id = args.external_camera_id or varied_camera_1_id
     args.external_2_camera_id = args.external_2_camera_id or varied_camera_2_id
     args.hand_camera_id = args.hand_camera_id or hand_camera_id
-    device = (args.device or "vr").strip().lower()
     output_root = Path(args.output_root)
     (output_root / "eval").mkdir(parents=True, exist_ok=True)
     _install_signal_handlers()
 
     emit(events, "session_start")
     env = None
-    sm = None
     try:
-        if device == "spacemouse":
-            axis_map = [int(x) for x in str(args.axis_map).split(",")]
-            axis_sign = [float(x) for x in str(args.axis_sign).split(",")]
-            sm = SpaceMouse(max_deflection=args.max_deflection)  # raises (no device / no perms) -> error exit
-            print(f"[teleop] SpaceMouse on {sm.device}", flush=True)
-            policy = SpaceMousePolicy(
-                sm, pos_gain=args.pos_gain, rot_gain=args.rot_gain, gripper_gain=args.gripper_gain,
-                deadzone=args.deadzone, axis_map=axis_map, axis_sign=axis_sign,
-            )
-        else:  # "vr" (default)
-            controller = (args.controller or "right").strip().lower()
-            policy = VRPolicyDriver(controller)  # raises (headset not reachable) -> error exit
-            print(f"[teleop] VR Oculus ({controller} controller)", flush=True)
+        controller = (args.controller or "right").strip().lower()
+        policy = VRPolicyDriver(controller)  # raises (headset not reachable) -> error exit
+        print(f"[teleop] VR Oculus ({controller} controller)", flush=True)
         from droid.stable_camera_env import StableRobotEnv  # lazy: DROID env only
         env = StableRobotEnv(
             action_space="cartesian_velocity", gripper_action_space=None, do_reset=not args.keep_pose
@@ -578,8 +503,6 @@ def main(args: Args):
                 env.close()
             except Exception:  # noqa: BLE001
                 pass
-        if sm is not None:
-            sm.close()
 
 
 if __name__ == "__main__":

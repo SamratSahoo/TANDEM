@@ -382,6 +382,21 @@ def describe_options(name: str, profile: Any, *, settings: Any = None) -> Option
     return view
 
 
+def services(name: str, settings: Any = None) -> list:
+    """The helper servers the planner ``name`` runs beside itself -- TiPToP's M2T2 and FoundationStereo -- or [].
+
+    Each has ``name``, ``title``, ``runtime(settings)`` (a RecipeRuntime to build), ``url()``, ``local()``,
+    ``healthy()``, ``started_pid()``, ``log_path``, ``start()`` and ``stop()``. `tandem init` builds their
+    runtimes and `tandem servers` manages them; a session starts them itself. A planner that cannot be
+    loaded has none, and says why where it is used.
+    """
+    try:
+        hook = getattr(factory(name), "services", None)
+    except TandemError:
+        return []
+    return list(hook(settings)) if callable(hook) else []
+
+
 def doctor_checks(name: str, profile: Any, *, settings: Any = None, probe_hardware: bool = True) -> list:
     """What `tandem doctor` checks for the planner ``name``: a list of ``tandem.core.probe.Check``.
 

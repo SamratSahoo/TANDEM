@@ -100,7 +100,6 @@ class TeleopChild:
             "--events-file", str(self.events_file),
             "--output-root", str(self.session.profile.trajectories_dir()),
             "--instruction", self.session.instruction,
-            "--device", self.cfg.teleop.device,
             "--controller", self.cfg.teleop.controller,
             # The planner parked the arm mid-task on purpose; homing here would undo the whole
             # point of the hand-off and could drop whatever it is holding.

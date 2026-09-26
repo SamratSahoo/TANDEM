@@ -16,7 +16,7 @@ from typer.testing import CliRunner
 
 from tandem.cli import init as init_cli
 from tandem.cli.app import app
-from tandem.core import paths, probe, profiles
+from tandem.core import paths, probe, profiles, zed
 from tandem.core import rig as rig_mod
 from tandem.core import settings as settings_mod
 
@@ -29,6 +29,8 @@ def machine(monkeypatch):
     monkeypatch.setattr(init_cli, "_planner_preflight", lambda planner, **kw: None)
     monkeypatch.setattr(probe, "find_pixi", lambda: Path("/opt/pixi"))
     monkeypatch.setattr("tandem.cli.runtime.run_build", lambda rt, **kw: builds.append(kw))
+    # No ZED SDK here: the listing knows nothing, and each serial is typed.
+    monkeypatch.setattr(zed, "detect", lambda pythons: None)
     return builds
 
 
@@ -64,7 +66,9 @@ def test_the_flags_write_the_rig_and_leave_the_planners_defaults_its_own(machine
     assert json.loads(rig.calibration_file().read_text()) == {}
     assert "Rig: panda_robotiq at 10.0.0.5" in _said(result)
     assert "0 of 2 with extrinsics in" in _said(result)
-    assert len(machine) == 1, "the runtime was built"
+    # TiPToP's runtime, then its two perception servers' (M2T2, FoundationStereo).
+    assert len(machine) == 3, "the runtime and both perception servers were built"
+    assert machine[0].get("planner") == "tiptop"
 
 
 def test_a_rig_is_written_even_with_nothing_given_and_says_what_it_lacks():
@@ -190,6 +194,52 @@ def test_at_a_terminal_a_rig_already_set_up_is_asked_again_only_with_repair(monk
     assert ("Wrist camera serial ('none' if there is none)", "111") in script.asked
     assert rig_mod.load(force=True).robot.host == "10.2.2.2"
     assert rig_mod.load(force=True).cameras.hand.serial == "111", "Enter keeps what was there"
+
+
+def test_the_cameras_the_zed_sdk_lists_are_offered_to_confirm(monkeypatch):
+    found = [
+        zed.ZedCamera("32439448", "ZED 2i", "AVAILABLE"),
+        zed.ZedCamera("14846828", "ZED-M", "AVAILABLE"),
+        zed.ZedCamera("31425515", "ZED 2i", "AVAILABLE"),
+    ]
+    monkeypatch.setattr(zed, "detect", lambda pythons: found)
+    # Enter at every camera question: the suggestions stand.
+    script = _at_a_terminal(monkeypatch, {"Robot address": ["172.16.0.2"]})
+    result = _run()
+    assert result.exit_code == 0, result.output
+    asked = dict(script.asked)
+    # The Mini is offered for the wrist; the others, in the SDK's order, for the external roles.
+    assert asked["Wrist camera serial ('none' if there is none)"] == "14846828"
+    assert asked["External camera serial ('none' if there is none)"] == "32439448"
+    assert asked["Second external camera serial ('none' if there is none)"] == "31425515"
+    cams = rig_mod.load(force=True).cameras.configured()
+    assert {role: cam.serial for role, cam in cams.items()} == {
+        "hand": "14846828",
+        "external": "32439448",
+        "external_2": "31425515",
+    }
+    assert "The ZED SDK sees 3 camera(s)" in _said(result)
+
+
+def test_a_typed_serial_overrides_the_suggestion_and_one_camera_fills_one_role(monkeypatch):
+    found = [zed.ZedCamera("14846828", "ZED-M"), zed.ZedCamera("32439448", "ZED 2i")]
+    monkeypatch.setattr(zed, "detect", lambda pythons: found)
+    _at_a_terminal(
+        monkeypatch,
+        {
+            "Wrist camera serial": ["55555555"],
+            # The wrist's serial again is refused and asked again.
+            "External camera serial": ["55555555", "32439448"],
+            "Second external camera serial": ["none"],
+        },
+    )
+    result = _run()
+    assert result.exit_code == 0, result.output
+    cams = rig_mod.load(force=True).cameras.configured()
+    assert {role: cam.serial for role, cam in cams.items()} == {"hand": "55555555", "external": "32439448"}
+    said = _said(result)
+    assert "55555555 is already the hand camera" in said
+    assert "55555555 is not connected right now" in said
 
 
 # --------------------------------------------------------------------------- the profiles

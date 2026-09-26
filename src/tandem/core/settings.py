@@ -37,7 +37,6 @@ class TeleopSettings(BaseModel):
     enabled: bool = False
     droid_dir: str = ""  # blank -> the teleop runtime's
     python: str = ""  # blank -> the teleop runtime's
-    device: str = "vr"  # vr | spacemouse
     controller: str = "right"  # right | left, VR only
 
 

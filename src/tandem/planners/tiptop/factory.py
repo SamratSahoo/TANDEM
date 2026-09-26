@@ -141,6 +141,12 @@ class TiptopFactory:
         ready = self.runtime(settings).status().installed
         return doctor.doctor_checks(profile, settings=settings, runtime_ready=ready, probe_hardware=probe_hardware)
 
+    def services(self, settings: Any = None) -> list:
+        """The M2T2 and FoundationStereo servers TiPToP's perception calls (servers.py)."""
+        from tandem.planners.tiptop import servers
+
+        return servers.services(_settings(settings))
+
     def runtime_env(self, *, rig: Any, settings: Any = None) -> dict[str, str]:
         """This machine's rig, where tiptop's own scripts read it (`tandem runtime run`, `runtime shell`).
 
@@ -284,6 +290,11 @@ class TiptopFactory:
             record=ctx.record,
             cost_overrides_file=files.get("overrides_file"),
             on_log=ctx.on_log,
+            perception_urls={
+                "m2t2": options.perception.m2t2.url,
+                "foundation_stereo": options.perception.foundation_stereo.url,
+            },
+            settings=ctx.settings,
         )
 
 

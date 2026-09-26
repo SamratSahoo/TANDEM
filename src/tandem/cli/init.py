@@ -127,9 +127,10 @@ def init(
     # ---- 4. the rig: this machine's robot and cameras -----------------------
     # Before the planner's checks and its build: it needs no GPU, and --robot-host and --camera given to an
     # init that a missing driver then stops are written all the same, not dropped without a word.
+    asked_rig = False
     if not viz_only:
-        theme.rule("robot and cameras")
-        _setup_rig(rig_flags, interactive=interactive, repair=repair)
+        theme.rule("robot")
+        asked_rig = _setup_rig(rig_flags, interactive=interactive, repair=repair)
         theme.blank()
     elif rig_flags:
         theme.warn(
@@ -156,6 +157,20 @@ def init(
     if not viz_only:
         theme.rule("planner runtime")
         _build_runtime(planner, interactive=interactive, repair=repair)
+        theme.blank()
+
+    # ---- 6a. the perception servers -----------------------------------------
+    # The servers the planner calls (TiPToP: M2T2 and FoundationStereo, every rollout); a session starts them.
+    if not viz_only and planner is not None and registry.services(planner):
+        theme.rule("perception servers")
+        _build_servers(planner, interactive=interactive, repair=repair)
+        theme.blank()
+
+    # ---- 6b. the cameras ------------------------------------------------------
+    # After the runtime: its ZED step is what gives this machine the ZED Python API that lists the cameras.
+    if not viz_only:
+        theme.rule("cameras")
+        _setup_cameras(planner, interactive=interactive, ask=asked_rig)
         theme.blank()
 
     # ---- 7. the Gemini key --------------------------------------------------
@@ -264,6 +279,28 @@ def _build_runtime(planner: str, *, interactive: bool, repair: bool) -> None:
         theme.warn("Skipped", f"run `tandem planners install {planner}` when you are ready")
     else:
         runtime_cli.run_build(runtime, force=repair, planner=planner)
+
+
+def _build_servers(planner: str, *, interactive: bool, repair: bool) -> None:
+    """The helper servers the planner runs (TiPToP: M2T2 and FoundationStereo), built as runtimes beside its own.
+
+    Those whose URL is another machine's are that machine's to build. A failed build is said and init goes on:
+    a session reports a server it cannot reach.
+    """
+    from tandem.cli import servers as servers_cli
+
+    services = servers_cli.planner_services(planner)
+    local = [service for service in services if service.local()]
+    if not local:
+        theme.ok("Its servers are on another machine", ", ".join(service.url() for service in services))
+        return
+    theme.info("A collection session starts them when it needs them, and stops them when it ends.")
+    try:
+        if not servers_cli.install_servers(planner, yes=not interactive, repair=repair):
+            theme.warn("Skipped", "`tandem servers install` builds them when you are ready")
+    except TandemError as exc:
+        theme.warn(f"A server did not build: {exc.message}", exc.hint or "")
+        theme.info("`tandem servers install` tries again; it skips what is done.")
 
 
 def _preflight(*, viz_only: bool) -> list[probe.Check]:
@@ -409,19 +446,18 @@ def _checked_rig_value(key: str, value: str) -> str:
     return value.strip()
 
 
-def _setup_rig(flags: dict[str, Any], *, interactive: bool, repair: bool) -> None:
-    """This machine's rig: the robot's address and arm, and the cameras by role.
+def _setup_rig(flags: dict[str, Any], *, interactive: bool, repair: bool) -> bool:
+    """This machine's rig: the robot's address and arm. Returns whether the rig's questions were asked.
 
     Asked at a terminal when there is no rig yet (and again with --repair), each question defaulting to
-    what the rig says now; the flags are applied either way, and are the defaults of the questions. One
-    write, validated whole. A rig already there is otherwise left as it is and shown: `tandem rig set`
-    changes one setting at any time.
+    what the rig says now; the flags (--camera ones included) are applied either way, and are the defaults
+    of the questions. One write, validated whole. A rig already there is otherwise left as it is and shown:
+    `tandem rig set` changes one setting at any time. The cameras are asked in a later step
+    (``_setup_cameras``), once the runtime can list them.
 
     A planner's machine settings are not written: its defaults stay its own (so a later tandem's better
     default reaches this machine), and `tandem rig show` lists each with its default beside the ones set.
     """
-    from tandem.cli import rig as rig_cli
-
     layout.refuse_rig_change()  # old profiles that could not be moved still hold this machine's rig
     existed = rig_mod.exists()
     rig = rig_mod.load()  # a rig.yml that does not validate stops here, naming the line and `tandem rig edit`
@@ -438,11 +474,58 @@ def _setup_rig(flags: dict[str, Any], *, interactive: bool, repair: bool) -> Non
         f"Rig: {rig.summary()}",
         str(rig.file()) if asked or not existed else f"{rig.file()} · `tandem rig set KEY VALUE` changes a setting",
     )
+    return asked
+
+
+def _ask_rig(rig: rig_mod.Rig, flags: dict[str, Any]) -> dict[str, Any]:
+    """The robot's questions, each defaulting to what a flag gave, else to what the rig says now."""
+    changes: dict[str, Any] = {}
+    changes["robot.host"] = _ask("Robot address (the NUC)", "robot.host", flags.get("robot.host", rig.robot.host))
+    changes["robot.type"] = _ask("Arm type", "robot.type", flags.get("robot.type", rig.robot.type))
+    return changes
+
+
+#: The camera questions' labels, by role.
+_CAMERA_LABELS = {
+    "hand": "Wrist camera serial",
+    "external": "External camera serial",
+    "external_2": "Second external camera serial",
+}
+
+
+def _setup_cameras(planner: str | None, *, interactive: bool, ask: bool) -> None:
+    """The cameras by role, offered from the ZED cameras the SDK lists, each to confirm or overwrite.
+
+    Asked at a terminal when the robot's questions were (a new rig, or --repair), or when the rig has no
+    cameras yet. The ZED listing runs under the planner's runtime, which has the ZED Python API once the
+    ZED SDK is installed; without it, each serial is typed. --camera flags were applied with the robot, so
+    they are the defaults here.
+    """
+    from tandem.cli import rig as rig_cli
+    from tandem.core import zed
+
+    rig = rig_mod.load()
+    configured = rig.cameras.configured()
+    if interactive and (ask or not configured):
+        found = zed.detect(zed.interpreters(planner, settings_mod.load()))
+        _say_found(found)
+        changes = _ask_cameras(rig, found)
+        changes = {key: value for key, value in changes.items() if _differs(rig, key, value)}
+        if changes:
+            rig = rig_mod.update(changes)
+    elif not configured:
+        found = zed.detect(zed.interpreters(planner, settings_mod.load()))
+        if found:
+            theme.info(
+                "ZED cameras connected: " + ", ".join(f"{cam.serial} ({cam.model})" for cam in found),
+                "`tandem rig set cameras.ROLE.serial SERIAL`, or `tandem init` at a terminal",
+            )
+
     configured = rig.cameras.configured()
     if configured:
         missing = rig.missing_calibration()
-        theme.info(
-            "cameras: " + ", ".join(f"{role} {cam.serial}" for role, cam in configured.items()),
+        theme.ok(
+            "Cameras: " + ", ".join(f"{role} {cam.serial}" for role, cam in configured.items()),
             f"{len(configured) - len(missing)} of {len(configured)} with extrinsics in {rig.calibration_file()}",
         )
     else:
@@ -455,20 +538,48 @@ def _setup_rig(flags: dict[str, Any], *, interactive: bool, repair: bool) -> Non
     rig_cli.warn_planner_rig_checks()
 
 
-def _ask_rig(rig: rig_mod.Rig, flags: dict[str, Any]) -> dict[str, Any]:
-    """The rig's questions, each defaulting to what a flag gave, else to what the rig says now."""
+def _say_found(found: list | None) -> None:
+    if found is None:
+        theme.info(
+            "Could not list the ZED cameras: the ZED Python API is not installed yet (install the ZED SDK, "
+            "then `tandem planners install tiptop`)",
+            "type each serial: it is on the camera's label, and ZED Explorer shows it",
+        )
+    elif not found:
+        theme.warn("The ZED SDK sees no camera", "check each is plugged in; type the serials to set them anyway")
+    else:
+        theme.info(f"The ZED SDK sees {len(found)} camera(s):")
+        for cam in found:
+            note = "" if cam.available else " · in use by another process"
+            theme.info(f"  {cam.serial}  {cam.model}{note}")
+
+
+def _ask_cameras(rig: rig_mod.Rig, found: list | None) -> dict[str, Any]:
+    """Each role's serial, defaulting to the rig's, else to what the listing suggests; then perception's camera."""
+    from tandem.core import zed
+
+    seen = {cam.serial for cam in found or ()}
+    suggested = zed.suggest(found or [], rig_mod.ROLES)
     changes: dict[str, Any] = {}
-    changes["robot.host"] = _ask("Robot address (the NUC)", "robot.host", flags.get("robot.host", rig.robot.host))
-    changes["robot.type"] = _ask("Arm type", "robot.type", flags.get("robot.type", rig.robot.type))
-    labels = {"hand": "Wrist camera serial", "external": "External camera serial", "external_2": "Second external camera serial"}
+    taken: dict[str, str] = {}
     for role in rig_mod.ROLES:
         cam = getattr(rig.cameras, role)
-        current = flags.get(f"cameras.{role}.serial", cam.serial if cam is not None else NONE)
-        serial = _ask(f"{labels[role]} ('{NONE}' if there is none)", f"cameras.{role}.serial", current, blank=True)
+        default = cam.serial if cam is not None else suggested.get(role, NONE)
+        while True:
+            serial = _ask(
+                f"{_CAMERA_LABELS[role]} ('{NONE}' if there is none)", f"cameras.{role}.serial", default, blank=True
+            )
+            if serial != NONE and serial in taken:
+                theme.warn(f"{serial} is already the {taken[serial]} camera; a camera fills one role")
+                continue
+            break
         if serial == NONE:
             changes[f"cameras.{role}"] = None
-        else:
-            changes[f"cameras.{role}.serial"] = serial
+            continue
+        taken[serial] = role
+        changes[f"cameras.{role}.serial"] = serial
+        if found is not None and serial not in seen:
+            theme.warn(f"{serial} is not connected right now", "kept; plug it in before collecting")
     perception = rig.cameras.perception
     while True:
         answer = typer.prompt("  Which camera does perception read? [external/hand]", default=perception).strip()
@@ -578,7 +689,7 @@ def _setup_teleop(*, interactive: bool, repair: bool) -> None:
 
     cfg = settings_mod.load()
     if cfg.teleop.enabled and not repair and not teleop_executor.unmet_requirements(cfg):
-        theme.ok("Teleop hand-off is configured", cfg.teleop.droid_dir or f"device: {cfg.teleop.device}")
+        theme.ok("Teleop hand-off is configured", cfg.teleop.droid_dir or f"VR, {cfg.teleop.controller} controller")
         return
 
     theme.info('"Switch to teleop" lends the arm to a human mid-task and takes it back,')
@@ -592,14 +703,14 @@ def _setup_teleop(*, interactive: bool, repair: bool) -> None:
         theme.info("Skipped — collection works without it; the hand-off button stays disabled.")
         return
 
-    device = typer.prompt(
-        "  Drive with (vr or spacemouse)",
-        default=cfg.teleop.device or "vr",
-        type=click.Choice(["vr", "spacemouse"]),
+    controller = typer.prompt(
+        "  Which VR controller drives the arm (right or left)",
+        default=cfg.teleop.controller or "right",
+        type=click.Choice(["right", "left"]),
         show_choices=False,
     )
-    if device != cfg.teleop.device:
-        cfg.teleop.device = device
+    if controller != cfg.teleop.controller:
+        cfg.teleop.controller = controller
         settings_mod.save(cfg)
     try:
         # The person just said yes, so this asks nothing more (pixi was offered with the planner's runtime).

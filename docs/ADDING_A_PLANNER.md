@@ -246,6 +246,7 @@ What you get without writing it:
 | `create(ctx)` | Runs `validate_options(ctx.options)` and `validate_rig_options(ctx.rig_options)`, then `cls(ctx)`. |
 | `runtime_env(*, rig, settings=None)` | Returns `{}`. It is what `tandem runtime run` and `shell` add to the environment of the planner's own scripts. TiPToP's writes a `tiptop.yml` from the rig and points `$TIPTOP_CONFIG` at it. |
 | `replay(rollout_dir, *, settings=None)` | Raises `UnsupportedVerb`, so `tandem traj open` isn't available. |
+| `services(settings=None)` | Not defined, so the planner runs no helper servers. Define it to return servers such as TiPToP's M2T2 and FoundationStereo, each with `name`, `title`, `runtime(settings)` (a `RecipeRuntime`), `url()`, `local()`, `healthy()`, `started_pid()`, `log_path`, `start()` and `stop()`. `tandem init` builds their runtimes and `tandem servers` manages them; starting them for a session is the planner's own (TiPToP's backend does it in `warm` and `perceive`). |
 | `runtime(settings)`, `runtime_root(settings)` | The runtime at `~/.local/share/tandem/runtimes/<name>` (or `$TANDEM_RUNTIMES_DIR`). `None` without a recipe. |
 
 Inside a planner you can use:

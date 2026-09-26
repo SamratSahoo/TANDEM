@@ -40,7 +40,6 @@ def main() -> int:
     parser.add_argument("--output-root", required=True)
     parser.add_argument("--instruction", default="")
     parser.add_argument("--trajectory-id", default="")
-    parser.add_argument("--device", default="vr")
     parser.add_argument("--controller", default="right")
     parser.add_argument("--keep-pose", action="store_true")
     parser.add_argument("--hand-camera-id", default="")

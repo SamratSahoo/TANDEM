@@ -3,7 +3,7 @@
 "Switch to teleop" lends the arm to a human mid-task and takes it back afterwards, without
 ever returning to home. It is not a preempt: the planner finishes the current plan step, saves
 the partial rollout, releases the robot **and closes its cameras**, and waits. A teleop process
-then drives the arm from a VR controller or a SpaceMouse, capturing in exactly the same raw
+then drives the arm from a VR controller, capturing in exactly the same raw
 format. When control comes back, the planner re-opens the cameras, reconnects, and replans the
 same task from wherever the human left the arm.
 
@@ -33,4 +33,4 @@ def driver_path() -> Path:
 def helper_paths() -> list[Path]:
     """Modules the driver imports from its own directory at runtime."""
     here = Path(__file__).resolve().parent
-    return [here / "raw_episode.py", here / "spacemouse.py"]
+    return [here / "raw_episode.py"]

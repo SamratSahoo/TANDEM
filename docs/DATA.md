@@ -307,6 +307,7 @@ A session's live state. The web UI gets it from `GET /api/sessions/{id}`, and `t
 | `…/<id>/vlm/<trajectory id>/` | Each trial's [model queries](#vlm). This is the only copy if the trial recorded nothing. |
 | `…/<id>/perception/<leg dir>/` | Perception passes that recorded nothing, moved out of `eval/`. TiPToP's `metadata.json` there has the planning result and failure reason. |
 | `…/<id>/teleop/leg-*/teleop-events.jsonl` | Teleop driver events, one directory per hand-off. |
+| `~/.local/state/tandem/logs/server-<name>.log` | A perception server tandem started (`m2t2`, `foundation_stereo`), appended per start. Its pid is in `~/.local/state/tandem/servers/<name>.pid` while it runs. |
 | `~/.local/state/tandem/logs/export.log` | `tandem export lerobot`'s log, appended on each run. |
 | `~/.local/state/tandem/logs/runtime-build-<YYYYMMDD-HHMMSS>.log` | One per runtime build (`tandem planners install`, `tandem runtime build`, `tandem init`). |
 | `~/tandem-data/exports/<owner>/<name>/` | Exported datasets, or `--out DIR` ([exporting](USAGE.md#exporting)). |

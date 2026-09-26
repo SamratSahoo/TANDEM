@@ -83,6 +83,7 @@ from tandem.cli import planners as _planners  # noqa: E402
 from tandem.cli import profile as _profile  # noqa: E402
 from tandem.cli import rig as _rig  # noqa: E402
 from tandem.cli import runtime as _runtime  # noqa: E402
+from tandem.cli import servers as _servers  # noqa: E402
 from tandem.cli import traj as _traj  # noqa: E402
 from tandem.cli import ui as _ui  # noqa: E402
 
@@ -108,6 +109,9 @@ app.add_typer(
 )
 app.add_typer(
     _runtime.app, name="runtime", help="The runtime of the active profile's planner, which `tandem init` builds."
+)
+app.add_typer(
+    _servers.app, name="servers", help="TiPToP's perception servers: build, start, stop, check."
 )
 
 

@@ -166,7 +166,7 @@ Any other exception from `run` fails the trial at `human_policy`, and the sessio
   workstation side of [DROID's TANDEM branch](https://github.com/SamratSahoo/droid/tree/TANDEM) and
   oculus_reader, in their own environment;
 - `teleop.enabled` ([keys](CONFIGURATION.md#tandem-settings-and-credentials)), which the install turns on;
-- a VR headset and controller, or a SpaceMouse.
+- a VR headset and controller (Meta Quest).
 
 tandem sets `DROID_NUC_IP` and `TIPTOP_*_CAMERA_ID` for the driver from the rig, which DROID's
 `droid/misc/parameters.py` reads. To run a DROID checkout and environment of your own instead, set both

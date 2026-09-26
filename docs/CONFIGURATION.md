@@ -300,8 +300,8 @@ The robot's address and type are the rig's `robot.host` and `robot.type`.
 
 | key | default | what it does |
 |---|---|---|
-| `m2t2.url`, `m2t2.apply_bounds` | `http://localhost:8123`, `true` | M2T2 grasp server, and a flag sent with each request. `tandem doctor` probes it. |
-| `foundation_stereo.url` | `http://localhost:1234` | FoundationStereo depth server, used every rollout. `tandem doctor` probes it. |
+| `m2t2.url`, `m2t2.apply_bounds` | `http://localhost:8123`, `true` | M2T2 grasp server, and a flag sent with each request. On this machine, a session starts it if it is down ([servers](USAGE.md#servers)). `tandem doctor` probes it. |
+| `foundation_stereo.url` | `http://localhost:1234` | FoundationStereo depth server, used every rollout. On this machine, a session starts it if it is down. `tandem doctor` probes it. |
 | `sam_mode` | `local` | `local`: SAM-2 in the runtime. `remote`: the server at `sam_url` (then required). |
 | `depth_smoothing_frames` | `5` | Depth frames median-fused at capture. `1` disables it. |
 | `robot_mask_margin_m` | `0.02` | Padding when cutting the arm out of a third-person cloud. Raise it if arm points remain. |
@@ -391,7 +391,7 @@ tandem config edit                 # also: get KEY, path
 | `hf_org` | | Owner for an export repo named without one. |
 | `teleop.enabled` | `false` | Human phases can use teleop. `tandem executors install teleop` turns it on ([teleop](ADDING_A_HUMAN_EXECUTOR.md#the-teleop-executor)). |
 | `teleop.droid_dir`, `teleop.python` | blank | Blank: the driver runs in the teleop runtime. Set both to run a DROID checkout and environment of your own. |
-| `teleop.device`, `teleop.controller` | `vr`, `right` | `vr` or `spacemouse`, and which VR hand (`right` or `left`). |
+| `teleop.controller` | `right` | Which VR controller drives the arm: `right` or `left`. |
 | `ui.host`, `ui.port`, `ui.open_browser` | `127.0.0.1`, `8787`, `true` | `tandem ui`. A busy port steps to the next free one. |
 
 ### Credentials
@@ -418,7 +418,7 @@ Linux defaults; other systems differ.
 | share: runtimes | `~/.local/share/tandem` | `$TANDEM_SHARE_DIR` |
 | data: profiles, trajectories | `~/tandem-data` | `$TANDEM_DATA_ROOT` |
 | TiPToP's runtime | `<share>/runtime` | `$TANDEM_RUNTIME_DIR` |
-| other planners' runtimes, and teleop's | `<share>/runtimes/NAME` (teleop: `<share>/runtimes/teleop`) | `$TANDEM_RUNTIMES_DIR` |
+| other planners' runtimes, teleop's and the servers' | `<share>/runtimes/NAME` (`teleop`, `m2t2`, `foundation_stereo`) | `$TANDEM_RUNTIMES_DIR` |
 | [offline install](#offline-install) sources | none | `$TANDEM_PLANNER_SOURCES` |
 
 ## The planner runtime

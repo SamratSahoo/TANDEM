@@ -222,7 +222,7 @@ first: `tandem --debug collect` shows full tracebacks, and `--no-color` (or `NO_
 
 | command | what it does |
 |---|---|
-| `tandem init` | Checks, data directory, planner runtime, Gemini key, [the rig](CONFIGURATION.md#the-rig), [the paper's five](CONFIGURATION.md#the-papers-five) and teleop. Moves [older profiles](CONFIGURATION.md#older-profiles). Skips steps already done. |
+| `tandem init` | Checks, data directory, planner runtime and its [servers](#servers), Gemini key, [the rig](CONFIGURATION.md#the-rig), [the paper's five](CONFIGURATION.md#the-papers-five) and teleop. Moves [older profiles](CONFIGURATION.md#older-profiles). Skips steps already done. |
 | `tandem doctor` | Runs every check and says how to fix what fails. Changes nothing. |
 
 | flag | what it does |
@@ -298,3 +298,19 @@ tandem runtime run viz-calibration --camera external   # a planner script, point
   `--` still works.
 - `build` builds or repairs the runtime (`--force` refetches, plus `--env-only` and `--sources DIR`).
   `python` prints the interpreter, and `clean` deletes the runtime (`-y` skips the confirmation).
+
+### Servers
+
+`tandem servers install|status|start|stop` manages the helper servers the planner calls: TiPToP's M2T2 (grasps)
+and FoundationStereo (depth), at the URLs in [the rig](CONFIGURATION.md#tiptop-options). `tandem init` builds
+them, and `tandem collect` starts any that are down and stops the ones it started when it ends.
+
+| command | what it does |
+|---|---|
+| `servers install` | Build their runtimes. `--force` (refetch, rebuild), `--sources DIR`, `-y/--yes`. |
+| `servers status` | Whether each is installed and answering, and whether tandem started it. `--json`. |
+| `servers start [NAME]` | Start those that are down, wait for each to load, and leave them running. |
+| `servers stop [NAME]` | Stop the ones tandem started, such as after a crashed session. |
+
+`NAME` is `m2t2` or `foundation_stereo`. A server whose URL is another machine's is never started. Each
+server's log is `server-<name>.log` ([logs](DATA.md#logs-and-session-files)).

@@ -366,6 +366,39 @@ def run_build(
         )
 
 
+def install_recipe_runtime(
+    rt, *, force: bool = False, sources_dir: Path | None = None, yes: bool = False, repair: bool = False
+) -> bool:
+    """Build a recipe runtime unless it is built at its pins; run any optional step it can take now.
+
+    For runtimes that are not the active planner's -- teleop's, the perception servers' -- with the same
+    pixi consent and build as `tandem planners install`. Returns False only when the person declined.
+    """
+    title = rt.recipe.display_name
+    status = rt.status()
+    pending = optional_steps_to_run(rt)
+    force = force or repair
+    if status.installed and not status.mismatched(rt.recipe.pins) and not force and not pending:
+        theme.ok(f"The {title} is already installed", str(status.path or ""))
+        say_notes(status)
+        return True
+    interactive = theme.is_tty() and not yes
+    if needs_pixi(rt):
+        ensure_pixi(title, ask=interactive, allowed=yes)
+    from rich.markup import escape
+
+    theme.heading(f"installing the {title}", escape(str(status.path or "")))
+    if status.installed and not status.mismatched(rt.recipe.pins) and not force:
+        theme.info(f"It is built; now installing {', '.join(pending)}.")
+    else:
+        for note in rt.recipe.notes:
+            theme.info(note)
+    if interactive and not typer.confirm(f"  Install the {title} now?", default=True):
+        return False
+    run_build(rt, force=force, sources_dir=sources_dir)
+    return True
+
+
 def say_notes(status) -> None:
     """What a runtime that works would still like done -- an optional part this machine cannot have yet, with
     the fix -- said where the person who installs it reads: the install's own output."""

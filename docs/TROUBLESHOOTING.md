@@ -53,12 +53,16 @@ Teleop uses the same `robot.host`, so fixing it fixes both.
 ## A perception server doesn't answer ("foundation stereo depth server …", "m2t2 grasp server …")
 
 ```bash
-pixi run server   # in each server's checkout (step 4 of the README)
-tandem rig set planners.tiptop.perception.foundation_stereo.url http://HOST:1234   # if it runs elsewhere
-tandem rig set planners.tiptop.perception.m2t2.url http://HOST:8123
+tandem servers status    # installed? answering?
+tandem servers install   # if it says "not installed"
+tandem servers start     # starts it and waits; a failure names its log
 ```
 
-TiPToP asks both servers on every rollout ([step 4](../README.md#4-perception-servers)).
+TiPToP asks both servers on every rollout ([step 4](../README.md#4-perception-servers)). A session starts a
+server on this machine that isn't running, so this usually means it isn't built, or it crashed while loading.
+The log is `~/.local/state/tandem/logs/server-<name>.log`. Running out of GPU memory is the usual crash.
+
+For a server on another machine, check its URL (`tandem rig show`):
 
 - `gaierror`: the hostname doesn't resolve.
 - `ConnectionRefusedError`: nothing listens on that port.

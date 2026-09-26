@@ -40,12 +40,12 @@ from tandem.planners.base import LegSpec
 from tandem.teleop.child import TeleopChild
 
 DISPLAY_NAME = "Teleoperation"
-SUMMARY = "A person drives the arm with a VR controller or a SpaceMouse, through the DROID teleop driver."
+SUMMARY = "A person drives the arm with a VR controller, through the DROID teleop driver."
 REQUIREMENTS = (
     "teleop.enabled is true",
     "the teleop runtime (`tandem executors install teleop`), or teleop.python and teleop.droid_dir naming a "
     "DROID environment and checkout of your own",
-    "a VR headset and controller, or a SpaceMouse (teleop.device)",
+    "a VR headset and controller",
 )
 
 

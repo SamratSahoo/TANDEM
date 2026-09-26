@@ -25,7 +25,6 @@ from pathlib import Path
 from typing import Any
 
 import typer
-from rich.markup import escape
 from rich.text import Text
 
 from tandem.cli import theme
@@ -223,33 +222,15 @@ def install_teleop(*, force: bool = False, sources: Path | None = None, yes: boo
     """
     from tandem.cli import runtime as runtime_cli
 
-    cfg = settings_mod.load()
-    rt = _runtime("teleop", cfg)
-    title = rt.recipe.display_name
-    status = rt.status()
-    pending = runtime_cli.optional_steps_to_run(rt)
-    if status.installed and not status.mismatched(rt.recipe.pins) and not force and not pending:
-        theme.ok(f"The {title} runtime is already installed", str(status.path or ""))
-        runtime_cli.say_notes(status)
-    else:
-        interactive = theme.is_tty() and not yes
-        if runtime_cli.needs_pixi(rt):
-            runtime_cli.ensure_pixi(title, ask=interactive, allowed=yes)
-        theme.heading(f"installing {title}", escape(str(status.path or "")))
-        if status.installed and not status.mismatched(rt.recipe.pins) and not force:
-            theme.info(f"It is built; now installing {', '.join(pending)}.")
-        else:
-            for note in rt.recipe.notes:
-                theme.info(note)
-        if interactive and not typer.confirm(f"  Install {title} now?", default=True):
-            return False
-        runtime_cli.run_build(rt, force=force, sources_dir=sources)
+    rt = _runtime("teleop", settings_mod.load())
+    if not runtime_cli.install_recipe_runtime(rt, force=force, sources_dir=sources, yes=yes):
+        return False
 
     cfg = settings_mod.load()
     if not cfg.teleop.enabled:
         cfg.teleop.enabled = True
         settings_mod.save(cfg)
-        theme.ok("Teleop enabled", f"device: {cfg.teleop.device}")
+        theme.ok("Teleop enabled", f"VR, {cfg.teleop.controller} controller")
     if cfg.teleop.python or cfg.teleop.droid_dir:
         theme.warn(
             "teleop.python and teleop.droid_dir are set, so the driver still runs your own DROID checkout",
@@ -277,7 +258,7 @@ def install(
         raise typer.Abort()
     theme.next_steps(
         [
-            ("tandem config set teleop.device spacemouse", "drive with a SpaceMouse instead of VR (the default)"),
+            ("tandem config set teleop.controller left", "drive with the left VR controller (default: right)"),
             ("tandem executors list", "teleop should say ready"),
         ]
     )

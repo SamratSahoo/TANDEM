@@ -90,6 +90,8 @@ class TiptopBackend(SidecarPlanner):
         record: bool = True,
         cost_overrides_file: Path | None = None,
         on_log: Callable[[str, str], None] | None = None,
+        perception_urls: dict[str, str] | None = None,
+        settings: Any = None,
     ) -> None:
         # Built by the factory, which has already located the runtime and rendered the environment
         # from the profile; see factory.TiptopFactory.create.
@@ -98,6 +100,15 @@ class TiptopBackend(SidecarPlanner):
         self._execute = execute
         self._record = record
         self._cost_overrides_file = cost_overrides_file
+        # The M2T2 and FoundationStereo servers perception calls: started before warming and before each
+        # perception pass if they are down, and stopped at close if this session started them (servers.py).
+        self._servers = None
+        if perception_urls:
+            from tandem.planners.tiptop.servers import ServerManager
+
+            self._servers = ServerManager(
+                perception_urls, log=lambda text: self.log(text), settings=settings
+            )
 
     # ---- the class as a factory: TiPToP's lives in factory.py, so both routes build the same thing ----
 
@@ -132,6 +143,12 @@ class TiptopBackend(SidecarPlanner):
         return FACTORY.doctor_checks(profile, settings=settings, probe_hardware=probe_hardware)
 
     @classmethod
+    def services(cls, settings=None):
+        from tandem.planners.tiptop.factory import FACTORY
+
+        return FACTORY.services(settings)
+
+    @classmethod
     def replay(cls, rollout_dir, *, settings=None):
         from tandem.planners.tiptop.factory import FACTORY
 
@@ -142,6 +159,34 @@ class TiptopBackend(SidecarPlanner):
     def launch_cwd(self) -> Path | None:
         # The tiptop tree, where its pixi manifest is and where tiptop resolves its relative paths.
         return self._runtime.tiptop_dir
+
+    def warm(self) -> None:
+        # The sidecar's warm-up checks both servers, so they come up first.
+        if self._servers is not None:
+            self._servers.ensure()
+        super().warm()
+
+    def perceive(
+        self,
+        *,
+        task_hint: str,
+        save_dir: Path,
+        reset_arm: bool = True,
+        open_gripper: bool = False,
+    ):
+        # One that died since (out of GPU memory, say) is started again before the pass that needs it.
+        if self._servers is not None:
+            self._servers.ensure()
+        return super().perceive(
+            task_hint=task_hint, save_dir=save_dir, reset_arm=reset_arm, open_gripper=open_gripper
+        )
+
+    def close(self) -> None:
+        try:
+            super().close()
+        finally:
+            if self._servers is not None:
+                self._servers.stop_started()
 
     def warm_args(self) -> dict[str, Any]:
         # The cost overrides are the same file an ordinary tiptop-run reads its knobs from.
