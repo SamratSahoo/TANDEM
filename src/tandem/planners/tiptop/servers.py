@@ -98,7 +98,7 @@ FOUNDATION_STEREO_RECIPE = RuntimeRecipe(
             SourcePin(
                 "FoundationStereo",
                 "https://github.com/SamratSahoo/FoundationStereo.git",
-                "8353e9d790f37be119503f02510a4d6e4cd429eb",
+                "f505b99d6ff6cb44481c5b313efac02300c6e10e",
                 ref="TANDEM",
             ),
             trim=("teaser",),
@@ -111,7 +111,7 @@ FOUNDATION_STEREO_RECIPE = RuntimeRecipe(
         BuildStep(
             name="setup",
             task="setup",
-            produces=("env/envs/default/lib/python3*/site-packages/timm",),
+            produces=("env/envs/default/lib/python3*/site-packages/joblib",),
             description="installing torch and the server's dependencies",
             label="dependencies",
             done="installed",
