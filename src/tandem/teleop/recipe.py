@@ -37,12 +37,13 @@ ZED_PYTHON_API = "/usr/local/zed/get_python_api.py"
 
 # DROID's TANDEM branch is its main plus the two things a managed runtime needs: pixi.toml and pixi.lock
 # for the workstation side, and droid.misc.parameters reading nuc_ip from $DROID_NUC_IP, so the rig's
-# robot.host reaches it (the camera serials were already read from $TIPTOP_*_CAMERA_ID).
+# robot.host reaches it (the camera serials were already read from $TIPTOP_*_CAMERA_ID). Its install-zed
+# task also puts NumPy < 2 back after the ZED installer pulls in NumPy 2, which OpenCV 4.6 cannot import.
 DROID = Source(
     SourcePin(
         "droid",
         "https://github.com/SamratSahoo/droid.git",
-        "c65c3dde552e4564b98e309116fcf7ddff4749fa",
+        "a2ebef2e3729435e9f518eaced29c35d7e4070f5",
         ref="TANDEM",
     ),
     trim=(
