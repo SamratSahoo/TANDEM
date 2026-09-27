@@ -40,11 +40,12 @@ ZED_PYTHON_API = "/usr/local/zed/get_python_api.py"
 # robot.host reaches it (the camera serials were already read from $TIPTOP_*_CAMERA_ID). Its install-zed
 # task also puts NumPy < 2 back after the ZED installer pulls in NumPy 2, which OpenCV 4.6 cannot import,
 # and its StableRobotEnv and VRPolicy are the lab's DROID's: the driver needs StableRobotEnv(do_reset=...).
+# The environment also has imageio and imageio-ffmpeg, for the driver's videos.
 DROID = Source(
     SourcePin(
         "droid",
         "https://github.com/SamratSahoo/droid.git",
-        "ec035145a7b5dc98ca11f4126116572eb4259a31",
+        "0f1cca2e050260ab14bb87d80bdfb894bf009d0e",
         ref="TANDEM",
     ),
     trim=(
@@ -97,7 +98,7 @@ RECIPE = RuntimeRecipe(
     ),
     notes=(
         "Building the teleop driver's environment: DROID's workstation side (numpy, scipy, zerorpc, gym, "
-        "OpenCV), oculus_reader for VR, and the ZED Python API when the ZED SDK is installed.",
+        "OpenCV, imageio), oculus_reader for VR, and the ZED Python API when the ZED SDK is installed.",
         "About 100 MB of downloads; a few minutes.",
     ),
 )
