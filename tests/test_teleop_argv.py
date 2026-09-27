@@ -1,7 +1,7 @@
 """The command line a hand-off launches the teleop driver with, checked against the REAL driver's flags.
 
 Every hand-off test runs tests/fake_teleop.py, which used to ignore flags it did not know. The real driver
-(teleop/driver.py) parses its command line with ``tyro.cli(Args)``, which exits on one it does not know
+(teleop/driver.py) parses its command line from its ``Args`` dataclass (``parse_args``), which exits on one it does not know
 -- so a flag renamed in teleop/child.py passed the suite and then stopped every hand-off on a robot at
 the first leg. And ``--keep-pose`` is a safety flag, not a nicety: without it the driver homes the arm
 mid-task, holding whatever the planner left in its gripper.
@@ -31,7 +31,7 @@ def driver_flags(monkeypatch) -> set[str]:
     spec = importlib.util.spec_from_file_location("tandem_teleop_driver_flags", teleop_pkg.driver_path())
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    # tyro's spelling of a dataclass field on the command line: underscores become dashes.
+    # The driver's spelling of a dataclass field on the command line: underscores become dashes.
     return {"--" + f.name.replace("_", "-") for f in dataclasses.fields(module.Args)}
 
 

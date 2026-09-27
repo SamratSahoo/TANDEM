@@ -505,7 +505,28 @@ def main(args: Args):
                 pass
 
 
-if __name__ == "__main__":
-    import tyro
+def parse_args(argv=None) -> Args:
+    """``Args`` from the command line: each field is ``--field-name``, a bool is a bare switch.
 
-    main(tyro.cli(Args))
+    argparse, not tyro: this runs under the teleop runtime's interpreter, whose environment is DROID's
+    workstation side (teleop/recipe.py) and has no tyro. Strict, as tyro was: an unknown flag -- or an
+    abbreviation of one -- is an error (tests/test_teleop_argv.py checks the hand-off's flags against these).
+    """
+    import argparse
+
+    kinds = {"str": str, "int": int, "bool": bool}
+    parser = argparse.ArgumentParser(allow_abbrev=False)
+    for f in dataclasses.fields(Args):
+        flag = "--" + f.name.replace("_", "-")
+        # The annotation's base type, from the class or its string: "Optional[int]" is an int.
+        name = str(f.type)
+        kind = next((k for n, k in kinds.items() if n in name), str)
+        if kind is bool:
+            parser.add_argument(flag, dest=f.name, action="store_true", default=f.default)
+        else:
+            parser.add_argument(flag, dest=f.name, type=kind, default=f.default)
+    return Args(**vars(parser.parse_args(argv)))
+
+
+if __name__ == "__main__":
+    main(parse_args())

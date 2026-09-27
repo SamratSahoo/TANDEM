@@ -32,7 +32,7 @@ def read_line():
 
 
 def main() -> int:
-    # Strict, as the real driver's tyro parser is: an unknown flag -- or an abbreviation of one -- is an
+    # Strict, as the real driver's parser is: an unknown flag -- or an abbreviation of one -- is an
     # error, not ignored. A lenient stand-in is how a renamed flag once passed every hand-off test and
     # stopped every hand-off on a robot (tests/test_teleop_argv.py checks the real driver's own list).
     parser = argparse.ArgumentParser(allow_abbrev=False)
