@@ -57,6 +57,24 @@ def test_a_full_rollout_reaches_labeled(live_session, backends):
     assert wait_for(lambda: session.state is State.AWAITING_TASK)
 
 
+def test_the_first_rollout_starts_once_warm_without_waiting_at_the_prompt(profile, monkeypatch, backends):
+    from tandem.core import session as session_mod
+
+    monkeypatch.setattr(session_mod, "AUTO_START_FIRST_TASK", True)
+    monkeypatch.setattr(secrets, "gemini_api_key", lambda: "test-key")
+    session = Session(profile, task="pick up the block")
+    session.start()
+    try:
+        # Straight to the label prompt: nobody answered a task prompt.
+        assert wait_for(lambda: session.state is State.AWAITING_LABEL), f"stuck in {session.state}"
+        session.label(True)
+        # The next rollout does wait at the prompt.
+        assert wait_for(lambda: session.state is State.AWAITING_TASK), f"stuck in {session.state}"
+    finally:
+        session.stop(park=False)
+        session.wait(timeout=5)
+
+
 def test_a_failure_label_is_recorded_as_such(live_session):
     session = live_session
     session.next_task()

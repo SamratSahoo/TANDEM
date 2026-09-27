@@ -92,6 +92,9 @@ STOP_GRACE = 300.0 + MERGE_GRACE
 # How long a human phase, or a lent arm, waits for the person before the session is considered
 # abandoned. Long: the whole point is that somebody is doing something with their hands.
 HUMAN_PHASE_TIMEOUT = 3600.0
+# Whether the first rollout starts on its own once the planner is warm, rather than waiting at the
+# task prompt. Every later rollout still waits there, after the previous one is labeled.
+AUTO_START_FIRST_TASK = True
 
 
 class State(str, Enum):
@@ -423,9 +426,13 @@ class Session:
             self._capabilities = self._backend.capabilities()
             # After warm, not in start(): a sidecar only says which verbs it answers once it runs.
             self._require_frames()
+            # The first rollout starts as soon as the planner is warm: the task was given when the
+            # session was started, so asking for it again would only make the operator press Enter.
+            first = AUTO_START_FIRST_TASK
             while not self._stopping:
-                if not self._await_task():
+                if not first and not self._await_task():
                     break
+                first = False
                 try:
                     self._run_task()
                 except _Stopped:

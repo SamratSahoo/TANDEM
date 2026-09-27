@@ -98,6 +98,12 @@ def isolated_env(tmp_path, monkeypatch):
         rig_mod._noticed.clear()
         profiles._noticed_old_layout = False
 
+    # A session starts its first rollout on its own once warm. Most tests want it held at the task
+    # prompt, to look at the session before the attempt starts; those that test the default undo this.
+    from tandem.core import session as session_mod
+
+    monkeypatch.setattr(session_mod, "AUTO_START_FIRST_TASK", False)
+
     forget()
     yield tmp_path
     forget()
