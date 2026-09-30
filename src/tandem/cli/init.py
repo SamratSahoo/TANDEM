@@ -86,7 +86,8 @@ def init(
     theme.rule("checking this machine")
     checks = _preflight(viz_only=viz_only)
     _render_checks(checks)
-    checks = _ensure_ffmpeg(checks, interactive=interactive)
+    if not viz_only:  # a laptop joins no hand-off's legs, and apt's ffmpeg is minutes of install
+        checks = _ensure_ffmpeg(checks, interactive=interactive)
     if not viz_only:
         _stop_on_blocking(checks, interactive=interactive, unapplied=rig_flags)
     theme.blank()
@@ -318,7 +319,8 @@ def _preflight(*, viz_only: bool) -> list[probe.Check]:
 
 
 def _ensure_ffmpeg(checks: list[probe.Check], *, interactive: bool) -> list[probe.Check]:
-    """Install ffmpeg when the preflight found none: ``checks`` with its check made again after.
+    """Install ffmpeg when the preflight found none: ``checks`` with its check made again after. A workstation's
+    only: joining the legs of a teleop hand-off is collection's, and a laptop is told ffmpeg is missing.
 
     With Homebrew on a Mac, apt-get on Linux (through sudo unless this is root). At a terminal it is asked
     first and sudo may ask for a password; without one it is "accept every default", as pixi is, but sudo
@@ -362,7 +364,7 @@ def _ffmpeg_install_command(*, interactive: bool) -> list[str] | None:
         return None
     # Through env, not the environment: sudo drops DEBIAN_FRONTEND, and apt's configure step must not stop
     # on a question (tzdata's time zone, on a fresh machine).
-    command = ["env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "ffmpeg"]
+    command = ["env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "--no-install-recommends", "ffmpeg"]
     if os.geteuid() == 0:
         return command
     if not shutil.which("sudo"):
