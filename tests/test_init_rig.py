@@ -318,7 +318,7 @@ def _no_ffmpeg(monkeypatch, *, installs: bool) -> list[list[str]]:
     monkeypatch.setattr(init_cli, "_preflight", lambda viz_only: [missing])
     monkeypatch.setattr(init_cli, "_ffmpeg_install_command", lambda interactive: ["pkg", "install", "ffmpeg"])
 
-    def install(command):
+    def install(command, *, interactive):
         ran.append(command)
         return [] if installs else ["E: Unable to locate package ffmpeg"]
 
@@ -358,7 +358,8 @@ def test_sudo_is_never_left_waiting_on_a_password_without_a_terminal(monkeypatch
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr("os.geteuid", lambda: 1000)
-    assert init_cli._ffmpeg_install_command(interactive=False) == ["sudo", "-n", "apt-get", "install", "-y", "ffmpeg"]
-    assert init_cli._ffmpeg_install_command(interactive=True) == ["sudo", "apt-get", "install", "-y", "ffmpeg"]
+    apt = ["env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "ffmpeg"]
+    assert init_cli._ffmpeg_install_command(interactive=False) == ["sudo", "-n", *apt]
+    assert init_cli._ffmpeg_install_command(interactive=True) == ["sudo", *apt]
     monkeypatch.setattr("os.geteuid", lambda: 0)
-    assert init_cli._ffmpeg_install_command(interactive=False) == ["apt-get", "install", "-y", "ffmpeg"]
+    assert init_cli._ffmpeg_install_command(interactive=False) == apt

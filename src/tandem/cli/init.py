@@ -339,7 +339,7 @@ def _ensure_ffmpeg(checks: list[probe.Check], *, interactive: bool) -> list[prob
         theme.warn("Skipped", f"`{' '.join(command)}` installs it when you are ready")
         return checks
     theme.busy("Installing ffmpeg", "this can take a few minutes")
-    output = _install_ffmpeg(command)
+    output = _install_ffmpeg(command, interactive=interactive)
     found = probe.check_ffmpeg()
     if found.state == probe.OK:
         theme.ok("ffmpeg installed", found.detail)
@@ -360,7 +360,9 @@ def _ffmpeg_install_command(*, interactive: bool) -> list[str] | None:
         return ["brew", "install", "ffmpeg"] if shutil.which("brew") else None
     if not shutil.which("apt-get"):
         return None
-    command = ["apt-get", "install", "-y", "ffmpeg"]
+    # Through env, not the environment: sudo drops DEBIAN_FRONTEND, and apt's configure step must not stop
+    # on a question (tzdata's time zone, on a fresh machine).
+    command = ["env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "ffmpeg"]
     if os.geteuid() == 0:
         return command
     if not shutil.which("sudo"):
@@ -368,22 +370,29 @@ def _ffmpeg_install_command(*, interactive: bool) -> list[str] | None:
     return ["sudo", *([] if interactive else ["-n"]), *command]
 
 
-def _install_ffmpeg(command: list[str]) -> list[str]:
-    """Run ``command``, and return what it printed. Its outcome is judged by ffmpeg being there after."""
-    import os
+def _install_ffmpeg(command: list[str], *, interactive: bool) -> list[str]:
+    """Run ``command``, and return what it printed. Its outcome is judged by ffmpeg being there after.
+
+    Without a terminal nothing can answer it, so it reads nothing and is stopped after twenty minutes
+    rather than holding init up for good.
+    """
     import subprocess
 
     try:
         proc = subprocess.run(
             command,
+            stdin=None if interactive else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             encoding="utf-8",
             errors="backslashreplace",
-            # apt's configure step must not stop on a question (tzdata's time zone, on a fresh machine).
-            env={**os.environ, "DEBIAN_FRONTEND": "noninteractive"},
+            timeout=None if interactive else 20 * 60,
         )
+    except subprocess.TimeoutExpired as exc:
+        out = exc.output or ""
+        out = out.decode("utf-8", "backslashreplace") if isinstance(out, bytes) else out
+        return [*out.splitlines(), "stopped after 20 minutes"]
     except OSError as exc:
         return [str(exc)]
     return proc.stdout.splitlines()

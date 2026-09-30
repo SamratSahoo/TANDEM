@@ -85,6 +85,12 @@ def isolated_env(tmp_path, monkeypatch):
     for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
         monkeypatch.delenv(name, raising=False)
 
+    # A test that runs `tandem init` on a machine with no ffmpeg (CI's) must not install one with the
+    # machine's package manager: it said what it would run, and nothing ran.
+    from tandem.cli import init as init_cli
+
+    monkeypatch.setattr(init_cli, "_install_ffmpeg", lambda command, *, interactive: ["(not run in tests)"])
+
     # These modules cache what they loaded (the settings, the rig) and say some things once per
     # process; a stale cache leaks one test's config into the next.
     from tandem.core import profiles
