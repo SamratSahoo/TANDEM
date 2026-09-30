@@ -86,6 +86,7 @@ def init(
     theme.rule("checking this machine")
     checks = _preflight(viz_only=viz_only)
     _render_checks(checks)
+    checks = _ensure_ffmpeg(checks, interactive=interactive)
     if not viz_only:
         _stop_on_blocking(checks, interactive=interactive, unapplied=rig_flags)
     theme.blank()
@@ -314,6 +315,78 @@ def _preflight(*, viz_only: bool) -> list[probe.Check]:
     checks = [probe.check_python(), probe.check_platform()]
     checks.append(probe.check_ffmpeg())
     return checks
+
+
+def _ensure_ffmpeg(checks: list[probe.Check], *, interactive: bool) -> list[probe.Check]:
+    """Install ffmpeg when the preflight found none: ``checks`` with its check made again after.
+
+    With Homebrew on a Mac, apt-get on Linux (through sudo unless this is root). At a terminal it is asked
+    first and sudo may ask for a password; without one it is "accept every default", as pixi is, but sudo
+    is never left waiting on a password nobody can type (``sudo -n``). A failed install is said and init
+    goes on: ffmpeg is needed only to join the legs of a teleop hand-off.
+    """
+    at = next((i for i, check in enumerate(checks) if check.name == "ffmpeg"), None)
+    if at is None or checks[at].state == probe.OK:
+        return checks
+    command = _ffmpeg_install_command(interactive=interactive)
+    if command is None:
+        theme.warn("ffmpeg is not installed, and there is no brew or apt-get here to install it", checks[at].hint)
+        return checks
+    theme.blank()
+    theme.info("ffmpeg joins the legs of a teleop hand-off into one trajectory.")
+    theme.info(f"It installs with `{' '.join(command)}`.")
+    if interactive and not typer.confirm("  Install ffmpeg now?", default=True):
+        theme.warn("Skipped", f"`{' '.join(command)}` installs it when you are ready")
+        return checks
+    theme.busy("Installing ffmpeg", "this can take a few minutes")
+    output = _install_ffmpeg(command)
+    found = probe.check_ffmpeg()
+    if found.state == probe.OK:
+        theme.ok("ffmpeg installed", found.detail)
+    else:
+        theme.warn("ffmpeg did not install", f"run `{' '.join(command)}` yourself, then `tandem doctor`")
+        for line in output[-10:]:
+            theme.console().print(f"    {line}", style="faint", markup=False, highlight=False)
+    return [*checks[:at], found, *checks[at + 1:]]
+
+
+def _ffmpeg_install_command(*, interactive: bool) -> list[str] | None:
+    """The package manager's command that installs ffmpeg on this machine, or None when there is none."""
+    import os
+    import shutil
+    import sys
+
+    if sys.platform == "darwin":
+        return ["brew", "install", "ffmpeg"] if shutil.which("brew") else None
+    if not shutil.which("apt-get"):
+        return None
+    command = ["apt-get", "install", "-y", "ffmpeg"]
+    if os.geteuid() == 0:
+        return command
+    if not shutil.which("sudo"):
+        return None
+    return ["sudo", *([] if interactive else ["-n"]), *command]
+
+
+def _install_ffmpeg(command: list[str]) -> list[str]:
+    """Run ``command``, and return what it printed. Its outcome is judged by ffmpeg being there after."""
+    import os
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="backslashreplace",
+            # apt's configure step must not stop on a question (tzdata's time zone, on a fresh machine).
+            env={**os.environ, "DEBIAN_FRONTEND": "noninteractive"},
+        )
+    except OSError as exc:
+        return [str(exc)]
+    return proc.stdout.splitlines()
 
 
 def _runtime_checks(planner: str, *, repair: bool) -> list[probe.Check]:

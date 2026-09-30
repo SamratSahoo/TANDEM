@@ -301,7 +301,64 @@ def test_the_rig_flags_are_written_before_the_planners_checks_can_stop_init(monk
 
 def test_tandems_own_preflight_says_the_rig_flags_were_not_applied(monkeypatch):
     monkeypatch.setattr(init_cli, "_preflight", lambda viz_only: [probe.Check("ffmpeg", probe.FAIL, "not found")])
+    monkeypatch.setattr(init_cli, "_ffmpeg_install_command", lambda interactive: None)
     result = _run("-y", "--robot-host", "172.16.0.9")
     assert result.exit_code == 1
     assert "--robot-host, --robot-type and --camera were not applied" in result.exception.hint
     assert not rig_mod.exists()
+
+
+# --------------------------------------------------------------------------- ffmpeg
+
+
+def _no_ffmpeg(monkeypatch, *, installs: bool) -> list[list[str]]:
+    """A machine with no ffmpeg on PATH, whose package manager is a stand-in that records each command."""
+    ran: list[list[str]] = []
+    missing = probe.Check("ffmpeg", probe.WARN, "not found", group="runtime")
+    monkeypatch.setattr(init_cli, "_preflight", lambda viz_only: [missing])
+    monkeypatch.setattr(init_cli, "_ffmpeg_install_command", lambda interactive: ["pkg", "install", "ffmpeg"])
+
+    def install(command):
+        ran.append(command)
+        return [] if installs else ["E: Unable to locate package ffmpeg"]
+
+    monkeypatch.setattr(init_cli, "_install_ffmpeg", install)
+    after = probe.Check("ffmpeg", probe.OK, "/usr/bin/ffmpeg") if installs else missing
+    monkeypatch.setattr(probe, "check_ffmpeg", lambda: after)
+    return ran
+
+
+def test_init_installs_a_missing_ffmpeg(monkeypatch):
+    ran = _no_ffmpeg(monkeypatch, installs=True)
+    result = _run("-y")
+    assert result.exit_code == 0, result.output
+    assert ran == [["pkg", "install", "ffmpeg"]]
+    assert "ffmpeg installed" in _said(result)
+
+
+def test_an_ffmpeg_that_does_not_install_is_said_and_init_goes_on(monkeypatch):
+    ran = _no_ffmpeg(monkeypatch, installs=False)
+    result = _run("-y")
+    assert result.exit_code == 0, result.output
+    assert ran and "ffmpeg did not install" in _said(result)
+    assert "Unable to locate package ffmpeg" in _said(result)
+
+
+def test_an_ffmpeg_already_there_is_not_installed(monkeypatch):
+    ran = _no_ffmpeg(monkeypatch, installs=True)
+    monkeypatch.setattr(init_cli, "_preflight", lambda viz_only: [probe.Check("ffmpeg", probe.OK, "/usr/bin/ffmpeg")])
+    assert _run("-y").exit_code == 0
+    assert ran == []
+
+
+def test_sudo_is_never_left_waiting_on_a_password_without_a_terminal(monkeypatch):
+    import shutil
+    import sys
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr("os.geteuid", lambda: 1000)
+    assert init_cli._ffmpeg_install_command(interactive=False) == ["sudo", "-n", "apt-get", "install", "-y", "ffmpeg"]
+    assert init_cli._ffmpeg_install_command(interactive=True) == ["sudo", "apt-get", "install", "-y", "ffmpeg"]
+    monkeypatch.setattr("os.geteuid", lambda: 0)
+    assert init_cli._ffmpeg_install_command(interactive=False) == ["apt-get", "install", "-y", "ffmpeg"]

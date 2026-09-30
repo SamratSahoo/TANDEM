@@ -210,7 +210,8 @@ def check_ffmpeg() -> Check:
     return check_tool(
         "ffmpeg",
         group="runtime",
-        hint="Needed to join the legs of a teleop hand-off into one trajectory. apt install ffmpeg",
+        hint="Needed to join the legs of a teleop hand-off into one trajectory. tandem init installs it, or: "
+        + ("brew install ffmpeg" if sys.platform == "darwin" else "sudo apt-get install ffmpeg"),
         required=False,
     )
 
