@@ -622,6 +622,10 @@ class Session:
             self._event("rollout_aborted", error=str(exc))
             loop.interrupted(f"the attempt failed: {type(exc).__name__}: {exc}", outcome="failure")
         finally:
+            # A hand-off is honoured at a phase boundary or a human phase's prompt. One asked for
+            # after the last of those -- in the final robot leg, or in an attempt that ended before
+            # its first (a failed decomposition, a planner that raised) -- ends with the attempt.
+            self._drop_teleop_request("the attempt ended before a step boundary could honour it")
             # Read off the loop's outcome, which it keeps current as it goes, so it is right on
             # every exit path, including the ones that unwind out of the loop as an exception.
             outcome = loop.outcome
@@ -915,6 +919,16 @@ class Session:
             raise _Stopped()
         return "abort"
 
+    def _drop_teleop_request(self, why: str) -> None:
+        """Forget a hand-off request nothing honoured, saying so if there was one."""
+        with self._lock:
+            pending = self._teleop_requested.is_set() or self.teleop_pending
+            self._teleop_requested.clear()
+            self.teleop_pending = False
+        if pending:
+            self._log("tandem", f"the teleop request was dropped: {why}")
+            self._event("teleop_request_dropped", reason=why)
+
     def _check_preempt(self) -> None:
         if self._preempt.is_set():
             self._preempt.clear()
@@ -961,6 +975,11 @@ class Session:
             # Typed at the prompt, it is both: there is no separate label to keep.
             self.task = text
             self.instruction = text
+        # A hand-off asked for while no attempt could honour it -- at the label or task prompt -- is
+        # not a request for this one. Left set, the new attempt's first phase boundary took it and
+        # lent the arm before the robot had moved at all. Dropped here, as the prompt is answered,
+        # not when the session thread starts the attempt: a request made just after this is for it.
+        self._drop_teleop_request("it was asked for before this attempt started")
         self._task_ready.set()
 
     def complete_human_phase(self) -> None:

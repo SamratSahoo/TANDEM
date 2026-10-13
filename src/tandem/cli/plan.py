@@ -15,7 +15,6 @@ instruction) is only available *before* the arm moves, so being able to ask befo
 
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
 
@@ -57,6 +56,7 @@ def plan(
     from tandem import api
     from tandem.planning import objects as objects_mod
     from tandem.planning.grounding import descriptions_for
+    from tandem.planning.llm import run_blocking
     from tandem.planning.record import recording_to
     from tandem.planning.symbols import describe
 
@@ -76,7 +76,7 @@ def plan(
         return await api._decompose(picture, goal, names, table, cfg, caps)
 
     with recording_to(save_vlm_io):
-        built = asyncio.run(run())
+        built = run_blocking(run())
 
     if as_json:
         # Written straight to stdout, not through the console: rich would wrap and colour it, and

@@ -632,6 +632,7 @@ class PhaseLoop:
             self._detected_goal = scene.detected_goal
             return True
 
+        from tandem.planning.llm import run_blocking
         from tandem.planning.plan import build_plan
         from tandem.planning.record import recording_to
 
@@ -649,8 +650,6 @@ class PhaseLoop:
             self._end("failure", "invention", reason)
             return False
 
-        import asyncio
-
         feedback = "\n".join(self._replan_feedback) or None
         self.operator.rolling()
         if feedback:
@@ -662,7 +661,7 @@ class PhaseLoop:
             self.events.log(f"decomposing the task with {self.cfg.proposal_model}")
         try:
             with recording_to(self._vlm_dir):
-                plan = asyncio.run(
+                plan = run_blocking(
                     build_plan(
                         image,
                         self._task,
@@ -1621,15 +1620,14 @@ class PhaseLoop:
         here anyway, the trial ends at ``verification`` (`_verification_failed`) and the error goes
         on up, loudly.
         """
-        import asyncio
-
         from tandem.planners.sdk import UnsupportedVerb
+        from tandem.planning.llm import run_blocking
         from tandem.planning.record import recording_to
 
         try:
             image = frame()
             with recording_to(self._vlm_dir):
-                ok, verdicts = asyncio.run(verify(image))
+                ok, verdicts = run_blocking(verify(image))
         except UnsupportedVerb as exc:
             self._verification_failed(
                 f"this trial cannot be verified: {exc.message}" + (f" {exc.hint}" if exc.hint else "")

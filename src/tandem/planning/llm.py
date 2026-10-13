@@ -21,9 +21,12 @@ plan that needed one repair with none, and fail a trial the method would have sa
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import contextvars
 import json
 import logging
-from collections.abc import Awaitable, Callable
+import threading
+from collections.abc import Awaitable, Callable, Coroutine
 from functools import cache
 from typing import Any, TypeVar
 
@@ -130,6 +133,57 @@ def gemini_client():
             hint="Run `tandem config set-gemini-key`.",
         )
     return genai.Client(api_key=key)
+
+
+# The one event loop every blocking model call runs on, on a daemon thread of its own.
+#
+# Not `asyncio.run` per call. The client above is cached for the process, and with it the SDK's httpx
+# connection pool -- and a pooled connection belongs to the event loop that opened it. `asyncio.run`
+# closes its loop on the way out, so the next call on a fresh loop picked that connection up and
+# failed with "RuntimeError: Event loop is closed". The failure discarded the connection, so the call
+# after it worked: every other query failed, a task decomposition one trial and a human step's check
+# (which an error passes unchecked) the next. One loop for the life of the process keeps the pool on
+# a loop that never closes.
+_loop: asyncio.AbstractEventLoop | None = None
+_loop_lock = threading.Lock()
+
+
+def _shared_loop() -> asyncio.AbstractEventLoop:
+    global _loop
+    with _loop_lock:
+        if _loop is None:
+            loop = asyncio.new_event_loop()
+            threading.Thread(target=loop.run_forever, name="tandem-llm-loop", daemon=True).start()
+            _loop = loop
+        return _loop
+
+
+def run_blocking(coro: Coroutine[Any, Any, _T]) -> _T:
+    """Run ``coro`` to completion on tandem's shared model-call loop, blocking until it is done.
+
+    What synchronous code calls in place of ``asyncio.run`` for anything that queries the model.
+    The coroutine runs in a copy of the caller's context, as it would under ``asyncio.run``. Not
+    for use from the shared loop's own thread, which would wait on itself forever.
+    """
+    loop = _shared_loop()
+    context = contextvars.copy_context()
+    done: concurrent.futures.Future = concurrent.futures.Future()
+
+    def start() -> None:
+        task = loop.create_task(coro, context=context)
+
+        def finish(task: asyncio.Task) -> None:
+            if task.cancelled():
+                done.cancel()
+            elif task.exception() is not None:
+                done.set_exception(task.exception())
+            else:
+                done.set_result(task.result())
+
+        task.add_done_callback(finish)
+
+    loop.call_soon_threadsafe(start)
+    return done.result()
 
 
 async def query_json(
