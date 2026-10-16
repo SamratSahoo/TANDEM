@@ -724,6 +724,49 @@ def test_a_proposal_that_never_validates_raises_the_last_reason():
     assert len(client.prompts) == 3, "every attempt should have been used"
 
 
+class _PooledGemini(_FakeGemini):
+    """A client that, like the SDK's httpx pool, keeps the connection its first call opened.
+
+    The connection belongs to the loop that opened it, so a later call on another loop fails the way
+    the real one did once that loop was closed -- and drops the connection, so the call after works.
+    """
+
+    def __init__(self, responses):
+        super().__init__(responses)
+        self._connection_loop = None
+
+    async def generate_content(self, model, contents, config):
+        loop = asyncio.get_running_loop()
+        if self._connection_loop is not None and self._connection_loop is not loop:
+            closed = self._connection_loop.is_closed()
+            self._connection_loop = None
+            if closed:
+                raise RuntimeError("Event loop is closed")
+        self._connection_loop = loop
+        return await super().generate_content(model, contents, config)
+
+
+def test_model_queries_made_one_after_another_do_not_fail_on_a_closed_loop():
+    # The bug seen live: each query ran under its own `asyncio.run`, and every other one -- a trial's
+    # decomposition, or the check of a person's step -- failed with "Event loop is closed".
+    client = _PooledGemini([json.dumps(PLAN_RESPONSE)] * 3)
+    with mock.patch.object(llm, "gemini_client", lambda: client):
+        for _ in range(3):
+            spec = llm.run_blocking(
+                llm.query_json("PROMPT", lambda d: parse(d), model="m", schema={}, max_attempts=1)
+            )
+            assert [p.executor for p in spec.phases] == ["robot", "human", "robot"]
+    assert len(client.prompts) == 3
+
+
+def test_run_blocking_raises_what_the_coroutine_raised():
+    async def fails():
+        raise ProposalError("no plan")
+
+    with pytest.raises(ProposalError, match="no plan"):
+        llm.run_blocking(fails())
+
+
 # --- config ---------------------------------------------------------------------------------------
 
 

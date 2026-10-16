@@ -93,7 +93,9 @@ def plan_task(
             "plan_task was called inside a running event loop, which it cannot block.",
             hint="Use `await tandem.plan_task_async(...)` there instead; it takes the same arguments.",
         )
-    return asyncio.run(
+    from tandem.planning.llm import run_blocking
+
+    return run_blocking(
         plan_task_async(
             instruction,
             image,

@@ -594,6 +594,30 @@ def test_a_second_return_control_click_does_not_end_the_next_handoff(phase_sessi
     assert wait_for(driver.recording(2)), "the second hand-off ended before the person could record anything"
 
 
+def test_a_teleop_request_nothing_honoured_does_not_hand_off_the_next_attempt(phase_session, teleop_enabled):
+    """A hand-off asked for where no attempt could honour it is dropped, not carried into the next one.
+
+    Nothing cleared the request: one asked for at the task prompt, or late in an attempt that then
+    ended, was taken at the next attempt's first phase boundary, and the arm was lent before the robot
+    had moved at all.
+    """
+    session, backends, _ = phase_session()
+    events: list[dict] = []
+    session.subscribe(events.append)
+    states: list[str] = []
+    session.subscribe(lambda e: states.append(e.get("state")) if e.get("type") == "state" else None)
+
+    session.request_teleop()  # pressed at the task prompt, where nothing can take the arm
+    session.next_task()
+
+    # The robot phase runs, and the attempt reaches the human phase without having lent the arm.
+    assert wait_for(lambda: session.state is State.AWAITING_HUMAN_PHASE), f"stuck in {session.state}"
+    assert len(backends[-1].legs) == 1, "the robot phase never ran"
+    assert State.HANDING_OFF.value not in states and State.TELEOP_HANDOFF.value not in states
+    assert not session.summary()["teleop_pending"]
+    assert any(e.get("type") == "event" and e.get("event") == "teleop_request_dropped" for e in events)
+
+
 def test_a_preempt_does_not_answer_the_next_human_phase_on_the_persons_behalf(phase_session):
     """`preempt` used to set the same flag a person's "done" sets, and nothing cleared it.
 

@@ -17,6 +17,7 @@ re-warmed, or handed off to a teleop process mid-task.
     {"event":"session_end"}
 
     {"event":"teleop_switch_pending"}                  SIGUSR1 seen; finishing the plan step
+    {"event":"teleop_request_dropped","reason":"…"}    the attempt ended before honouring it
     {"event":"teleop_handoff_start"}                   step done; releasing robot + cameras
     {"event":"teleop_handoff_warning","message":"…"}
     {"event":"awaiting_teleop_resume"}                 released; blocked on "resume"
@@ -66,6 +67,7 @@ KNOWN = frozenset(
         "awaiting_label",
         "labeled",
         "teleop_switch_pending",
+        "teleop_request_dropped",
         "teleop_handoff_start",
         "teleop_handoff_warning",
         "teleop_handoff_done",
