@@ -170,7 +170,16 @@ def run_blocking(coro: Coroutine[Any, Any, _T]) -> _T:
     done: concurrent.futures.Future = concurrent.futures.Future()
 
     def start() -> None:
-        task = loop.create_task(coro, context=context)
+        # A task copies the context it is created in. Created inside `context.run`, that is the
+        # caller's, as `create_task(..., context=)` would give but does not take before Python 3.11.
+        try:
+            task = context.run(loop.create_task, coro)
+        except BaseException as exc:
+            # Raised here, on the loop's thread, it would only be logged, and the caller would wait
+            # on `done` forever.
+            coro.close()
+            done.set_exception(exc)
+            return
 
         def finish(task: asyncio.Task) -> None:
             if task.cancelled():
